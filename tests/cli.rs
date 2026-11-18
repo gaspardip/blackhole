@@ -294,7 +294,7 @@ fn regeneration_waits_for_the_lock() {
         let root = dir.path();
         fs::write(root.join("a.py"), "#noqa").unwrap();
         let before = baseline(root, &[("a.py", 2)]);
-        let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+        let lock = fs::File::open(root).unwrap();
         lock.lock().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_blackhole"));
         command.current_dir(root).arg("ledger");
@@ -334,7 +334,7 @@ fn the_root_is_found_once() {
     fs::write(sub.join("a.py"), "#noqa").unwrap();
     baseline(root, &[("sub/a.py", 2)]);
     let inner = baseline(&sub, &[("a.py", 2)]);
-    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    let lock = fs::File::open(root).unwrap();
     lock.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
         .current_dir(&sub)
@@ -356,23 +356,63 @@ fn the_root_is_found_once() {
 
 #[cfg(unix)]
 #[test]
-fn a_linked_lock_is_refused() {
+fn the_lock_is_not_a_file() {
+    let dir = tempdir().unwrap();
+    let (meta, root) = (dir.path().join("meta"), dir.path().join("tree"));
+    let at = |path: &Path| path.to_str().unwrap().to_owned();
+    git(
+        dir.path(),
+        &["init", "-q", "--separate-git-dir", &at(&meta), &at(&root)],
+    );
+    fs::write(root.join("a.py"), "").unwrap();
+    let victim = dir.path().join("victim");
+    fs::write(&victim, "kept").unwrap();
+    let absent = dir.path().join("absent");
+    // A file of the old lock's name, wherever it points, is no part of the lock.
+    std::os::unix::fs::symlink(&absent, root.join("blackhole.lock")).unwrap();
+    regenerate(&root, 0);
+    assert!(!meta.join("blackhole.lock").try_exists().unwrap());
+    assert!(!absent.try_exists().unwrap());
+    fs::remove_file(root.join("blackhole.lock")).unwrap();
+    std::os::unix::fs::symlink(&victim, meta.join("blackhole.lock")).unwrap();
+    regenerate(&root, 0);
+    assert_eq!(fs::read(&victim).unwrap(), b"kept");
+    let mut left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, [".git", "a.py"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_entry_on_the_way_is_not_a_directory_that_is_gone() {
     let dir = repo();
     let root = dir.path();
-    let other = tempdir().unwrap();
-    let victim = other.path().join("victim");
-    fs::write(&victim, "kept").unwrap();
-    fs::write(root.join("a.py"), "#noqa").unwrap();
-    let before = baseline(root, &[("a.py", 2)]);
-    std::os::unix::fs::symlink(&victim, root.join(".git/blackhole.lock")).unwrap();
-    regenerate(root, 2);
-    assert_eq!(fs::read(&victim).unwrap(), b"kept");
-    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
-    let absent = other.path().join("absent");
-    fs::remove_file(root.join(".git/blackhole.lock")).unwrap();
-    std::os::unix::fs::symlink(&absent, root.join(".git/blackhole.lock")).unwrap();
-    regenerate(root, 2);
-    assert!(!absent.try_exists().unwrap());
+    baseline(root, &[("gone/deep/file.py", 1)]);
+    let stale =
+        format!("gone/deep/file.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    fs::write(root.join("gone"), "").unwrap();
+    assert_eq!(
+        check(root, &["gone/deep/file.py"], 1).stdout,
+        stale.as_bytes()
+    );
+    fs::remove_file(root.join("gone")).unwrap();
+    std::os::unix::fs::symlink("../old-location", root.join("gone")).unwrap();
+    check(root, &["gone/deep/file.py"], 2);
+}
+
+#[test]
+fn a_path_of_many_missing_directories_is_an_error() {
+    let dir = repo();
+    let root = dir.path();
+    check(root, &[&format!("{}f.py", "x/".repeat(60_000))], 2);
+    // A name too long to look at is not a directory that is gone, even with a row under it.
+    let long = format!("gone/{}f.py", "x/".repeat(60_000));
+    baseline(root, &[(&long, 1)]);
+    fs::write(root.join("gone"), "").unwrap();
+    check(root, &[&long], 2);
 }
 
 #[test]
@@ -621,7 +661,7 @@ fn filing_waits_for_the_lock() {
     let dir = repo();
     let root = dir.path();
     fs::write(root.join("bad.py"), "#noqa").unwrap();
-    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    let lock = fs::File::open(root).unwrap();
     lock.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
         .current_dir(root)
