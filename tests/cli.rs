@@ -215,15 +215,24 @@ fn a_selection_keeps_the_rows_of_files_that_are_gone() {
     let root = dir.path();
     fs::create_dir(root.join("sub")).unwrap();
     fs::write(root.join("sub/clean.py"), "").unwrap();
+    fs::create_dir(root.join("empty")).unwrap();
     fs::write(root.join("other.py"), "").unwrap();
     baseline(
         root,
-        &[("gone.py", 1), ("sub/gone.py", 1), ("subway/gone.py", 1)],
+        &[
+            ("empty/gone.py", 1),
+            ("gone.py", 1),
+            ("sub/gone.py", 1),
+            ("subway/gone.py", 1),
+        ],
     );
     let stale = format!("sub/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
     assert_eq!(check(root, &["sub"], 1).stdout, stale.as_bytes());
     assert_eq!(check(&root.join("sub"), &["."], 1).stdout, stale.as_bytes());
     assert_eq!(check(root, &["other.py"], 0).stdout, b"");
+    let stale = format!("empty/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["empty"], 1).stdout, stale.as_bytes());
+    check(root, &["nowhere"], 2);
 }
 
 #[test]
@@ -295,6 +304,35 @@ fn regeneration_waits_for_the_lock() {
             format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
         );
     }
+}
+
+#[test]
+fn the_root_is_found_once() {
+    let dir = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("a.py"), "#noqa").unwrap();
+    baseline(root, &[("sub/a.py", 2)]);
+    let inner = baseline(&sub, &[("a.py", 2)]);
+    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(&sub)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    // A repository that appears under the tree while the writer waits must not become its root.
+    git(&sub, &["init", "-q"]);
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read(sub.join(".blackhole/ledger")).unwrap(), inner);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
 }
 
 #[cfg(unix)]

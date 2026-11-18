@@ -41,11 +41,15 @@ fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {
         .map_err(io::Error::other)
 }
 
+// Found once per run: a repository that appears under the tree later must not move the ledger.
+pub(crate) fn root() -> io::Result<PathBuf> {
+    fs::canonicalize(locate(&env::current_dir()?, "--show-toplevel")?)
+}
+
 // Held while the ledger is read and replaced, so two runs cannot interleave.
-pub(crate) fn lock() -> io::Result<fs::File> {
+pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
     // The lock follows the tree that holds the ledger, whichever repository the caller stands in.
-    let root = locate(&env::current_dir()?, "--show-toplevel")?;
-    let path = locate(&root, "--absolute-git-dir")?.join("blackhole.lock");
+    let path = locate(root, "--absolute-git-dir")?.join("blackhole.lock");
     // Nothing is written through the handle, so a link swapped in after this look loses no data.
     if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
         return Err(io::Error::other(format!(
@@ -87,39 +91,24 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>, Vec<PathBuf>)> {
+pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, Vec<PathBuf>)> {
     let cwd = env::current_dir()?;
-    let root = fs::canonicalize(locate(&cwd, "--show-toplevel")?)?;
     let paths = paths
         .iter()
         .map(|p| resolve(&cwd.join(p)))
         .collect::<io::Result<Vec<_>>>()?;
-    let mut matched = vec![false; paths.len()];
     let mut selected = Vec::new();
-    let names = git(&root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
+    let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
     for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
         let name = std::str::from_utf8(bytes).map_err(|_| {
             io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
         })?;
         let file = root.join(name);
-        let mut include = paths.is_empty();
-        for (path, hit) in paths.iter().zip(&mut matched) {
-            if file.starts_with(path) {
-                *hit = true;
-                include = true;
-            }
-        }
-        if include {
+        if paths.is_empty() || paths.iter().any(|path| file.starts_with(path)) {
             selected.push(name.to_owned());
         }
     }
-    if let Some(i) = matched.iter().position(|&hit| !hit) {
-        return Err(io::Error::other(format!(
-            "no files match {}",
-            paths[i].display().to_string().escape_default()
-        )));
-    }
     selected.sort_unstable();
     selected.dedup();
-    Ok((root, selected, paths))
+    Ok((selected, paths))
 }
