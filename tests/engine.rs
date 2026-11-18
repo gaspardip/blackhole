@@ -96,6 +96,7 @@ fn a_directive_too_long_to_read_is_reported() {
             format!("# shellcheck shell=bash{}disable=SC2086", " ".repeat(4096)),
         ),
         ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
+        ("a.go", format!("//{}nolint\n", " ".repeat(4096))),
     ] {
         let found = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(found.len(), 1, "{path}");

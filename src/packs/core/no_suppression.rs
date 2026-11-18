@@ -66,7 +66,6 @@ const PATTERNS: &[(&[&str], &[&str])] = &[
     (
         &["go"],
         &[
-            "//~nolint",
             "//~lint:ignore",
             "//~lint:file-ignore",
             "#~nosec",
@@ -234,13 +233,7 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     }
 }
 
-fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
-    if pattern == "//~nolint" {
-        return Ok(text.strip_prefix("//").is_some_and(|tail| {
-            tail.trim_start_matches(|c: char| c == '/' || c.is_whitespace())
-                .starts_with("nolint")
-        }));
-    }
+fn matches(text: &str, pattern: &str) -> Result<bool, End> {
     let mut rest = text;
     let mut tokens = pattern.chars();
     while let Some(token) = tokens.next() {
@@ -248,7 +241,7 @@ fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
             let window = reach(rest);
             let line = window.split('\n').next().unwrap_or(window);
             for (at, _) in line.char_indices() {
-                if matches(&rest[at..], tokens.as_str(), kind)? {
+                if matches(&rest[at..], tokens.as_str())? {
                     return Ok(true);
                 }
             }
@@ -266,9 +259,6 @@ fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
         }
         rest = after;
         if !gaps {
-            if matches!(kind, "java" | "cs") && token.is_ascii_alphanumeric() {
-                rest = rest.trim_start_matches(|c| ignorable(c, kind));
-            }
             let Some(after) = rest.strip_prefix(token) else {
                 return Ok(false);
             };
@@ -279,16 +269,11 @@ fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
 }
 
 // Whitespace and comments may sit between any two tokens of an attribute.
-fn trivia(text: &str) -> Result<&str, End> {
-    skip_trivia(text, true)
-}
-
-fn skip_trivia(mut text: &str, unicode_space: bool) -> Result<&str, End> {
+fn trivia(mut text: &str) -> Result<&str, End> {
     loop {
         // Rust reads the two direction marks as whitespace too.
         text = text.trim_start_matches(|c: char| {
-            c.is_ascii_whitespace()
-                || unicode_space && (c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}'))
+            c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}')
         });
         if text.starts_with("//") {
             text = text.split_once('\n').ok_or(End)?.1;
@@ -360,7 +345,7 @@ fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End>
     let mut depth = 1;
     let mut rest = body;
     while depth > 0 {
-        rest = skip_trivia(rest, false)?;
+        rest = trivia(rest)?;
         let mut chars = rest.chars();
         match chars.next() {
             Some(c) if !c.is_ascii() => {
@@ -453,6 +438,20 @@ fn encoding(text: &str, hits: &mut Findings) {
     }
 }
 
+// golangci-lint drops every leading slash and space of a comment before it looks for the directive.
+fn nolint(text: &str, hits: &mut Findings) {
+    for (start, _) in text.match_indices("//") {
+        let rest = &text[start..];
+        let window = reach(rest);
+        let comment = window.trim_start_matches(|c: char| c == '/' || c.is_whitespace());
+        if comment.starts_with("nolint") {
+            hits.report(start, None);
+        } else if comment.is_empty() && window.len() < rest.len() {
+            hits.report(start, Some("directive too long to read"));
+        }
+    }
+}
+
 // Unicode General_Category=Cf and the additional ISO controls ignored by Java identifiers.
 fn ignorable(c: char, kind: &str) -> bool {
     matches!(u32::from(c), 0xad | 0x600..=0x605 | 0x61c | 0x6dd | 0x70f | 0x890..=0x891 |
@@ -491,9 +490,9 @@ fn escape(text: &str) -> Option<(char, usize)> {
     Some((char::from_u32(scalar)?, len + next))
 }
 
-// Java and C# read an escape as the character itself before they read an annotation.
+// Java and C# read an escape as the character itself before they read an annotation, and drop format characters from a name.
 // Returns the translated text and, for each of its bytes, the offset it came from.
-fn unescape(text: &str) -> (String, Vec<usize>) {
+fn unescape(text: &str, kind: &str) -> (String, Vec<usize>) {
     let mut out = String::new();
     let mut origin = Vec::new();
     let mut rest = text;
@@ -502,7 +501,7 @@ fn unescape(text: &str) -> (String, Vec<usize>) {
             ("\\\\".to_owned(), 2)
         } else {
             let (ch, len) = escape(rest).unwrap_or((first, first.len_utf8()));
-            (ch.to_string(), len)
+            (String::from_iter((!ignorable(ch, kind)).then_some(ch)), len)
         };
         out.push_str(&piece);
         origin.resize(out.len(), text.len() - rest.len());
@@ -590,7 +589,7 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
         return;
     }
     let (mut text, origin) = if matches!(kind, "java" | "cs") {
-        unescape(ctx.text)
+        unescape(ctx.text, kind)
     } else {
         (ctx.text.to_owned(), Vec::new())
     };
@@ -598,11 +597,14 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     if matches!(kind, "py" | "pyi") {
         encoding(&text, hits);
     }
+    if kind == "go" {
+        nolint(&text, hits);
+    }
     let patterns: Vec<_> = listed(kind).collect();
     for (offset, first) in text.char_indices() {
         let mut found = None;
         for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
-            match matches(&text[offset..], pattern, kind) {
+            match matches(&text[offset..], pattern) {
                 Ok(true) => {
                     found = Some(None);
                     break;
