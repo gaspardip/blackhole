@@ -26,6 +26,36 @@ const CASES: &[Case] = &[
         snippet: "function cause(): { cause: unknown } { return { cause: input }; }",
         reporting: "ts/no-known-value-widening",
     },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-01.ts",
+        snippet: "type ImportedValue = unknown;",
+        reporting: "ts/no-unknown-type-aliases",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-06.ts",
+        snippet: "type Value = unknown; function generic<Value>(): Value { return value; }",
+        reporting: "ts/no-unknown-type-aliases",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-07.ts",
+        snippet: "type Key = unknown; type Mapped<Input> = { [Key in keyof Input]: () => Key };",
+        reporting: "ts/no-unknown-type-aliases",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-08.ts",
+        snippet: "type Item = unknown; type Unpacked<Input> = Input extends Promise<infer Item> ? () => Item : never;",
+        reporting: "ts/no-unknown-type-aliases",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-13.ts",
+        snippet: "type Value = unknown; function outer() { type Value = User; function load(): Value { return user; } }",
+        reporting: "ts/no-unknown-type-aliases",
+    },
 ];
 
 #[test]
