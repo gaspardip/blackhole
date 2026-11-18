@@ -47,17 +47,14 @@ pub(crate) fn root() -> io::Result<PathBuf> {
     let top = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
         .map_err(io::Error::other)?;
     let top = fs::canonicalize(top)?;
-    for ancestor in cwd.ancestors() {
-        match ancestor.join(".git").symlink_metadata() {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+    // `core.worktree` can send git anywhere, so its answer must be where the nearest `.git` sits.
+    for dir in cwd.ancestors() {
+        match dir.join(".git").symlink_metadata() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
-            Ok(_) => {}
+            Ok(_) if fs::canonicalize(dir)? == top => return Ok(top),
+            Ok(_) => break,
         }
-
-        if fs::canonicalize(ancestor)? == top {
-            return Ok(top);
-        }
-        break;
     }
     Err(io::Error::other("checkout root mismatch"))
 }

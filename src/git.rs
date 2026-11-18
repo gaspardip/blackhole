@@ -16,13 +16,10 @@ pub(crate) fn command() -> Command {
     }
     command.args([
         "--no-replace-objects",
+        // The checkout's configuration must not name a program for git to run or a file that sways a verdict.
         "--no-lazy-fetch",
-        "--no-optional-locks",
-        "--no-pager",
         "-c",
         "core.fsmonitor=false",
-        "-c",
-        "core.hooksPath=/dev/null",
         "-c",
         "core.attributesFile=/dev/null",
     ]);
@@ -244,18 +241,5 @@ impl Drop for Batch {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn git_disables_checkout_fsmonitor() {
-        let git = super::command();
-        let args: Vec<_> = git.get_args().collect();
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["-c", "core.fsmonitor=false"])
-        );
     }
 }

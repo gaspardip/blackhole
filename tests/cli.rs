@@ -592,6 +592,20 @@ fn ci_reads_attributes_from_the_base_commit() {
     // Git compares a file line by line, and so sees this rename, only while its attributes call it text.
     fs::write(root.join(".gitattributes"), "*.py -diff\n").unwrap();
     run(root, &ci, 0);
+    // Nor do the attributes of a file the configuration names: that is policy from outside both commits.
+    fs::remove_file(root.join(".gitattributes")).unwrap();
+    let outside = tempdir().unwrap();
+    let attributes = outside.path().join("attributes");
+    fs::write(&attributes, "*.py -diff\n").unwrap();
+    git(
+        root,
+        &[
+            "config",
+            "core.attributesFile",
+            attributes.to_str().unwrap(),
+        ],
+    );
+    run(root, &ci, 0);
 }
 
 #[cfg(unix)]
@@ -784,6 +798,14 @@ fn configured_worktree_must_resolve_to_the_checkout() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     let expected = check(root, &[], 1).stdout;
     assert_eq!(check(&sub, &[], 1).stdout, expected);
+    let split = tempdir().unwrap();
+    git(
+        split.path(),
+        &["init", "-q", "--separate-git-dir", "store", "tree"],
+    );
+    let tree = split.path().join("tree");
+    fs::write(tree.join("a.py"), "#noqa").unwrap();
+    assert_eq!(check(&tree, &[], 1).stdout, expected);
     for value in ["..", "../."] {
         git(root, &["config", "core.worktree", value]);
         assert_eq!(check(&sub, &[], 1).stdout, expected);
@@ -796,4 +818,54 @@ fn configured_worktree_must_resolve_to_the_checkout() {
         );
         assert_eq!(fs::read_dir(other.path()).unwrap().count(), 1);
     }
+}
+
+// A program the checkout's configuration names, which leaves a mark outside the checkout when it runs.
+#[cfg(unix)]
+fn program(root: &Path, marker: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(".git/program.sh");
+    fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_configured_monitor_does_not_run() {
+    let outside = tempdir().unwrap();
+    let marker = outside.path().join("ran");
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    git(root, &["add", "a.py"]);
+    git(root, &["config", "core.fsmonitor", &program(root, &marker)]);
+    check(root, &[], 1);
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_object_is_not_fetched() {
+    let outside = tempdir().unwrap();
+    let marker = outside.path().join("ran");
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    commit(root);
+    // Git asks a promisor remote for an object it lacks, with the program the configuration names.
+    for (key, value) in [
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.url", root.to_str().unwrap()),
+        ("remote.origin.uploadpack", &program(root, &marker)),
+    ] {
+        git(root, &["config", key, value]);
+    }
+    run(
+        root,
+        &["ci", "--base", &"1".repeat(40), "--head", "HEAD"],
+        2,
+    );
+    assert!(!marker.exists());
 }
