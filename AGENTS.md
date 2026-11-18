@@ -10,6 +10,8 @@ Rules that coding agents cannot talk their way around. A Rust CLI (`blackhole`, 
 
 Once per clone: `git config core.hooksPath .githooks`. The hooks need the list of names from outside the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`) and block the commit without it.
 
+Git 2.45 or newer: every git call the tool makes passes `--no-lazy-fetch`, and an older git stops on the unknown option.
+
 ## The name guard
 
 A private list of names must never appear in this repository: file contents, file names, commit messages, branch names, tags, pull request and issue text.
