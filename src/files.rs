@@ -14,49 +14,45 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn existing(path: &Path) -> io::Result<PathBuf> {
-    let Some((parent, name)) = path.parent().zip(path.file_name()) else {
-        return fs::canonicalize(path);
+    let mut gone = Vec::new();
+    let mut at = path;
+    let mut found = loop {
+        let Some((parent, name)) = at.parent().zip(at.file_name()) else {
+            break fs::canonicalize(at)?;
+        };
+        gone.push(name);
+        match fs::canonicalize(parent) {
+            // A link that points nowhere is an entry, not a directory that is gone.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) && fs::symlink_metadata(parent).is_err() =>
+            {
+                at = parent;
+            }
+            dir => break dir?,
+        }
     };
-    match fs::canonicalize(parent) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => existing(parent),
-        found => found,
-    }
-    .map(|dir| dir.join(name))
-}
-
-fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {
-    let output = git(dir, &["rev-parse", what])?;
-    std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
-        .map(PathBuf::from)
-        .map_err(io::Error::other)
+    found.extend(gone.into_iter().rev());
+    Ok(found)
 }
 
 // Found once per run: a repository that appears under the tree later must not move the ledger.
 pub(crate) fn root() -> io::Result<PathBuf> {
-    fs::canonicalize(locate(&env::current_dir()?, "--show-toplevel")?)
+    let output = git(&env::current_dir()?, &["rev-parse", "--show-toplevel"])?;
+    let top = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
+        .map_err(io::Error::other)?;
+    fs::canonicalize(top)
 }
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.
+// The lock is on the root itself: a lock file would have to live in the tree or in a git directory that can be anywhere.
 pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
-    // The lock follows the tree that holds the ledger, whichever repository the caller stands in.
-    let path = locate(root, "--absolute-git-dir")?.join("blackhole.lock");
-    let mut open = fs::OpenOptions::new();
-    // Creation never follows a link and an existing lock is opened without creating, so no file appears outside the repository.
-    let file = match open.write(true).create_new(true).open(&path) {
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            // Nothing is written through the handle, so a link swapped in after this look loses no data.
-            if !fs::symlink_metadata(&path)?.is_file() {
-                return Err(io::Error::other(format!(
-                    "{} must be a regular file",
-                    path.display()
-                )));
-            }
-            open.create_new(false).open(&path)?
-        }
-        other => other?,
-    };
-    file.lock()?;
-    Ok(file)
+    // shortcut: Windows cannot open a directory this way, lock a file under the root when Windows is supported
+    let dir = fs::File::open(root)?;
+    dir.lock()?;
+    Ok(dir)
 }
 
 // A file can go away or turn into a directory between the listing and the read, and then it has nothing to check.
