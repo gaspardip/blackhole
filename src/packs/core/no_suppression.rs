@@ -276,11 +276,16 @@ fn matches(text: &str, pattern: &str) -> Result<bool, End> {
 }
 
 // Whitespace and comments may sit between any two tokens of an attribute.
-fn trivia(mut text: &str) -> Result<&str, End> {
+fn trivia(text: &str) -> Result<&str, End> {
+    skip_trivia(text, true)
+}
+
+fn skip_trivia(mut text: &str, unicode_space: bool) -> Result<&str, End> {
     loop {
         // Rust reads the two direction marks as whitespace too.
         text = text.trim_start_matches(|c: char| {
-            c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}')
+            c.is_ascii_whitespace()
+                || unicode_space && (c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}'))
         });
         if text.starts_with("//") {
             text = text.split_once('\n').ok_or(End)?.1;
@@ -352,9 +357,13 @@ fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End>
     let mut depth = 1;
     let mut rest = body;
     while depth > 0 {
-        rest = trivia(rest)?;
+        rest = skip_trivia(rest, false)?;
         let mut chars = rest.chars();
         match chars.next() {
+            Some(c) if !c.is_ascii() => {
+                hits.report(start, Some("unreadable attribute"));
+                return Ok(());
+            }
             Some('[') => depth += 1,
             Some(']') => depth -= 1,
             Some(',') if conditional => {
