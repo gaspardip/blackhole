@@ -253,16 +253,16 @@ fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
             };
         }
         let gaps = matches!(token, '~' | ' ');
+        if matches!(kind, "java" | "cs") {
+            // A name ends where its letters do, so these fall away around every token; a byte order mark before a gap is the gap.
+            rest = rest.trim_start_matches(|c| ignorable(c, kind) && !(gaps && c == '\u{feff}'));
+        }
         let after = skip(rest, gaps)?;
         if token == ' ' && after.len() == rest.len() {
             return Ok(false);
         }
         rest = after;
         if !gaps {
-            // Inside a name the character is dropped; between two words a byte order mark is still the gap.
-            if matches!(kind, "java" | "cs") && token.is_ascii_alphanumeric() {
-                rest = rest.trim_start_matches(|c| ignorable(c, kind));
-            }
             let Some(after) = rest.strip_prefix(token) else {
                 return Ok(false);
             };

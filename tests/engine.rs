@@ -178,12 +178,12 @@ fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
         registry(),
         [(
             "a.cs",
-            "#pragma\u{feff}warning disable CS0168\n[Suppress\u{feff}Message(\"x\", \"y\")]\n"
+            "#pragma\u{feff}warning disable CS0168\n[Suppress\u{feff}Message(\"x\", \"y\")]\n#pragma\u{200b} warning\u{200b}\u{feff}\u{200b}disable CS0168\n#nullable\u{ad} disable\n"
                 .as_bytes(),
         )],
     );
     assert_eq!(
         found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
-        [(1, 1), (2, 2)]
+        [(1, 1), (2, 2), (3, 1), (4, 1)]
     );
 }
