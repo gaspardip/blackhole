@@ -506,12 +506,45 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
         encoding(&text, hits);
     }
     let patterns: Vec<_> = listed(kind).collect();
-    for (offset, first) in text.char_indices() {
-        if patterns
+    if let Some(comments) = ctx.comments {
+        for comment in comments {
+            let span = comment.span;
+            scan_patterns(
+                span.source_text(&text),
+                &patterns,
+                span.start as usize,
+                &[],
+                hits,
+            );
+        }
+    } else {
+        scan_patterns(&text, &patterns, 0, &origin, hits);
+    }
+}
+
+pub(crate) fn suppressed_comment(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let patterns: Vec<_> = listed("ts").collect();
+    pattern_offsets(&text, &patterns).next().is_some()
+}
+
+fn pattern_offsets<'a>(text: &'a str, patterns: &'a [&str]) -> impl Iterator<Item = usize> + 'a {
+    text.char_indices().filter_map(move |(offset, first)| {
+        patterns
             .iter()
             .any(|p| p.starts_with(first) && matches(&text[offset..], p))
-        {
-            hits.report(origin.get(offset).copied().unwrap_or(offset), None);
-        }
+            .then_some(offset)
+    })
+}
+
+fn scan_patterns(
+    text: &str,
+    patterns: &[&str],
+    start: usize,
+    origin: &[usize],
+    hits: &mut Findings,
+) {
+    for offset in pattern_offsets(text, patterns) {
+        hits.report(origin.get(offset).copied().unwrap_or(start + offset), None);
     }
 }

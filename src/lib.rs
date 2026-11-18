@@ -6,6 +6,9 @@ mod git;
 pub mod ledger;
 pub mod objections;
 mod packs {
+    pub(crate) mod ts {
+        pub(crate) mod no_comments;
+    }
     pub(crate) mod core {
         pub(crate) mod no_suppression;
     }
@@ -170,6 +173,9 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
     let bytes = files::policy(&file)?.unwrap_or_default();
     let today = objections::Date::today()?;
     let rows = objections::parse(&bytes, today)?;
+    if !engine::can_allow(engine::registry(), &rule) {
+        return Err(io::Error::other("rule cannot be objected to"));
+    }
     let key = (rule, path);
     let mut contents = String::from_utf8(bytes).map_err(io::Error::other)?;
     if renew {

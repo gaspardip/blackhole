@@ -1,3 +1,12 @@
+use oxc::{
+    allocator::Allocator,
+    ast::ast::{Comment, Program},
+    diagnostics::OxcDiagnostic,
+    parser::{ParseOptions, Parser},
+    semantic::{Semantic, SemanticBuilder},
+    span::SourceType,
+};
+
 pub enum Family {
     Judge,
     Tests,
@@ -18,11 +27,22 @@ pub struct Rule {
 
 pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
+    Ts(fn(&TsCtx<'_>, &mut Findings)),
+    ParseError,
 }
 
 pub struct FileCtx<'a> {
     pub path: &'a str,
     pub text: &'a str,
+    pub comments: Option<&'a [Comment]>,
+}
+
+pub struct TsCtx<'a> {
+    pub path: &'a str,
+    pub text: &'a str,
+    pub program: &'a Program<'a>,
+    pub semantic: &'a Semantic<'a>,
+    pub comments: &'a [Comment],
 }
 
 #[derive(Default)]
@@ -44,7 +64,17 @@ pub struct Finding {
 
 #[must_use]
 pub fn registry() -> &'static [Rule] {
-    &[crate::packs::core::no_suppression::RULE]
+    &[
+        crate::packs::core::no_suppression::RULE,
+        Rule {
+            id: "core/unparseable",
+            family: Family::Judge,
+            provenance: "A syntax error would hide the file from parsed rules.",
+            fix: "Make the file parse. The judge must be able to read it.",
+            run: Run::ParseError,
+        },
+        crate::packs::ts::no_comments::RULE,
+    ]
 }
 
 // TypeScript and C# read UTF-16 when a byte order mark says so, and UTF-32 is the same text with NULs in between.
@@ -62,6 +92,100 @@ fn decode(bytes: &[u8]) -> String {
     text
 }
 
+pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
+    rules
+        .iter()
+        .any(|r| r.id == id && !matches!(r.run, Run::ParseError))
+}
+
+type Hit = (usize, &'static str, Option<String>);
+
+fn diagnostic(error: &OxcDiagnostic) -> (usize, &str) {
+    (
+        error
+            .labels
+            .first()
+            .map_or(0, |label| label.offset() as usize),
+        &error.message,
+    )
+}
+
+fn parsed_hits(rules: &[Rule], path: &str, text: &str, kind: SourceType) -> Vec<Hit> {
+    let arena = Allocator::default();
+    let Ok(parsed) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Parser::new(&arena, text, kind)
+            .with_options(ParseOptions {
+                parse_regular_expression: true,
+                ..ParseOptions::default()
+            })
+            .parse()
+    })) else {
+        return collect(rules, path, text, None, Some((0, "Parser panicked")));
+    };
+    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
+        let error = parsed
+            .diagnostics
+            .first()
+            .map_or((0, "Parser failed"), diagnostic);
+        return collect(rules, path, text, None, Some(error));
+    }
+    let built = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .with_check_syntax_error(true)
+        .build(&parsed.program);
+    if let Some(error) = built.diagnostics.first() {
+        return collect(rules, path, text, None, Some(diagnostic(error)));
+    }
+    let ts = TsCtx {
+        path,
+        text,
+        program: &parsed.program,
+        semantic: &built.semantic,
+        comments: &parsed.program.comments,
+    };
+    collect(rules, path, text, Some(&ts), None)
+}
+
+fn collect(
+    rules: &[Rule],
+    path: &str,
+    text: &str,
+    ts: Option<&TsCtx<'_>>,
+    error: Option<(usize, &str)>,
+) -> Vec<Hit> {
+    let ctx = FileCtx {
+        path,
+        text,
+        comments: ts.map(|t| t.comments),
+    };
+    let mut hits = Vec::new();
+    for rule in rules {
+        let mut findings = Findings::default();
+        match rule.run {
+            Run::File(check) => check(&ctx, &mut findings),
+            Run::Ts(check) => {
+                if let Some(ts) = ts {
+                    check(ts, &mut findings);
+                }
+            }
+            Run::ParseError => {
+                if let Some((at, message)) = error {
+                    findings.report(at, Some(message));
+                }
+            }
+        }
+        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+    }
+    hits
+}
+
+fn source_type(path: &str) -> Option<SourceType> {
+    let name = path.rsplit('/').next()?.to_ascii_lowercase();
+    SourceType::from_path(&name)
+        .ok()
+        .or_else(|| SourceType::from_extension(name.strip_prefix('.')?).ok())
+}
+
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -69,19 +193,10 @@ pub fn run<'a>(
     let mut result = Vec::new();
     for (path, bytes) in files {
         let text = decode(bytes);
-        let ctx = FileCtx { path, text: &text };
-        let mut hits = Vec::new();
-        for rule in rules {
-            let Run::File(check) = rule.run;
-            let mut findings = Findings::default();
-            check(&ctx, &mut findings);
-            hits.extend(
-                findings
-                    .0
-                    .into_iter()
-                    .map(|(offset, note)| (offset, rule.id, note)),
-            );
-        }
+        let mut hits = match source_type(path) {
+            Some(kind) => parsed_hits(rules, path, &text, kind),
+            None => collect(rules, path, &text, None, None),
+        };
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {

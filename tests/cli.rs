@@ -520,3 +520,29 @@ fn filing_waits_for_the_lock() {
     assert!(child.wait().unwrap().success());
     assert!(root.join(".blackhole/objections").exists());
 }
+
+#[test]
+fn parse_errors_cannot_be_banked_or_objected_to() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("bad.ts"), "const = ;").unwrap();
+    run(root, &["ledger"], 1);
+    assert!(!root.join(".blackhole/ledger").exists());
+    run(root, &["object", "core/unparseable", "bad.ts", "broken"], 2);
+    assert!(!root.join(".blackhole/objections").exists());
+    let policy = root.join(".blackhole");
+    fs::create_dir_all(&policy).unwrap();
+    fs::write(
+        policy.join("ledger"),
+        "blackhole-ledger 1\ncore/unparseable\t1\tbad.ts\n",
+    )
+    .unwrap();
+    check(root, &[], 2);
+    fs::remove_file(policy.join("ledger")).unwrap();
+    fs::write(
+        policy.join("objections"),
+        "core/unparseable\tbad.ts\t1\t2026-01-01\t-\tbroken\n",
+    )
+    .unwrap();
+    check(root, &[], 2);
+}

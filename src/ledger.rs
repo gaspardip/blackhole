@@ -33,8 +33,8 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         else {
             return Err(error("expected three fields"));
         };
-        if !rules.iter().any(|r| r.id == rule) {
-            return Err(error("unknown rule"));
+        if !crate::engine::can_allow(rules, rule) {
+            return Err(error("unknown or prohibited rule"));
         }
         if count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit()) {
             return Err(error("invalid count"));

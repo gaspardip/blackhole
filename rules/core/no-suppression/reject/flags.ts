@@ -1,6 +1,6 @@
 //eslint-disable-line
 /* @TS-ignore */
-"@ts-expect-error @ts-nocheck"
+
 //oxlint-disable
 //biome-ignore
 //deno-lint-ignore

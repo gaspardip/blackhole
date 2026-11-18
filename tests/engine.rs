@@ -82,3 +82,50 @@ fn an_attribute_too_long_to_read_is_reported() {
     let short = format!("{}[/*{}*/allow(dead_code)]", '#', "y".repeat(50));
     assert_eq!(run(registry(), [("a.rs", short.as_bytes())])[0].note, None);
 }
+
+#[test]
+fn parsed_kinds_share_the_decoded_source() {
+    for ext in ["TS", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"] {
+        let path = format!("file.{ext}");
+        let bytes: Vec<_> = "\u{feff}\"@ts-ignore\";\n'é'; // rationale"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let found = run(registry(), [(path.as_str(), bytes.as_slice())]);
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| (f.rule, f.line, f.col))
+                .collect::<Vec<_>>(),
+            [("ts/no-comments", 2, 6)]
+        );
+        let broken = run(
+            registry(),
+            [(
+                path.as_str(),
+                b"\"@ts-ignore\";\nconst = ; // prose".as_slice(),
+            )],
+        );
+        assert_eq!(
+            broken
+                .iter()
+                .map(|f| (f.rule, f.line, f.col))
+                .collect::<Vec<_>>(),
+            [("core/no-suppression", 1, 2), ("core/unparseable", 2, 7)]
+        );
+        assert!(broken[1].note.as_ref().is_some_and(|n| !n.is_empty()));
+    }
+    assert!(run(registry(), [("file.txt", b"const = ; // prose".as_slice())]).is_empty());
+}
+
+#[test]
+fn regexp_syntax_and_extension_only_names_are_judged() {
+    for path in ["module.js", "nested/.TS"] {
+        let hits = run(registry(), [(path, b"const pattern = /(/;".as_slice())]);
+        assert_eq!(
+            hits.iter().map(|f| f.rule).collect::<Vec<_>>(),
+            ["core/unparseable"],
+            "{path}"
+        );
+    }
+}
