@@ -11,12 +11,17 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let resolution = Resolution::default();
+    check_aliases(ctx, findings, &Resolution::default());
+}
+
+pub(super) fn check_aliases(ctx: &TsCtx<'_>, findings: &mut Findings, resolution: &Resolution) {
     for node in ctx.semantic.nodes().iter() {
-        if let AstKind::TSTypeAliasDeclaration(alias) = node.kind()
-            && resolution.unknown_alias(ctx, &alias.type_annotation)
-        {
-            findings.report(alias.id.span.start as usize, None);
+        if let AstKind::TSTypeAliasDeclaration(alias) = node.kind() {
+            resolution.report(
+                findings,
+                alias.id.span.start as usize,
+                resolution.unknown_alias(ctx, &alias.type_annotation),
+            );
         }
     }
 }

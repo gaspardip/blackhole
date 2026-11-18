@@ -41,14 +41,21 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for (id, node) in nodes.iter_enumerated() {
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
-            if !matches!(nodes.parent_kind(id), AstKind::TSTypeLiteral(_))
-                && !resolution.informative(ctx, &n.type_annotation.type_annotation)
-            {
-                findings.report(n.span.start as usize, None);
+            if !matches!(nodes.parent_kind(id), AstKind::TSTypeLiteral(_)) {
+                resolution.report(
+                    findings,
+                    n.span.start as usize,
+                    !resolution.informative(ctx, &n.type_annotation.type_annotation),
+                );
             }
             continue;
         }
-        if !resolution.unsafe_dictionary(ctx, kind) {
+        let matched = resolution.unsafe_dictionary(ctx, kind);
+        if resolution.incomplete() {
+            resolution.report(findings, node.span().start as usize, false);
+            continue;
+        }
+        if !matched {
             continue;
         }
         dictionaries.insert(id);

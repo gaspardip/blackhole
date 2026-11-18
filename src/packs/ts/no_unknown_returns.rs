@@ -13,12 +13,11 @@ pub(crate) const RULE: Rule = Rule {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let resolution = Resolution::default();
     for n in ctx.semantic.nodes().iter() {
-        if let Some(a) = returns(n.kind())
-            && resolution.unknown_return(ctx, &a.type_annotation)
-        {
-            findings.report(
+        if let Some(a) = returns(n.kind()) {
+            resolution.report(
+                findings,
                 a.type_annotation.without_parenthesized().span().start as usize,
-                None,
+                resolution.unknown_return(ctx, &a.type_annotation),
             );
         }
     }

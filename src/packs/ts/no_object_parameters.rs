@@ -13,10 +13,12 @@ pub(crate) const RULE: Rule = Rule {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let resolution = Resolution::default();
     for node in ctx.semantic.nodes().iter() {
-        if let Some((_, ty)) = parameter(node.kind())
-            && resolution.object_input(ctx, ty)
-        {
-            findings.report(ty.span().start as usize, None);
+        if let Some((_, ty)) = parameter(node.kind()) {
+            resolution.report(
+                findings,
+                ty.span().start as usize,
+                resolution.object_input(ctx, ty),
+            );
         }
     }
 }

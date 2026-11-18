@@ -465,3 +465,139 @@ fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
         [(1, 1), (2, 2), (3, 1), (4, 1)]
     );
 }
+
+#[test]
+fn alias_verdicts_follow_declarations_in_every_order() {
+    let cases: &[(&str, &[(&str, usize)])] = &[
+        (
+            "ts/no-unsafe-dictionary-type",
+            &[
+                ("type Id<T> = T;", 0),
+                ("type Dict<U> = Id<Record<string, Id<U>>>;", 0),
+                ("type Broken = Dict<unknown>;", 15),
+                ("type X = Id<Id<Record<string, unknown>>>;", 10),
+            ],
+        ),
+        (
+            "ts/no-unknown-type-aliases",
+            &[
+                ("type Id<T> = T;", 0),
+                ("type Box<T = unknown> = Id<T>;", 0),
+                ("type Outer<T> = Id<Box>;", 6),
+                ("type Seed = Box;", 6),
+                ("type Check = Outer<string>;", 6),
+            ],
+        ),
+        (
+            "ts/no-unknown-type-aliases",
+            &[
+                ("type L<T> = T | L<T[]>;", 0),
+                ("type A<T> = B<T[]>;", 0),
+                ("type B<T> = A<T[]>;", 0),
+                ("type Json = string | Json[] | { [k: string]: Json };", 0),
+                (
+                    "type DeepPartial<T> = { [K in keyof T]?: DeepPartial<T[K]> };",
+                    0,
+                ),
+                ("type L1 = L<unknown>;", 6),
+                ("type L2 = L<string>;", 0),
+                ("type M = A<string>;", 0),
+                ("type D = DeepPartial<Json>;", 0),
+            ],
+        ),
+        (
+            "ts/no-unsafe-dictionary-type",
+            &[
+                ("type A = B | unknown;", 0),
+                ("type B = A & object;", 0),
+                ("type C = D | E;", 0),
+                ("type D = E & object;", 0),
+                ("type E = C | unknown;", 0),
+                ("type X = Record<string, B>;", 10),
+                ("type Y = Record<string, D>;", 10),
+            ],
+        ),
+    ];
+    for &(id, declarations) in cases {
+        let rule = registry().iter().find(|r| r.id == id).unwrap();
+        let mut lines = declarations.to_vec();
+        for order in 0..3 {
+            match order {
+                1 => lines.reverse(),
+                2 => {
+                    lines.reverse();
+                    lines.rotate_left(1);
+                }
+                _ => {}
+            }
+            let source = lines.iter().map(|&(s, _)| s).collect::<Vec<_>>().join("\n");
+            let expected: Vec<_> = lines.iter().copied().filter(|&(_, col)| col > 0).collect();
+            let actual: Vec<_> = run(std::slice::from_ref(rule), [("case.ts", source.as_bytes())])
+                .into_iter()
+                .map(|f| (lines[f.line - 1].0, f.col))
+                .collect();
+            assert_eq!(actual, expected, "{source}");
+        }
+    }
+}
+
+fn timed_alias_findings(source: &str, seconds: u64) -> Vec<Finding> {
+    let start = std::time::Instant::now();
+    let findings = run(registry(), [("aliases.ts", source.as_bytes())]);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(seconds),
+        "{:?}",
+        start.elapsed()
+    );
+    findings
+}
+
+#[test]
+fn long_alias_chain_and_wide_union_fit_the_budget() {
+    use std::fmt::Write as _;
+    let mut chain = String::from("type A0 = string;\n");
+    for i in 1..100_000 {
+        writeln!(chain, "type A{i} = A{};", i - 1).unwrap();
+        if i == 99 {
+            let members = vec!["A99"; 5000].join(" | ");
+            assert!(timed_alias_findings(&format!("{chain}type Wide = {members};"), 3).is_empty());
+        }
+    }
+    assert!(timed_alias_findings(&chain, 3).is_empty());
+}
+
+#[test]
+fn shared_union_members_fit_the_budget_with_and_without_a_cycle() {
+    use std::fmt::Write as _;
+    for (depth, leaf) in [
+        (27, "string".to_owned()),
+        (20, "A20".to_owned()),
+        (24, "A24".to_owned()),
+    ] {
+        let mut source = format!("type A0 = {leaf};\n");
+        for i in 1..=depth {
+            let prev = i - 1;
+            writeln!(source, "type A{i} = A{prev} | A{prev};").unwrap();
+        }
+        assert!(timed_alias_findings(&source, 1).is_empty());
+    }
+}
+
+#[test]
+fn recursive_node_types_propagate_unknown_to_every_alias() {
+    use std::fmt::Write as _;
+    let mut source = String::from("type Leaf = unknown;\n");
+    for i in 0..40 {
+        let children: Vec<_> = [1, 3, 7, 13]
+            .map(|offset| format!("N{}", (i + offset) % 40))
+            .into();
+        let leaf = if i == 0 { " | Leaf" } else { "" };
+        writeln!(source, "type N{i} = {}{leaf};", children.join(" | ")).unwrap();
+    }
+    let hits = timed_alias_findings(&source, 1);
+    let expected: Vec<_> = (1..=41)
+        .map(|i| ("ts/no-unknown-type-aliases", i, 6))
+        .collect();
+    assert_eq!(locations(&hits), expected);
+    assert!(hits.iter().all(|f| f.note.is_none()));
+}

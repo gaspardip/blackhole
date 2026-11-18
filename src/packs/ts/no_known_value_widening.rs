@@ -92,7 +92,7 @@ fn guard_argument<'a>(
             .is_some_and(|(name, a)| name == Some(subject) && contains_unknown(a))
     })?;
     let arg = call.arguments.get(index)?.as_expression()?;
-    bindings.walk(
+    let evidence = bindings.walk(
         ctx,
         arg,
         None,
@@ -130,8 +130,8 @@ fn guard_argument<'a>(
                 )
             })
         },
-    )?;
-    Some(arg)
+    );
+    (evidence.is_some() || resolution.incomplete()).then_some(arg)
 }
 
 fn typed_flow<'a>(
@@ -201,11 +201,22 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 guard_argument(&resolution, ctx, &mut guard_bindings, call)
             }
             kind => typed_flow(ctx, id, kind)
-                .filter(|(expr, ty)| loses_evidence(&resolution, ctx, &mut bindings, expr, ty))
+                .filter(|(expr, ty)| {
+                    loses_evidence(&resolution, ctx, &mut bindings, expr, ty)
+                        || resolution.incomplete()
+                })
                 .map(|(expr, _)| expr),
         };
+        if resolution.incomplete() {
+            // A guard origin derived from an unfinished query cannot serve a later call.
+            guard_bindings = ConstBindings::default();
+        }
         if let Some(expr) = expression {
-            findings.report(expr.without_parentheses().span().start as usize, None);
+            resolution.report(
+                findings,
+                expr.without_parentheses().span().start as usize,
+                true,
+            );
         }
     }
 }
