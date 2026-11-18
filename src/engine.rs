@@ -78,34 +78,43 @@ pub fn registry() -> &'static [Rule] {
     ]
 }
 
+fn decode_units(units: impl Iterator<Item = Option<char>>) -> (String, Option<usize>) {
+    let mut text = String::new();
+    let mut malformed = None;
+    for unit in units {
+        let ch = unit.unwrap_or_else(|| {
+            malformed.get_or_insert(text.len());
+            char::REPLACEMENT_CHARACTER
+        });
+        text.push(ch);
+    }
+    (text, malformed)
+}
+
 // A UTF-32LE mark starts with the UTF-16LE mark.
-fn decode(bytes: &[u8]) -> String {
+fn decode(bytes: &[u8]) -> (String, Option<usize>) {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let (pairs, tail) = bytes[2..].as_chunks();
-        let units: Vec<_> = pairs
-            .iter()
-            .copied()
-            .map(unit)
-            .chain((!tail.is_empty()).then_some(0xfffd))
-            .collect();
-        String::from_utf16_lossy(&units)
+        let chars = char::decode_utf16(pairs.iter().copied().map(unit)).map(Result::ok);
+        decode_units(chars.chain((!tail.is_empty()).then_some(None)))
     };
     let utf32 = |unit: fn([u8; 4]) -> u32| {
         let (chars, tail) = bytes[4..].as_chunks();
-        chars
-            .iter()
-            .copied()
-            .map(unit)
-            .map(|value| char::from_u32(value).unwrap_or(char::REPLACEMENT_CHARACTER))
-            .chain((!tail.is_empty()).then_some(char::REPLACEMENT_CHARACTER))
-            .collect()
+        let chars = chars.iter().copied().map(unit).map(char::from_u32);
+        decode_units(chars.chain((!tail.is_empty()).then_some(None)))
     };
     match bytes {
         [0xff, 0xfe, 0, 0, ..] => utf32(u32::from_le_bytes),
         [0, 0, 0xfe, 0xff, ..] => utf32(u32::from_be_bytes),
         [0xff, 0xfe, ..] => wide(u16::from_le_bytes),
         [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
-        _ => String::from_utf8_lossy(bytes).into_owned(),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(text) => (text.to_owned(), None),
+            Err(e) => (
+                String::from_utf8_lossy(bytes).into_owned(),
+                Some(e.valid_up_to()),
+            ),
+        },
     }
 }
 
@@ -245,14 +254,22 @@ pub fn run<'a>(
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let decoded = decode(bytes);
+        let (decoded, malformed) = decode(bytes);
         let nul = decoded.find('\0');
         let stripped = nul.map(|_| decoded.replace('\0', ""));
         let text = stripped.as_deref().unwrap_or(&decoded);
-        let mut hits = match (source_type(path), nul) {
-            (Some(_), Some(at)) => Err((at, "NUL in source text".to_owned())),
-            (Some(kind), None) => parsed_hits(rules, path, text, kind),
-            (None, _) => Ok(collect(rules, path, text, Ok(None))),
+        let mut hits = match (source_type(path), malformed, nul) {
+            (Some(_), Some(at), _) => {
+                let offset = if nul.is_some_and(|n| n < at) {
+                    at - decoded[..at].bytes().filter(|&b| b == 0).count()
+                } else {
+                    at
+                };
+                Err((offset, "Malformed source encoding".to_owned()))
+            }
+            (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
+            (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
+            (None, _, _) => Ok(collect(rules, path, text, Ok(None))),
         }
         .unwrap_or_else(|error| collect(rules, path, text, Err(&error)));
         // A parse failure at the first NUL precedes matches at the same stripped offset.
@@ -260,7 +277,8 @@ pub fn run<'a>(
         let mut chars = decoded.chars().peekable();
         let (mut matched, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
-            let at_nul = matches!(rule.run, Run::ParseError) && nul == Some(offset);
+            let at_nul =
+                malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
             while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
                 let ch = chars.next().expect("finding offset exceeds decoded text");
                 if ch != '\0' {

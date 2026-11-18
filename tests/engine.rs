@@ -7,6 +7,121 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn malformed_units_are_reported_even_inside_allowed_syntax() {
+    let cases = [
+        ("// WARNING:", "", 12),
+        ("const s = \"", "\";", 12),
+        ("const t = `", "`;", 12),
+        ("const x = 1;", "", 13),
+    ];
+    for (prefix, suffix, column) in cases {
+        let text = format!("\u{feff}{prefix}");
+        let check = |bytes: &[u8]| {
+            assert_eq!(
+                locations(&run(registry(), [("a.ts", bytes)])),
+                [("core/unparseable", 1, column)],
+                "{prefix}"
+            );
+        };
+        for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+            for bad in [0xd800, 0xdc00] {
+                let bytes: Vec<_> = text
+                    .encode_utf16()
+                    .chain([bad])
+                    .chain(suffix.encode_utf16())
+                    .flat_map(encode)
+                    .collect();
+                check(&bytes);
+            }
+            if suffix.is_empty() {
+                let mut bytes: Vec<_> = text.encode_utf16().flat_map(encode).collect();
+                bytes.push(0x2f);
+                check(&bytes);
+            }
+        }
+        for encode in [u32::to_le_bytes, u32::to_be_bytes] {
+            for bad in [0xd800, 0x0011_0000] {
+                let bytes: Vec<_> = text
+                    .chars()
+                    .map(u32::from)
+                    .chain([bad])
+                    .chain(suffix.chars().map(u32::from))
+                    .flat_map(encode)
+                    .collect();
+                check(&bytes);
+            }
+            if suffix.is_empty() {
+                for count in 1..=3 {
+                    let mut bytes: Vec<_> =
+                        text.chars().flat_map(|c| encode(u32::from(c))).collect();
+                    bytes.extend(vec![0x2f; count]);
+                    check(&bytes);
+                }
+            }
+        }
+    }
+    for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+        let mut bytes: Vec<_> = "\u{feff}const "
+            .encode_utf16()
+            .chain([0xd800])
+            .flat_map(encode)
+            .collect();
+        bytes.push(0x2f);
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", bytes.as_slice())])),
+            [("core/unparseable", 1, 7)]
+        );
+    }
+}
+
+#[test]
+fn valid_unicode_and_raw_encoding_verdicts_are_preserved() {
+    let valid = "\u{feff}const s = '🌑�';";
+    for bytes in [
+        valid.as_bytes().to_vec(),
+        valid.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        valid.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        valid
+            .chars()
+            .flat_map(|c| u32::from(c).to_be_bytes())
+            .collect(),
+        valid
+            .chars()
+            .flat_map(|c| u32::from(c).to_le_bytes())
+            .collect(),
+    ] {
+        assert!(run(registry(), [("valid.ts", bytes.as_slice())]).is_empty());
+    }
+    assert_eq!(
+        locations(&run(
+            registry(),
+            [("quoted.ts", b"const x=\"\xff\";".as_slice())]
+        )),
+        [("core/unparseable", 1, 10)]
+    );
+    for path in ["a.ts", "a.js"] {
+        assert_eq!(
+            locations(&run(registry(), [(path, b"'\0\xff'".as_slice())])),
+            [("core/unparseable", 1, 3)]
+        );
+    }
+    for path in ["a.py", "a.rs"] {
+        assert!(run(registry(), [(path, b"'\xff'".as_slice())]).is_empty());
+    }
+    assert_eq!(
+        locations(&run(
+            registry(),
+            [("a.ts", b"// @ts-ignore\xff".as_slice())]
+        )),
+        [("core/no-suppression", 1, 4), ("core/unparseable", 1, 14)]
+    );
+    assert_eq!(
+        locations(&run(registry(), [("a.py", b"# noqa\xff".as_slice())])),
+        [("core/no-suppression", 1, 1)]
+    );
+}
+
+#[test]
 fn documentation_and_directives_use_javascript_whitespace() {
     for gap in ['\u{85}', '\u{feff}', '\u{2028}'] {
         for (source, allowed) in [
@@ -98,9 +213,10 @@ fn incomplete_wide_source_retains_the_replacement_character() {
     for encode in [u16::to_le_bytes, u16::to_be_bytes] {
         for (source, expected) in [
             ("const x = 1;", vec![("core/unparseable", 1, 13)]),
+            // Malformed UTF-16 prevents ts/no-comments from receiving a parsed context.
             (
                 "// @ts-ignore",
-                vec![("ts/no-comments", 1, 1), ("core/no-suppression", 1, 4)],
+                vec![("core/no-suppression", 1, 4), ("core/unparseable", 1, 14)],
             ),
         ] {
             let mut bytes: Vec<_> = format!("\u{feff}{source}")
