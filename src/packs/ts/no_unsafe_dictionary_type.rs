@@ -1,7 +1,4 @@
-use super::{
-    dictionary_types::Resolution,
-    function_types::bindings::{symbol, type_declaration},
-};
+use super::{dictionary_types::Resolution, function_types::bindings::symbol};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::TSTypeName},
@@ -25,13 +22,7 @@ fn plain_alias(ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
     };
     r.type_arguments.is_none()
         && symbol(ctx, ident)
-            .and_then(|s| type_declaration(ctx, s))
-            .is_some_and(|d| {
-                matches!(
-                    ctx.semantic.nodes().kind(d),
-                    AstKind::TSTypeAliasDeclaration(_)
-                )
-            })
+            .is_some_and(|s| ctx.semantic.scoping().symbol_flags(s).is_type_alias())
 }
 
 fn inside_constraint(parent: AstKind<'_>, span: oxc::span::Span) -> bool {

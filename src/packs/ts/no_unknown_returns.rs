@@ -17,9 +17,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             && resolution.unknown_return(ctx, &a.type_annotation)
         {
             findings.report(
-                super::function_types::unparen(&a.type_annotation)
-                    .span()
-                    .start as usize,
+                a.type_annotation.without_parenthesized().span().start as usize,
                 None,
             );
         }

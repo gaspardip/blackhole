@@ -24,6 +24,31 @@ fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
 }
 
 #[test]
+fn deeply_parenthesized_parameter_reports_the_keyword() {
+    let prefix = "declare function f(value: ";
+    let depth = 100_000;
+    let source = format!(
+        "{prefix}{}unknown{}): void;",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert_eq!(
+        locations(&run(registry(), [("parameter.ts", source.as_bytes())])),
+        [("ts/no-unknown-parameters", 1, prefix.len() + depth + 1)]
+    );
+}
+
+#[test]
+fn deeply_nested_array_reports_its_element_type() {
+    let prefix = "type Matrix = ";
+    let source = format!("{prefix}any{};", "[]".repeat(100_000));
+    assert_eq!(
+        locations(&run(registry(), [("matrix.ts", source.as_bytes())])),
+        [("ts/no-explicit-any", 1, prefix.len() + 1)]
+    );
+}
+
+#[test]
 fn exported_alias_chain_is_judged_in_linear_time() {
     use std::{
         fmt::Write as _,

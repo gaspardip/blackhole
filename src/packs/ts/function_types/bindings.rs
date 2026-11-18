@@ -18,6 +18,13 @@ pub(crate) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> O
     value_declarations(ctx, symbol(ctx, ident)?).next()
 }
 
+fn is_type_declaration(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::TSTypeAliasDeclaration(_) | AstKind::TSInterfaceDeclaration(_)
+    )
+}
+
 pub(crate) fn value_declarations<'a>(
     ctx: &'a TsCtx<'_>,
     symbol: SymbolId,
@@ -25,24 +32,14 @@ pub(crate) fn value_declarations<'a>(
     ctx.semantic
         .scoping()
         .symbol_declarations(symbol)
-        .filter(|id| {
-            !matches!(
-                ctx.semantic.nodes().kind(*id),
-                AstKind::TSTypeAliasDeclaration(_) | AstKind::TSInterfaceDeclaration(_)
-            )
-        })
+        .filter(|id| !is_type_declaration(ctx.semantic.nodes().kind(*id)))
 }
 
 pub(crate) fn type_declaration(ctx: &TsCtx<'_>, symbol: SymbolId) -> Option<NodeId> {
     ctx.semantic
         .scoping()
         .symbol_declarations(symbol)
-        .find(|id| {
-            matches!(
-                ctx.semantic.nodes().kind(*id),
-                AstKind::TSTypeAliasDeclaration(_) | AstKind::TSInterfaceDeclaration(_)
-            )
-        })
+        .find(|id| is_type_declaration(ctx.semantic.nodes().kind(*id)))
 }
 
 pub(crate) struct ConstBindings<T> {

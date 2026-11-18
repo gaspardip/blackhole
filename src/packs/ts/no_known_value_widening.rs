@@ -1,6 +1,7 @@
 use super::{
     dictionary_types::{Class, Resolution},
     function_types::{
+        binding_annotation,
         bindings::{ConstBindings, declaration},
         contains_unknown,
         expressions::{assertion, known_value, parent},
@@ -87,12 +88,8 @@ fn guard_argument<'a>(
     let (params, ret) = local_function(ctx, &call.callee)?;
     let subject = predicate_subject(ret?)?;
     let index = params.items.iter().position(|p| {
-        p.pattern
-            .get_identifier_name()
-            .is_some_and(|name| name == subject)
-            && p.type_annotation
-                .as_ref()
-                .is_some_and(|a| contains_unknown(&a.type_annotation))
+        super::function_types::parameter(AstKind::FormalParameter(p))
+            .is_some_and(|(name, a)| name == Some(subject) && contains_unknown(a))
     })?;
     let arg = call.arguments.get(index)?.as_expression()?;
     bindings.walk(
@@ -119,16 +116,12 @@ fn guard_argument<'a>(
             }
         },
         |_, kind| {
-            let annotation = match kind {
-                AstKind::VariableDeclarator(v)
-                    if matches!(v.id, BindingPattern::BindingIdentifier(_)) =>
-                {
-                    v.type_annotation.as_ref()
-                }
-                AstKind::FormalParameter(p) => p.type_annotation.as_ref(),
-                AstKind::FormalParameterRest(p) => p.type_annotation.as_ref(),
-                _ => None,
-            };
+            let annotation = binding_annotation(kind)
+                .filter(|(pattern, _)| {
+                    !matches!(kind, AstKind::VariableDeclarator(_))
+                        || matches!(pattern, BindingPattern::BindingIdentifier(_))
+                })
+                .map(|(_, a)| a);
             annotation.map_or(Continue(()), |a| {
                 Break(
                     resolution
@@ -200,6 +193,7 @@ fn loses_evidence<'a>(
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let resolution = Resolution::default();
     let mut bindings = ConstBindings::default();
+    // Guard calls use declared types as evidence, so their cached origins belong to a separate walk.
     let mut guard_bindings = ConstBindings::default();
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         let expression = match node.kind() {

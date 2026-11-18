@@ -2,41 +2,38 @@ pub(super) mod bindings;
 pub(super) mod expressions;
 use oxc::ast::{
     AstKind,
-    ast::{TSType, TSTypeAnnotation, TSTypePredicateName},
+    ast::{BindingPattern, TSType, TSTypeAnnotation, TSTypePredicateName},
 };
 pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
-    let mut pending = vec![ty];
-    while let Some(ty) = pending.pop() {
-        match unparen(ty) {
-            TSType::TSUnknownKeyword(_) => return true,
-            TSType::TSUnionType(n) => pending.extend(&n.types),
-            _ => {}
-        }
+    match ty.without_parenthesized() {
+        TSType::TSUnknownKeyword(_) => true,
+        TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
+        _ => false,
     }
-    false
 }
 
-pub(super) fn unparen<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
-    while let TSType::TSParenthesizedType(p) = ty {
-        ty = &p.type_annotation;
-    }
-    ty
+pub(super) fn binding_annotation(
+    kind: AstKind<'_>,
+) -> Option<(&BindingPattern<'_>, &TSTypeAnnotation<'_>)> {
+    let (pattern, annotation) = match kind {
+        AstKind::VariableDeclarator(v) => (&v.id, v.type_annotation.as_deref()?),
+        AstKind::FormalParameter(p) => (&p.pattern, p.type_annotation.as_deref()?),
+        AstKind::FormalParameterRest(p) => (&p.rest.argument, p.type_annotation.as_deref()?),
+        _ => return None,
+    };
+    Some((pattern, annotation))
 }
 
 pub(super) fn parameter(kind: AstKind<'_>) -> Option<(Option<&str>, &TSType<'_>)> {
     let (name, a) = match kind {
-        AstKind::FormalParameter(p) => (
-            p.pattern.get_identifier_name().map(|i| i.as_str()),
-            p.type_annotation.as_ref()?,
-        ),
-        AstKind::FormalParameterRest(p) => (
-            p.rest.argument.get_identifier_name().map(|i| i.as_str()),
-            p.type_annotation.as_ref()?,
-        ),
-        AstKind::TSThisParameter(p) => (Some("this"), p.type_annotation.as_ref()?),
-        _ => return None,
+        AstKind::TSThisParameter(p) => (Some("this"), p.type_annotation.as_deref()?),
+        AstKind::VariableDeclarator(_) => return None,
+        _ => {
+            let (pattern, a) = binding_annotation(kind)?;
+            (pattern.get_identifier_name().map(|i| i.as_str()), a)
+        }
     };
-    Some((name, unparen(&a.type_annotation)))
+    Some((name, a.type_annotation.without_parenthesized()))
 }
 
 pub(super) fn returns(kind: AstKind<'_>) -> Option<&TSTypeAnnotation<'_>> {

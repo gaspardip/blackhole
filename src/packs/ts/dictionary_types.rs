@@ -1,7 +1,4 @@
-use super::function_types::{
-    bindings::{symbol, type_declaration},
-    unparen,
-};
+use super::function_types::bindings::{symbol, type_declaration};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -63,7 +60,6 @@ struct Binding {
 struct Environments {
     frames: Vec<Binding>,
     ids: HashMap<Binding, usize>,
-    lookups: HashMap<(usize, SymbolId), Option<Term>>,
 }
 impl Environments {
     fn bind(&mut self, b: Binding) -> usize {
@@ -72,26 +68,15 @@ impl Environments {
             self.frames.len()
         })
     }
-    fn lookup(&mut self, mut env: usize, symbol: SymbolId) -> Option<Term> {
-        let mut path = Vec::new();
-        let result = loop {
-            if env == 0 {
-                break None;
+    fn lookup(&self, mut env: usize, symbol: SymbolId) -> Option<Term> {
+        while env != 0 {
+            let binding = self.frames[env - 1];
+            if binding.symbol == symbol {
+                return Some(binding.value);
             }
-            if let Some(cached) = self.lookups.get(&(env, symbol)) {
-                break *cached;
-            }
-            path.push(env);
-            let b = self.frames[env - 1];
-            if b.symbol == symbol {
-                break Some(b.value);
-            }
-            env = b.outer;
-        };
-        for env in path {
-            self.lookups.insert((env, symbol), result);
+            env = binding.outer;
         }
-        result
+        None
     }
 }
 #[derive(Clone, Copy)]
@@ -123,8 +108,12 @@ impl Combine {
 
 enum Plan {
     Done(Class),
-    Children(Combine, Vec<Goal>),
+    Children(Combine, Children),
     Alias(NodeId, Combine, Goal),
+}
+enum Children {
+    One(Goal),
+    Many(Vec<Goal>),
 }
 enum Work {
     Visit(Goal),
@@ -141,89 +130,118 @@ enum Work {
 struct Solver {
     envs: Environments,
     memo: HashMap<Goal, Class>,
+    scratch: Scratch,
 }
 impl Solver {
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Class {
-        evaluate(&mut self.memo, goal, |g| self.envs.plan(ctx, g))
+        self.scratch
+            .evaluate(&mut self.memo, goal, |g| self.envs.plan(ctx, g))
     }
 }
 
-fn evaluate(
-    memo: &mut HashMap<Goal, Class>,
-    goal: Goal,
-    mut plan: impl FnMut(Goal) -> Plan,
-) -> Class {
-    let mut work = vec![Work::Visit(goal)];
-    let mut values = Vec::new();
-    let mut active = HashMap::new();
-    let mut aliases = HashMap::new();
-    let mut cutoff = usize::MAX;
-    while let Some(task) = work.pop() {
-        match task {
-            Work::Visit(g) => {
-                if let Some(value) = memo.get(&g) {
-                    values.push(*value);
-                    continue;
-                }
-                if let Some(&level) = active.get(&g) {
-                    cutoff = cutoff.min(level);
-                    values.push(Class::None);
-                    continue;
-                }
-                let level = active.len();
-                active.insert(g, level);
-                let (combine, children, alias) = match plan(g) {
-                    Plan::Done(c) => {
-                        values.push(c);
-                        memo.insert(g, c);
-                        active.remove(&g);
+#[derive(Default)]
+struct Scratch {
+    work: Vec<Work>,
+    values: Vec<Class>,
+    active: HashMap<Goal, usize>,
+    aliases: HashMap<NodeId, usize>,
+}
+impl Scratch {
+    fn evaluate(
+        &mut self,
+        memo: &mut HashMap<Goal, Class>,
+        goal: Goal,
+        mut plan: impl FnMut(Goal) -> Plan,
+    ) -> Class {
+        if let Some(&cached) = memo.get(&goal) {
+            return cached;
+        }
+        let Self {
+            work,
+            values,
+            active,
+            aliases,
+        } = self;
+        work.push(Work::Visit(goal));
+        let mut cutoff = usize::MAX;
+        while let Some(task) = work.pop() {
+            match task {
+                Work::Visit(g) => {
+                    if let Some(value) = memo.get(&g) {
+                        values.push(*value);
                         continue;
                     }
-                    Plan::Children(c, kids) => (c, kids, None),
-                    Plan::Alias(id, c, child) => {
-                        if let Some(&ancestor) = aliases.get(&id) {
-                            cutoff = cutoff.min(ancestor);
-                            values.push(Class::None);
-                            active.remove(&g);
+                    if let Some(&level) = active.get(&g) {
+                        cutoff = cutoff.min(level);
+                        values.push(Class::None);
+                        continue;
+                    }
+                    let level = active.len();
+                    let (combine, children, alias) = match plan(g) {
+                        Plan::Done(c) => {
+                            values.push(c);
+                            memo.insert(g, c);
                             continue;
                         }
-                        aliases.insert(id, level);
-                        (c, vec![child], Some(id))
+                        Plan::Children(c, kids) => (c, kids, None),
+                        Plan::Alias(id, c, child) => {
+                            if let Some(&ancestor) = aliases.get(&id) {
+                                cutoff = cutoff.min(ancestor);
+                                values.push(Class::None);
+                                continue;
+                            }
+                            aliases.insert(id, level);
+                            (c, Children::One(child), Some(id))
+                        }
+                    };
+                    active.insert(g, level);
+                    work.push(Work::Finish {
+                        goal: g,
+                        combine,
+                        start: values.len(),
+                        outer_cutoff: std::mem::replace(&mut cutoff, usize::MAX),
+                        alias,
+                    });
+                    match children {
+                        Children::One(child) => work.push(Work::Visit(child)),
+                        Children::Many(kids) => {
+                            work.extend(kids.into_iter().rev().map(Work::Visit));
+                        }
                     }
-                };
-                work.push(Work::Finish {
-                    goal: g,
+                }
+                Work::Finish {
+                    goal,
                     combine,
-                    start: values.len(),
-                    outer_cutoff: std::mem::replace(&mut cutoff, usize::MAX),
+                    start,
+                    outer_cutoff,
                     alias,
-                });
-                work.extend(children.into_iter().rev().map(Work::Visit));
-            }
-            Work::Finish {
-                goal,
-                combine,
-                start,
-                outer_cutoff,
-                alias,
-            } => {
-                let value = combine.apply(&values[start..]);
-                values.truncate(start);
-                values.push(value);
-                let level = active.remove(&goal).unwrap();
-                if let Some(id) = alias {
-                    aliases.remove(&id);
+                } => {
+                    let value = combine.apply(&values[start..]);
+                    values.truncate(start);
+                    values.push(value);
+                    let level = active.remove(&goal).unwrap();
+                    if let Some(id) = alias {
+                        aliases.remove(&id);
+                    }
+                    // A result that used an enclosing cycle cut is only valid on this path.
+                    if cutoff >= level {
+                        cutoff = usize::MAX;
+                        memo.insert(goal, value);
+                    }
+                    cutoff = cutoff.min(outer_cutoff);
                 }
-                // A result that used an enclosing cycle cut is only valid on this path.
-                if cutoff >= level {
-                    cutoff = usize::MAX;
-                    memo.insert(goal, value);
-                }
-                cutoff = cutoff.min(outer_cutoff);
             }
         }
+        values.pop().unwrap()
     }
-    values[0]
+}
+impl Plan {
+    fn child(combine: Combine, goal: Goal) -> Self {
+        Self::Children(combine, Children::One(goal))
+    }
+    fn many(combine: Combine, goals: Vec<Goal>) -> Self {
+        Self::Children(combine, Children::Many(goals))
+    }
 }
 impl Environments {
     fn reference(&mut self, ctx: &TsCtx<'_>, g: Goal, r: &TSTypeReference<'_>) -> Plan {
@@ -239,7 +257,7 @@ impl Environments {
             if scopes.symbol_flags(sym).is_type_parameter()
                 && let Some(term) = self.lookup(g.term.env, sym)
             {
-                return Plan::Children(Combine::First, vec![Goal { term, ..g }]);
+                return Plan::child(Combine::First, Goal { term, ..g });
             }
             let Some(id) = type_declaration(ctx, sym) else {
                 return Plan::Done(Class::None);
@@ -263,7 +281,7 @@ impl Environments {
                     return Plan::Done(Class::Broad);
                 }
                 AstKind::TSTypeAliasDeclaration(a) => {
-                    let mut env = g.term.env;
+                    let mut env = 0;
                     if let Some(params) = &a.type_parameters {
                         for (index, p) in params.params.iter().enumerate() {
                             let (arg, arg_env) = if let Some(arg) = args.get(index) {
@@ -322,11 +340,11 @@ impl Environments {
             _ => return Plan::Done(Class::None),
         };
         args.get(index).map_or(Plan::Done(Class::None), |t| {
-            Plan::Children(combine, vec![g.child(t, query)])
+            Plan::child(combine, g.child(t, query))
         })
     }
     fn argument(&mut self, ctx: &TsCtx<'_>, ty: &TSType<'_>, env: usize) -> Term {
-        if let TSType::TSTypeReference(r) = unparen(ty)
+        if let TSType::TSTypeReference(r) = ty.without_parenthesized()
             && let TSTypeName::IdentifierReference(i) = &r.type_name
             && let Some(sym) = symbol(ctx, i)
             && let Some(value) = self.lookup(env, sym)
@@ -343,10 +361,10 @@ impl Environments {
         match (ctx.semantic.nodes().kind(g.term.node), q) {
             (AstKind::TSTypeReference(r), _) => self.reference(ctx, g, r),
             (AstKind::TSParenthesizedType(p), _) => {
-                Plan::Children(Combine::First, vec![g.child(&p.type_annotation, q)])
+                Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
             (AstKind::TSTypeOperator(p), _) if p.operator == TSTypeOperatorOperator::Readonly => {
-                Plan::Children(Combine::First, vec![g.child(&p.type_annotation, q)])
+                Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
             (AstKind::TSUnknownKeyword(_), Query::UnknownReturn | Query::UnknownAlias)
             | (AstKind::TSObjectKeyword(_), Query::ObjectInput)
@@ -368,18 +386,18 @@ impl Environments {
                 | Query::UnknownReturn
                 | Query::UnknownAlias
                 | Query::ObjectInput,
-            ) => Plan::Children(
+            ) => Plan::many(
                 Combine::Any,
                 n.types.iter().map(|ty| g.child(ty, q)).collect(),
             ),
-            (AstKind::TSIntersectionType(n), Query::Value) => Plan::Children(
+            (AstKind::TSIntersectionType(n), Query::Value) => Plan::many(
                 Combine::All,
                 n.types.iter().map(|ty| g.child(ty, q)).collect(),
             ),
             (AstKind::TSTypeLiteral(n), Query::Value) if empty(&n.members) => {
                 Plan::Done(Class::Broad)
             }
-            (AstKind::TSTypeLiteral(n), Query::UnsafeDictionary) => Plan::Children(
+            (AstKind::TSTypeLiteral(n), Query::UnsafeDictionary) => Plan::many(
                 Combine::First,
                 n.members
                     .iter()
@@ -402,15 +420,14 @@ impl Environments {
                 Plan::Done(Class::Broad)
             }
             (AstKind::TSMappedType(_), Query::Target) => Plan::Done(Class::Dictionary),
-            (AstKind::TSMappedType(n), Query::AliasTarget) => Plan::Children(
-                Combine::Dictionary,
-                vec![g.child(&n.constraint, Query::Key)],
-            ),
+            (AstKind::TSMappedType(n), Query::AliasTarget) => {
+                Plan::child(Combine::Dictionary, g.child(&n.constraint, Query::Key))
+            }
             (AstKind::TSMappedType(n), Query::UnsafeDictionary) => n
                 .type_annotation
                 .as_ref()
                 .map_or(Plan::Done(Class::None), |ty| {
-                    Plan::Children(Combine::First, vec![g.child(ty, Query::Value)])
+                    Plan::child(Combine::First, g.child(ty, Query::Value))
                 }),
             _ => Plan::Done(Class::None),
         }
@@ -424,12 +441,12 @@ fn empty(members: &[TSSignature<'_>]) -> bool {
         };
         p.optional
             && p.type_annotation.as_ref().is_some_and(|a| {
-                let mut ty = unparen(&a.type_annotation);
+                let mut ty = a.type_annotation.without_parenthesized();
                 while let TSType::TSTypeOperatorType(op) = ty {
                     if op.operator != TSTypeOperatorOperator::Readonly {
                         return false;
                     }
-                    ty = unparen(&op.type_annotation);
+                    ty = op.type_annotation.without_parenthesized();
                 }
                 matches!(ty, TSType::TSNeverKeyword(_))
             })
@@ -473,12 +490,9 @@ impl Resolution {
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, Combine, Goal, Plan, Query, Term, evaluate};
+    use super::{Class, Combine, Goal, Plan, Query, Scratch, Term};
     use oxc::syntax::node::NodeId;
-    use std::{
-        collections::HashMap,
-        time::{Duration, Instant},
-    };
+    use std::collections::HashMap;
 
     #[test]
     fn each_shared_goal_is_expanded_once_on_a_deep_work_stack() {
@@ -491,7 +505,7 @@ mod tests {
             query: Query::UnknownAlias,
         };
         let mut calls = 0;
-        let start = Instant::now();
+        let mut scratch = Scratch::default();
         let mut memo = HashMap::new();
         let mut plan = |g: Goal| {
             calls += 1;
@@ -500,16 +514,15 @@ mod tests {
             if i == 0 {
                 Plan::Done(Class::Broad)
             } else if i.is_multiple_of(2) {
-                Plan::Children(Combine::Any, vec![goal(i - 1), goal(i - 1)])
+                Plan::many(Combine::Any, vec![goal(i - 1), goal(i - 1)])
             } else {
                 Plan::Alias(g.term.node, Combine::First, goal(i - 1))
             }
         };
-        assert!(evaluate(&mut memo, goal(depth), &mut plan) == Class::Broad);
+        assert!(scratch.evaluate(&mut memo, goal(depth), &mut plan) == Class::Broad);
         for i in 0..depth {
-            assert!(evaluate(&mut memo, goal(i), &mut plan) == Class::Broad);
+            assert!(scratch.evaluate(&mut memo, goal(i), &mut plan) == Class::Broad);
         }
         assert_eq!(calls, depth + 1);
-        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

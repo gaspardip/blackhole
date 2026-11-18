@@ -18,7 +18,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         if let Some(a) = result
             && !matches!(
-                super::function_types::unparen(&a.type_annotation),
+                a.type_annotation.without_parenthesized(),
                 TSType::TSNeverKeyword(_) | TSType::TSTypePredicate(_)
             )
         {

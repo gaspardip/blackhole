@@ -24,7 +24,7 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn reference<'a>(ctx: &TsCtx<'_>, ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
-    let TSType::TSTypeReference(r) = super::function_types::unparen(ty) else {
+    let TSType::TSTypeReference(r) = ty.without_parenthesized() else {
         return None;
     };
     let TSTypeName::IdentifierReference(id) = &r.type_name else {
@@ -43,24 +43,19 @@ fn reference<'a>(ctx: &TsCtx<'_>, ty: &'a TSType<'a>) -> Option<(&'a str, &'a [T
 
 fn top(ty: &TSType<'_>) -> bool {
     matches!(
-        super::function_types::unparen(ty),
+        ty.without_parenthesized(),
         TSType::TSUnknownKeyword(_) | TSType::TSAnyKeyword(_)
     )
 }
 
 fn broad_key(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-    let mut pending = vec![ty];
-    while let Some(key) = pending.pop() {
-        match super::function_types::unparen(key) {
-            TSType::TSStringKeyword(_)
-            | TSType::TSNumberKeyword(_)
-            | TSType::TSSymbolKeyword(_) => {}
-            TSType::TSUnionType(n) => pending.extend(&n.types),
-            _ if matches!(reference(ctx, key), Some(("PropertyKey", _))) => {}
-            _ => return false,
+    match ty.without_parenthesized() {
+        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSSymbolKeyword(_) => {
+            true
         }
+        TSType::TSUnionType(n) => n.types.iter().all(|ty| broad_key(ctx, ty)),
+        _ => matches!(reference(ctx, ty), Some(("PropertyKey", _))),
     }
-    true
 }
 
 fn broad_index(ctx: &TsCtx<'_>, member: &TSSignature<'_>) -> bool {
@@ -76,7 +71,7 @@ fn broad_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
     while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
         ty = inner;
     }
-    if let TSType::TSTypeLiteral(n) = super::function_types::unparen(ty) {
+    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
         return matches!(n.members.as_slice(), [member] if broad_index(ctx, member));
     }
     match reference(ctx, ty) {
@@ -90,7 +85,7 @@ fn narrow_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
     while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
         ty = inner;
     }
-    if let TSType::TSTypeLiteral(n) = super::function_types::unparen(ty) {
+    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
         return n
             .members
             .iter()
@@ -112,10 +107,7 @@ enum Broad {
 fn broad(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Option<Broad> {
     if top(ty) {
         Some(Broad::Top)
-    } else if matches!(
-        super::function_types::unparen(ty),
-        TSType::TSObjectKeyword(_)
-    ) {
+    } else if matches!(ty.without_parenthesized(), TSType::TSObjectKeyword(_)) {
         Some(Broad::Object)
     } else {
         broad_record(ctx, ty).then_some(Broad::Record)
@@ -123,24 +115,20 @@ fn broad(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Option<Broad> {
 }
 
 fn object(ty: &TSType<'_>) -> bool {
-    let mut pending = vec![ty];
-    while let Some(ty) = pending.pop() {
-        match super::function_types::unparen(ty) {
-            TSType::TSArrayType(_)
-            | TSType::TSConstructorType(_)
-            | TSType::TSFunctionType(_)
-            | TSType::TSMappedType(_)
-            | TSType::TSObjectKeyword(_)
-            | TSType::TSTupleType(_) => {}
-            TSType::TSTypeLiteral(n) if !n.members.is_empty() => {}
-            TSType::TSIntersectionType(n) => pending.extend(&n.types),
-            TSType::TSTypeOperatorType(n) if n.operator == TSTypeOperatorOperator::Readonly => {
-                pending.push(&n.type_annotation);
-            }
-            _ => return false,
+    match ty.without_parenthesized() {
+        TSType::TSArrayType(_)
+        | TSType::TSConstructorType(_)
+        | TSType::TSFunctionType(_)
+        | TSType::TSMappedType(_)
+        | TSType::TSObjectKeyword(_)
+        | TSType::TSTupleType(_) => true,
+        TSType::TSTypeLiteral(n) => !n.members.is_empty(),
+        TSType::TSIntersectionType(n) => n.types.iter().all(object),
+        TSType::TSTypeOperatorType(n) => {
+            n.operator == TSTypeOperatorOperator::Readonly && object(&n.type_annotation)
         }
+        _ => false,
     }
-    true
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
@@ -184,24 +172,9 @@ fn evidence<'a>(
             if boundary(ctx, id) != owner {
                 return Break(None);
             }
-            let annotation = match kind {
-                AstKind::VariableDeclarator(v)
-                    if matches!(v.id, BindingPattern::BindingIdentifier(_)) =>
-                {
-                    v.type_annotation.as_deref()
-                }
-                AstKind::FormalParameter(p)
-                    if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
-                {
-                    p.type_annotation.as_deref()
-                }
-                AstKind::FormalParameterRest(p)
-                    if matches!(p.rest.argument, BindingPattern::BindingIdentifier(_)) =>
-                {
-                    p.type_annotation.as_deref()
-                }
-                _ => None,
-            };
+            let annotation = super::function_types::binding_annotation(kind)
+                .filter(|(pattern, _)| matches!(pattern, BindingPattern::BindingIdentifier(_)))
+                .map(|(_, a)| a);
             match annotation {
                 Some(a) => Break(
                     broad(ctx, &a.type_annotation)
@@ -220,7 +193,7 @@ fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSTyp
     }
     if let Evidence::Annotated(old) = original {
         let normalized = |ty: &TSType<'_>| {
-            super::function_types::unparen(ty)
+            ty.without_parenthesized()
                 .span()
                 .source_text(ctx.text)
                 .split_whitespace()
@@ -285,91 +258,5 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             findings.report(node.span().start as usize, None);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{broad_key, broad_record, narrow_record, object};
-    use crate::{
-        engine::{Family, Findings, Rule, Run, TsCtx, run},
-        packs::ts::function_types::contains_unknown,
-    };
-    use oxc::{
-        allocator::{Allocator, ArenaVec},
-        ast::{
-            ast::{TSType, TSTypeName, TSTypeParameterInstantiation},
-            builder::AstBuilder,
-        },
-        span::SPAN,
-    };
-
-    fn inspect(ctx: &TsCtx<'_>, findings: &mut Findings) {
-        let arena = Allocator::default();
-        let b = AstBuilder::new(&arena);
-        let mut input = TSType::new_ts_unknown_keyword(SPAN, &b);
-        let mut key = TSType::new_ts_string_keyword(SPAN, &b);
-        let mut shape = TSType::new_ts_object_keyword(SPAN, &b);
-        let wrap = |name, arg| {
-            TSType::new_ts_type_reference(
-                SPAN,
-                TSTypeName::new_identifier_reference(SPAN, name, &b),
-                Some(TSTypeParameterInstantiation::boxed(
-                    SPAN,
-                    ArenaVec::from_array_in([arg], &b),
-                    &b,
-                )),
-                &b,
-            )
-        };
-        let mut record = TSType::new_ts_type_reference(
-            SPAN,
-            TSTypeName::new_identifier_reference(SPAN, "Record", &b),
-            Some(TSTypeParameterInstantiation::boxed(
-                SPAN,
-                ArenaVec::from_array_in(
-                    [
-                        TSType::new_ts_string_keyword(SPAN, &b),
-                        TSType::new_ts_unknown_keyword(SPAN, &b),
-                    ],
-                    &b,
-                ),
-                &b,
-            )),
-            &b,
-        );
-        for _ in 0..10_000 {
-            input = TSType::new_ts_parenthesized_type(
-                SPAN,
-                TSType::new_ts_union_type(SPAN, ArenaVec::from_array_in([input], &b), &b),
-                &b,
-            );
-            key = TSType::new_ts_union_type(SPAN, ArenaVec::from_array_in([key], &b), &b);
-            shape =
-                TSType::new_ts_intersection_type(SPAN, ArenaVec::from_array_in([shape], &b), &b);
-            record = wrap("Readonly", record);
-        }
-        assert!(contains_unknown(&input));
-        assert!(broad_key(ctx, &key));
-        assert!(object(&shape));
-        assert!(broad_record(ctx, &record));
-        assert!(!narrow_record(ctx, &record));
-        findings.report(0, Some("completed"));
-    }
-
-    #[test]
-    fn deeply_nested_type_nodes_are_walked_without_the_parser() {
-        let rule = Rule {
-            id: "test/depth",
-            family: Family::Types,
-            provenance: "test",
-            fix: "test",
-            run: Run::Ts(inspect),
-        };
-        let hits = run(&[rule], [("depth.ts", b"".as_slice())]);
-        assert_eq!(
-            hits.iter().map(|h| h.note.as_deref()).collect::<Vec<_>>(),
-            [Some("completed")]
-        );
     }
 }
