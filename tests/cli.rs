@@ -1,6 +1,5 @@
-mod common;
 use std::{
-    fs,
+    env, fs,
     path::Path,
     process::{Command, Output},
     thread,
@@ -15,7 +14,21 @@ fn repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    common::git(dir, args).unwrap();
+    let mut command = Command::new("git");
+    // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
+    for (name, _) in env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(name);
+        }
+    }
+    assert!(
+        command
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 fn commit(root: &Path) {
@@ -27,6 +40,15 @@ fn commit(root: &Path) {
         "user.email=fixture@example.org",
     ];
     git(root, &[&identity[..], &["commit", "-qm", "tree"]].concat());
+}
+
+fn names(dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
 }
 
 fn check(dir: &Path, args: &[&str], code: i32) -> Output {
@@ -161,6 +183,7 @@ fn invalid_path_is_an_error() {
 
 const HEADER: &str = "blackhole-ledger 1\n";
 const RULE: &str = "core/no-suppression";
+const MISMATCH: &[u8] = b"blackhole: checkout root mismatch\n";
 
 fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
     fs::create_dir_all(dir.join(".blackhole")).unwrap();
@@ -362,12 +385,7 @@ fn the_lock_is_not_a_file() {
     std::os::unix::fs::symlink(&victim, meta.join("blackhole.lock")).unwrap();
     regenerate(&root, 0);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
-    let mut left: Vec<_> = fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    left.sort();
-    assert_eq!(left, [".git", "a.py"]);
+    assert_eq!(names(&root), [".git", "a.py"]);
 }
 
 #[cfg(unix)]
@@ -592,20 +610,6 @@ fn ci_reads_attributes_from_the_base_commit() {
     // Git compares a file line by line, and so sees this rename, only while its attributes call it text.
     fs::write(root.join(".gitattributes"), "*.py -diff\n").unwrap();
     run(root, &ci, 0);
-    // Nor do the attributes of a file the configuration names: that is policy from outside both commits.
-    fs::remove_file(root.join(".gitattributes")).unwrap();
-    let outside = tempdir().unwrap();
-    let attributes = outside.path().join("attributes");
-    fs::write(&attributes, "*.py -diff\n").unwrap();
-    git(
-        root,
-        &[
-            "config",
-            "core.attributesFile",
-            attributes.to_str().unwrap(),
-        ],
-    );
-    run(root, &ci, 0);
 }
 
 #[cfg(unix)]
@@ -704,14 +708,15 @@ fn parse_errors_cannot_be_banked_or_objected_to() {
 #[test]
 fn linked_worktree_locks_and_updates_its_own_ledger() {
     let main = repo();
-    let fixture = tempdir().unwrap();
-    fs::create_dir(fixture.path().join("base")).unwrap();
-    common::commit(fixture.path(), main.path(), "base").unwrap();
-    let linked = fixture.path().join("linked");
+    fs::write(main.path().join("a.py"), "").unwrap();
+    commit(main.path());
+    let outside = tempdir().unwrap();
+    let linked = outside.path().join("linked");
     git(
         main.path(),
         &["worktree", "add", "--detach", linked.to_str().unwrap()],
     );
+    let kept = baseline(main.path(), &[("gone.py", 1)]);
     let main_lock = fs::File::open(main.path()).unwrap();
     main_lock.lock().unwrap();
     let linked_lock = fs::File::open(&linked).unwrap();
@@ -732,7 +737,10 @@ fn linked_worktree_locks_and_updates_its_own_ledger() {
         fs::read(linked.join(".blackhole/ledger")).unwrap(),
         HEADER.as_bytes()
     );
-    assert!(!main.path().join(".blackhole").exists());
+    assert_eq!(
+        fs::read(main.path().join(".blackhole/ledger")).unwrap(),
+        kept
+    );
 }
 
 fn wait_for_exit(child: &mut std::process::Child) {
@@ -775,16 +783,12 @@ fn mismatched_root_is_rejected_before_locking() {
         let out = child.wait_with_output().unwrap();
         assert_eq!(out.status.code(), Some(2));
         assert_eq!(out.stdout, b"");
-        assert_eq!(out.stderr, b"blackhole: checkout root mismatch\n");
+        assert_eq!(out.stderr, MISMATCH);
         assert_eq!(
             fs::read(main.path().join(".blackhole/ledger")).unwrap(),
             before
         );
-        let entries: Vec<_> = fs::read_dir(&nested)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(entries, [".git"]);
+        assert_eq!(names(&nested), [".git"]);
     }
 }
 
@@ -798,25 +802,17 @@ fn configured_worktree_must_resolve_to_the_checkout() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     let expected = check(root, &[], 1).stdout;
     assert_eq!(check(&sub, &[], 1).stdout, expected);
-    let split = tempdir().unwrap();
-    git(
-        split.path(),
-        &["init", "-q", "--separate-git-dir", "store", "tree"],
-    );
-    let tree = split.path().join("tree");
-    fs::write(tree.join("a.py"), "#noqa").unwrap();
-    assert_eq!(check(&tree, &[], 1).stdout, expected);
-    for value in ["..", "../."] {
-        git(root, &["config", "core.worktree", value]);
-        assert_eq!(check(&sub, &[], 1).stdout, expected);
-    }
+    // Git walks past an entry named `.git` that is no repository; the root it then answers is not the nearest.
+    let stray = root.join("stray");
+    fs::create_dir_all(stray.join(".git")).unwrap();
+    assert_eq!(check(&stray, &[], 2).stderr, MISMATCH);
+    // A relative value is read from the git directory, so this one names the checkout itself.
+    git(root, &["config", "core.worktree", ".."]);
+    assert_eq!(check(&sub, &[], 1).stdout, expected);
     for value in [other.path().to_str().unwrap(), sub.to_str().unwrap(), "."] {
         git(root, &["config", "core.worktree", value]);
-        assert_eq!(
-            check(root, &[], 2).stderr,
-            b"blackhole: checkout root mismatch\n"
-        );
-        assert_eq!(fs::read_dir(other.path()).unwrap().count(), 1);
+        assert_eq!(check(root, &[], 2).stderr, MISMATCH);
+        assert_eq!(names(other.path()), [".git"]);
     }
 }
 

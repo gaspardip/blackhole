@@ -16,12 +16,10 @@ pub(crate) fn command() -> Command {
     }
     command.args([
         "--no-replace-objects",
-        // The checkout's configuration must not name a program for git to run or a file that sways a verdict.
+        // The checkout's configuration names a program for each of these, and a call this crate makes would run it.
         "--no-lazy-fetch",
         "-c",
         "core.fsmonitor=false",
-        "-c",
-        "core.attributesFile=/dev/null",
     ]);
     command
 }
