@@ -1,4 +1,4 @@
-use super::test_context::{member, single};
+use super::test_context::{direct_member, single_value};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{AstKind, ast::Expression};
 pub(crate) const RULE: Rule = Rule {
@@ -96,15 +96,15 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let poll = member(&c.callee, "expect", "poll");
-        if !poll && !member(&c.callee, "vi", "waitFor") {
+        let poll = direct_member(&c.callee, "expect", "poll");
+        if !poll && !direct_member(&c.callee, "vi", "waitFor") {
             continue;
         }
         let Some(value) = c
             .arguments
             .first()
             .and_then(|a| a.as_expression())
-            .and_then(|e| single(e, true))
+            .and_then(single_value)
         else {
             continue;
         };

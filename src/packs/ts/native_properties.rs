@@ -1,4 +1,4 @@
-fn global(property: &str) -> bool {
+fn protected_global(property: &str) -> bool {
     matches!(
         property,
         "AbortController"
@@ -46,7 +46,7 @@ fn global(property: &str) -> bool {
 }
 pub(super) fn protected(owner: &str, property: &str) -> bool {
     match owner {
-        "" => global(property),
+        "" => protected_global(property),
         "document" | "Document.prototype" => matches!(
             property,
             "querySelector"

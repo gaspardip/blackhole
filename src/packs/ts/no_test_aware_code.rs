@@ -48,10 +48,13 @@ fn marker(key: &str, kind: Marker) -> bool {
 fn meta(e: &Expression<'_>) -> bool {
     matches!(e.get_inner_expression(), Expression::ImportMeta(_))
 }
-fn global(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
-    matches!(e.get_inner_expression(),Expression::Identifier(id) if names.contains(&id.name.as_str())&&ctx.semantic.is_reference_to_global_variable(id))
+fn unbound_name(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
+    let Expression::Identifier(id) = e.get_inner_expression() else {
+        return false;
+    };
+    names.contains(&id.name.as_str()) && ctx.semantic.is_reference_to_global_variable(id)
 }
-fn member<'a>(e: &'a Expression<'a>) -> Option<&'a MemberExpression<'a>> {
+fn member_through_chain<'a>(e: &'a Expression<'a>) -> Option<&'a MemberExpression<'a>> {
     let e = e.get_inner_expression();
     if let Expression::ChainExpression(c) = e {
         c.expression.as_member_expression()
@@ -60,16 +63,16 @@ fn member<'a>(e: &'a Expression<'a>) -> Option<&'a MemberExpression<'a>> {
     }
 }
 fn env<'a>(e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    let m = member(e)?;
+    let m = member_through_chain(e)?;
     (m.static_property_name()? == "env").then(|| m.object())
 }
 fn mode(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Span> {
     let e = e.get_inner_expression();
-    let m = member(e)?;
+    let m = member_through_chain(e)?;
     let owner = env(m.object())?;
     let name = m.static_property_name()?.as_str()?;
     (marker(name, Marker::Mode)
-        && (meta(owner) || name == "NODE_ENV" && global(ctx, owner, &["process"])))
+        && (meta(owner) || name == "NODE_ENV" && unbound_name(ctx, owner, &["process"])))
     .then_some(e.span())
 }
 fn comparison(ctx: &TsCtx<'_>, left: &Expression<'_>, right: &Expression<'_>) -> Option<Span> {
@@ -89,14 +92,24 @@ fn read(ctx: &TsCtx<'_>, id: NodeId, span: Span) -> bool {
             AstKind::ParenthesizedExpression(_) | AstKind::ChainExpression(_)
         )
     });
-    !matches!(parent.map(oxc::semantic::AstNode::kind),Some(AstKind::AssignmentExpression(a)) if a.operator.is_assign() && a.left.span()==span)
-        && !matches!(parent.map(oxc::semantic::AstNode::kind),Some(AstKind::UnaryExpression(u)) if u.operator.is_delete())
+    match parent.map(oxc::semantic::AstNode::kind) {
+        Some(AstKind::AssignmentExpression(a)) => !a.operator.is_assign() || a.left.span() != span,
+        Some(AstKind::UnaryExpression(u)) => !u.operator.is_delete(),
+        _ => true,
+    }
 }
 fn test_member(ctx: &TsCtx<'_>, object: &Expression<'_>, name: &str) -> bool {
-    (marker(name, Marker::Worker) && env(object).is_some_and(|e| global(ctx, e, &["process"])))
+    (marker(name, Marker::Worker)
+        && env(object).is_some_and(|e| unbound_name(ctx, e, &["process"])))
         || (name == "vitest" && meta(object))
         || (marker(name, Marker::Runner)
-            && global(ctx, object, &["window", "globalThis", "global"]))
+            && unbound_name(ctx, object, &["window", "globalThis", "global"]))
+}
+fn runner_global(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
+    let Expression::Identifier(id) = expr.get_inner_expression() else {
+        return false;
+    };
+    marker(id.name.as_str(), Marker::Runner) && ctx.semantic.is_reference_to_global_variable(id)
 }
 fn worker(key: &PropertyKey<'_>, computed: bool) -> bool {
     match key {
@@ -128,8 +141,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 Some(m.span)
             }
             AstKind::UnaryExpression(u)
-                if u.operator.is_typeof()
-                    && matches!(u.argument.get_inner_expression(),Expression::Identifier(i) if marker(i.name.as_str(),Marker::Runner)&&ctx.semantic.is_reference_to_global_variable(i)) =>
+                if u.operator.is_typeof() && runner_global(ctx, &u.argument) =>
             {
                 Some(u.span)
             }
@@ -156,7 +168,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 if v.init
                     .as_ref()
                     .and_then(env)
-                    .is_some_and(|e| global(ctx, e, &["process"])) =>
+                    .is_some_and(|e| unbound_name(ctx, e, &["process"])) =>
             {
                 if let BindingPattern::ObjectPattern(p) = &v.id {
                     for prop in &p.properties {
@@ -168,7 +180,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 None
             }
             AstKind::AssignmentExpression(a)
-                if env(&a.right).is_some_and(|e| global(ctx, e, &["process"])) =>
+                if env(&a.right).is_some_and(|e| unbound_name(ctx, e, &["process"])) =>
             {
                 if let AssignmentTarget::ObjectAssignmentTarget(o) = &a.left {
                     for p in &o.properties {

@@ -1,7 +1,8 @@
+use super::values::symbol;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{AssignmentTarget, Expression, IdentifierReference, ObjectPropertyKind, PropertyKey},
+    ast::{AssignmentTarget, Expression, ObjectPropertyKind, PropertyKey},
 };
 use oxc::syntax::symbol::SymbolId;
 use std::collections::HashMap;
@@ -13,45 +14,54 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Start MSW with onUnhandledRequest set to error. Add handlers for the requests the test makes.",
     run: Run::Ts(check),
 };
-fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
-    ctx.semantic
-        .scoping()
-        .get_reference(id.reference_id.get()?)
-        .symbol_id()
+#[derive(Clone, Copy, PartialEq)]
+enum Factory {
+    Server,
+    Worker,
+    Ambiguous,
 }
-fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<u8> {
+fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
     let Expression::CallExpression(c) = e else {
         return None;
     };
     let Expression::Identifier(id) = &c.callee else {
         return None;
     };
-    let decl = ctx.semantic.symbol_declaration(symbol(ctx, id)?);
-    let AstKind::ImportSpecifier(s) = decl.kind() else {
+    let (source, super::values::Imported::Named(name)) = super::values::import_of(ctx, id)? else {
         return None;
     };
-    let AstKind::ImportDeclaration(i) = ctx.semantic.nodes().parent_kind(decl.id()) else {
-        return None;
-    };
-    if !i
-        .source
-        .value
-        .as_str()
-        .is_some_and(|s| s == "msw" || s.starts_with("msw/"))
-    {
+    if source != "msw" && !source.starts_with("msw/") {
         return None;
     }
-    match s.imported.name().as_str() {
-        "setupServer" => Some(1),
-        "setupWorker" => Some(2),
+    match name {
+        "setupServer" => Some(Factory::Server),
+        "setupWorker" => Some(Factory::Worker),
         _ => None,
     }
 }
+fn strict_handler(p: &ObjectPropertyKind<'_>) -> bool {
+    let ObjectPropertyKind::ObjectProperty(p) = p else {
+        return false;
+    };
+    if p.computed
+        || !matches!(&p.key,PropertyKey::StaticIdentifier(k) if k.name=="onUnhandledRequest")
+    {
+        return false;
+    }
+    match &p.value {
+        Expression::StringLiteral(s) => s.value == "error",
+        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => true,
+        _ => false,
+    }
+}
 fn strict(opts: Option<&Expression<'_>>) -> bool {
-    matches!(opts,Some(Expression::ObjectExpression(o)) if o.properties.iter().any(|p|matches!(p,ObjectPropertyKind::ObjectProperty(p) if !p.computed && matches!(&p.key,PropertyKey::StaticIdentifier(k) if k.name=="onUnhandledRequest") && (matches!(&p.value,Expression::StringLiteral(s) if s.value=="error")||matches!(&p.value,Expression::FunctionExpression(_)|Expression::ArrowFunctionExpression(_))))))
+    let Some(Expression::ObjectExpression(o)) = opts else {
+        return false;
+    };
+    o.properties.iter().any(strict_handler)
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let mut factories = HashMap::<SymbolId, u8>::new();
+    let mut factories = HashMap::<SymbolId, Factory>::new();
     for node in ctx.semantic.nodes().iter() {
         let (symbol, value) = match node.kind() {
             AstKind::VariableDeclarator(v) => (
@@ -69,7 +79,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             _ => continue,
         };
         if let (Some(symbol), Some(kind)) = (symbol, value.and_then(|v| factory(ctx, v))) {
-            *factories.entry(symbol).or_default() |= kind;
+            factories
+                .entry(symbol)
+                .and_modify(|previous| {
+                    if *previous != kind {
+                        *previous = Factory::Ambiguous;
+                    }
+                })
+                .or_insert(kind);
         }
     }
     for node in ctx.semantic.nodes().iter() {
@@ -85,7 +102,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         if matches!(
             (kind, m.property.name.as_str()),
-            (Some(1), "listen") | (Some(2), "start")
+            (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
         ) && !strict(c.arguments.first().and_then(|a| a.as_expression()))
         {
             findings.report(c.span.start as usize, None);

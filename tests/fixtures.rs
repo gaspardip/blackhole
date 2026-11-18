@@ -24,85 +24,98 @@ fn collect_sources(root: &Path, dir: &Path, files: &mut Vec<(String, Vec<u8>)>) 
     }
 }
 
-fn directory_case(case: &Path, rules: &[Rule], reject: bool) {
-    let tree = case.join("tree");
-    let expect = case.join("expect");
-    let mut required = BTreeSet::from([tree.clone()]);
-    if reject {
-        required.insert(expect.clone());
+struct Case {
+    files: Vec<(String, Vec<u8>)>,
+    expect: Option<PathBuf>,
+    directory: bool,
+}
+
+impl Case {
+    fn load(path: &Path, side: &str) -> Self {
+        let directory = path.is_dir();
+        let reject = side == "reject";
+        let mut files = Vec::new();
+        let expect = if directory {
+            let tree = path.join("tree");
+            let expect = reject.then(|| path.join("expect"));
+            let mut required = BTreeSet::from([tree.clone()]);
+            required.extend(expect.iter().cloned());
+            assert_eq!(entries(path), required, "{}", path.display());
+            collect_sources(&tree, &tree, &mut files);
+            assert!(!files.is_empty(), "empty {}", tree.display());
+            expect
+        } else {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let logical = if reject { name } else { path.to_str().unwrap() };
+            files.push((logical.to_owned(), fs::read(path).unwrap()));
+            reject.then(|| path.with_file_name(format!("{name}.expect")))
+        };
+        Self {
+            files,
+            expect,
+            directory,
+        }
     }
-    assert_eq!(entries(case), required, "{}", case.display());
-    let mut files = Vec::new();
-    collect_sources(&tree, &tree, &mut files);
-    assert!(!files.is_empty(), "empty {}", tree.display());
-    let hits = run(rules, files.iter().map(|(p, b)| (p.as_str(), b.as_slice())));
-    if reject {
-        assert!(!hits.is_empty(), "no finding for {}", case.display());
+
+    fn verify(&self, path: &Path, rule: &Rule) {
+        let rules = if self.expect.is_some() {
+            std::slice::from_ref(rule)
+        } else {
+            registry()
+        };
+        let hits = run(
+            rules,
+            self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
+        );
+        let Some(expected) = &self.expect else {
+            assert!(hits.is_empty(), "{}", path.display());
+            return;
+        };
+        assert!(!hits.is_empty(), "no finding for {}", path.display());
         let mut actual = String::new();
         for hit in hits {
-            writeln!(actual, "{}:{}:{}", hit.path, hit.line, hit.col).unwrap();
+            if self.directory {
+                write!(actual, "{}:", hit.path).unwrap();
+            }
+            writeln!(actual, "{}:{}", hit.line, hit.col).unwrap();
         }
         if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
-            fs::write(expect, actual).unwrap();
+            fs::write(expected, actual).unwrap();
         } else {
             assert_eq!(
-                fs::read_to_string(expect).unwrap(),
+                fs::read_to_string(expected).unwrap(),
                 actual,
                 "{}",
-                case.display()
+                path.display()
             );
         }
-    } else {
-        assert!(hits.is_empty(), "{}", case.display());
     }
 }
 
 fn verify(rule: &Rule, dir: &Path) {
     assert!(!rule.fix.trim().is_empty() && !rule.provenance.trim().is_empty());
-    let accept = dir.join("accept");
-    let reject = dir.join("reject");
     assert_eq!(
         entries(dir),
-        BTreeSet::from([accept.clone(), reject.clone()])
+        BTreeSet::from([dir.join("accept"), dir.join("reject")])
     );
-    let clean = entries(&accept);
-    assert!(!clean.is_empty());
-    for file in clean {
-        if file.is_dir() {
-            directory_case(&file, registry(), false);
-            continue;
-        }
-        let data = fs::read(&file).unwrap();
-        assert!(
-            run(registry(), [(file.to_str().unwrap(), data.as_slice())]).is_empty(),
-            "{}",
-            file.display()
-        );
-    }
-    let rejects = entries(&reject);
-    assert!(!rejects.is_empty());
-    for file in rejects {
-        if file.is_dir() {
-            directory_case(&file, std::slice::from_ref(rule), true);
-            continue;
-        }
-        let name = file.file_name().unwrap().to_str().unwrap();
-        if let Some(base) = name.strip_suffix(".expect") {
-            assert!(reject.join(base).is_file(), "orphan {}", file.display());
-            continue;
-        }
-        let bytes = fs::read(&file).unwrap();
-        let hits = run(std::slice::from_ref(rule), [(name, bytes.as_slice())]);
-        assert!(!hits.is_empty(), "no finding for {}", file.display());
-        let mut actual = String::new();
-        for hit in hits {
-            writeln!(actual, "{}:{}", hit.line, hit.col).unwrap();
-        }
-        let expected = reject.join(format!("{name}.expect"));
-        if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
-            fs::write(expected, actual).unwrap();
-        } else {
-            assert_eq!(fs::read_to_string(expected).unwrap(), actual, "{name}");
+    for side in ["accept", "reject"] {
+        let folder = dir.join(side);
+        let cases = entries(&folder);
+        assert!(!cases.is_empty(), "empty {}", folder.display());
+        for path in cases {
+            if side == "reject"
+                && !path.is_dir()
+                && let Some(name) = path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_suffix(".expect")
+            {
+                assert!(folder.join(name).is_file(), "orphan {}", path.display());
+                continue;
+            }
+            Case::load(&path, side).verify(&path, rule);
         }
     }
 }

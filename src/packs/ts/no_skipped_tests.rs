@@ -12,21 +12,57 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Make the test pass or delete it with the behaviour it covered. A skipped test proves nothing.",
     run: Run::Ts(check),
 };
+fn modifier(name: &str) -> bool {
+    matches!(
+        name,
+        "skip" | "only" | "todo" | "skipIf" | "runIf" | "fixme" | "fails" | "failing"
+    )
+}
+fn focused_or_skipped(e: &Expression<'_>) -> bool {
+    let Expression::Identifier(id) = e else {
+        return false;
+    };
+    matches!(
+        id.name.as_str(),
+        "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe"
+    )
+}
+fn body_skip(e: &Expression<'_>) -> Option<usize> {
+    match e {
+        Expression::StaticMemberExpression(m)
+            if matches!(&m.object, Expression::ThisExpression(_)) && m.property.name == "skip" =>
+        {
+            Some(m.property.span.start as usize)
+        }
+        Expression::Identifier(i) if i.name == "pending" => Some(i.span.start as usize),
+        _ => None,
+    }
+}
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut locations = BTreeSet::new();
     let nodes = ctx.semantic.nodes();
+    let is_test_file = test_file(ctx.path);
     for (id, n) in nodes.iter_enumerated() {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let base = root(&c.callee);
-        let position=if base.is_some_and(|s|is_test(s)||suite(s)){
-            chain_property(&c.callee,|s|matches!(s,"skip"|"only"|"todo"|"skipIf"|"runIf"|"fixme"|"fails"|"failing"))
-        }else if matches!(&c.callee,Expression::Identifier(i) if matches!(i.name.as_str(),"xit"|"xtest"|"xdescribe"|"fit"|"fdescribe")){
+        let position = if root(&c.callee).is_some_and(|s| is_test(s) || suite(s)) {
+            chain_property(&c.callee, modifier)
+        } else if focused_or_skipped(&c.callee) {
             Some(c.callee.span().start as usize)
-        }else if test_file(ctx.path) && nodes.ancestors(id).any(|n|matches!(n.kind(),AstKind::Function(_)|AstKind::ArrowFunctionExpression(_)) && matches!(nodes.parent_kind(n.id()),AstKind::CallExpression(parent) if root(&parent.callee).is_some_and(is_test))){
-            match &c.callee{Expression::StaticMemberExpression(m) if matches!(&m.object,Expression::ThisExpression(_)) && m.property.name=="skip"=>Some(m.property.span.start as usize),Expression::Identifier(i) if i.name=="pending"=>Some(i.span.start as usize),_=>None}
-        }else{None};
+        } else if is_test_file
+            && let Some(at) = body_skip(&c.callee)
+            && super::values::enclosing_functions(ctx, id).any(|f| {
+                match nodes.parent_kind(f.id()) {
+                    AstKind::CallExpression(parent) => root(&parent.callee).is_some_and(is_test),
+                    _ => false,
+                }
+            })
+        {
+            Some(at)
+        } else {
+            None
+        };
         locations.extend(position);
     }
     for at in locations {

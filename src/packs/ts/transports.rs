@@ -1,5 +1,5 @@
 use super::{
-    config_responses::raw_response,
+    config_responses::transport_response,
     values::{declaration, initializer, key, path, resolve},
 };
 use crate::engine::TsCtx;
@@ -12,6 +12,22 @@ use oxc::{
 };
 use std::collections::HashSet;
 
+fn global_object(name: &str) -> bool {
+    matches!(name, "window" | "self" | "global" | "globalThis")
+}
+fn fetch_path(parts: &[&str]) -> bool {
+    match parts {
+        ["fetch"] => true,
+        [root, "fetch"] => global_object(root),
+        _ => false,
+    }
+}
+fn global_qualifier(ctx: &TsCtx<'_>, name: &TSTypeName<'_>) -> bool {
+    let TSTypeName::IdentifierReference(id) = name else {
+        return false;
+    };
+    global_object(id.name.as_str()) && ctx.semantic.is_reference_to_global_variable(id)
+}
 fn fetch<'a>(ctx: &TsCtx<'a>, mut ty: &'a TSType<'a>) -> bool {
     let mut seen = HashSet::new();
     while seen.insert(ty.span()) {
@@ -22,12 +38,13 @@ fn fetch<'a>(ctx: &TsCtx<'a>, mut ty: &'a TSType<'a>) -> bool {
                         if ctx.semantic.is_reference_to_global_variable(id) {
                             id.name == "fetch"
                         } else {
-                            initializer(ctx,id).and_then(|e|path(ctx,e)).is_some_and(|p|p==["fetch"] || matches!(p.as_slice(),[root,m] if matches!(root.as_str(),"window"|"self"|"global"|"globalThis") && m=="fetch"))
+                            initializer(ctx, id)
+                                .and_then(|e| path(ctx, e))
+                                .is_some_and(|p| fetch_path(&p))
                         }
                     }
                     TSTypeQueryExprName::QualifiedName(n) => {
-                        n.right.name == "fetch"
-                            && matches!(&n.left,TSTypeName::IdentifierReference(id) if ctx.semantic.is_reference_to_global_variable(id)&&matches!(id.name.as_str(),"window"|"globalThis"|"global"|"self"))
+                        n.right.name == "fetch" && global_qualifier(ctx, &n.left)
                     }
                     _ => false,
                 };
@@ -91,17 +108,14 @@ fn arguments<'a>(
     next: &mut Vec<&'a Expression<'a>>,
 ) {
     let decl = ctx.semantic.symbol_declaration(symbol);
-    if let Some(f) = ctx.semantic.nodes().ancestors(decl.id()).find_map(|n| {
+    if let Some(f) = super::values::enclosing_functions(ctx, decl.id()).find_map(|n| {
         if let AstKind::Function(f) = n.kind() {
             Some(f)
         } else {
             None
         }
-    }) && let Some(index) = f.params.items.iter().position(|p| {
-        p.pattern
-            .get_binding_identifier()
-            .is_some_and(|id| id.symbol_id.get() == Some(symbol))
-    }) && let Some(fn_id) = f.id.as_ref().and_then(|id| id.symbol_id.get())
+    }) && let Some(index) = super::values::parameter_index(&f.params, symbol)
+        && let Some(fn_id) = f.id.as_ref().and_then(|id| id.symbol_id.get())
     {
         for reference in ctx.semantic.scoping().get_resolved_references(fn_id) {
             if let AstKind::CallExpression(c) =
@@ -114,35 +128,55 @@ fn arguments<'a>(
         }
     }
 }
+#[derive(Default)]
+struct FieldPaths<'a> {
+    entries: Vec<(Option<usize>, &'a str)>,
+    ids: std::collections::HashMap<(Option<usize>, &'a str), usize>,
+}
+impl<'a> FieldPaths<'a> {
+    fn push(&mut self, parent: Option<usize>, key: &'a str) -> usize {
+        let field = (parent, key);
+        *self.ids.entry(field).or_insert_with(|| {
+            self.entries.push(field);
+            self.entries.len() - 1
+        })
+    }
+}
 pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&'a Expression<'a>> {
-    let mut pending = vec![(initial, Vec::<String>::new(), HashSet::new())];
+    enum Step<'a> {
+        Visit(&'a Expression<'a>, Option<usize>),
+        Leave(Span),
+    }
+    let mut pending = vec![Step::Visit(initial, None)];
+    let mut ancestors = HashSet::new();
     let mut seen = HashSet::new();
     let mut results = Vec::new();
-    while let Some((e, mut fields, mut ancestors)) = pending.pop() {
-        let e = resolve(ctx, e);
-        if !ancestors.insert(e.span()) || !seen.insert((e.span(), fields.clone())) {
+    let mut paths = FieldPaths::default();
+    while let Some(step) = pending.pop() {
+        let (e, fields) = match step {
+            Step::Visit(e, path) => (resolve(ctx, e), path),
+            Step::Leave(span) => {
+                ancestors.remove(&span);
+                continue;
+            }
+        };
+        if ancestors.contains(&e.span()) || !seen.insert((e.span(), fields)) {
             continue;
         }
+        ancestors.insert(e.span());
+        pending.push(Step::Leave(e.span()));
         let mut next = Vec::new();
         if let Expression::Identifier(id) = e
-            && let Some(symbol) = id
-                .reference_id
-                .get()
-                .and_then(|r| ctx.semantic.scoping().get_reference(r).symbol_id())
+            && let Some(symbol) = super::values::symbol(ctx, id)
         {
             let decl = ctx.semantic.symbol_declaration(symbol);
             if let AstKind::VariableDeclarator(v) = decl.kind()
                 && let oxc::ast::ast::BindingPattern::ObjectPattern(obj) = &v.id
                 && let Some(init) = &v.init
-                && let Some(prop) = obj.properties.iter().find(|p| {
-                    p.value
-                        .get_binding_identifier()
-                        .is_some_and(|id| id.symbol_id.get() == Some(symbol))
-                })
-                && let Some(k) = key(ctx, &prop.key, prop.computed)
+                && let Some(k) =
+                    super::values::destructured(ctx, obj, |id| id.symbol_id.get() == Some(symbol))
             {
-                fields.push(k.to_owned());
-                pending.push((init, fields, ancestors));
+                pending.push(Step::Visit(init, Some(paths.push(fields, k))));
                 continue;
             }
             arguments(ctx, symbol, &mut next);
@@ -150,26 +184,21 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
         if let Some(m) = e.as_member_expression()
             && let Some(k) = super::values::member_key(ctx, m)
         {
-            fields.push(k.to_owned());
-            pending.push((m.object(), fields, ancestors));
+            pending.push(Step::Visit(m.object(), Some(paths.push(fields, k))));
             continue;
         }
         if let Expression::ObjectExpression(o) = e
-            && let Some(wanted) = fields.last()
+            && let Some((parent, wanted)) = fields.map(|id| paths.entries[id])
         {
             for p in &o.properties {
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => {
-                        pending.push((&s.argument, fields.clone(), ancestors.clone()));
+                        pending.push(Step::Visit(&s.argument, fields));
                     }
                     ObjectPropertyKind::ObjectProperty(p)
                         if key(ctx, &p.key, p.computed) == Some(wanted) =>
                     {
-                        pending.push((
-                            &p.value,
-                            fields[..fields.len() - 1].to_vec(),
-                            ancestors.clone(),
-                        ));
+                        pending.push(Step::Visit(&p.value, parent));
                     }
                     ObjectPropertyKind::ObjectProperty(_) => (),
                 }
@@ -189,7 +218,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
                 Expression::FunctionExpression(f) => f.body.as_deref(),
                 Expression::ArrowFunctionExpression(f) => {
                     if let Some(value) = f.body.as_expression() {
-                        pending.push((value, fields, ancestors));
+                        pending.push(Step::Visit(value, fields));
                         continue;
                     } else if let oxc::ast::ast::ArrowFunctionBody::FunctionBody(b) = &f.body {
                         Some(&**b)
@@ -206,13 +235,10 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
                 }));
             }
         }
-        if next.is_empty() && fields.is_empty() {
+        if next.is_empty() && fields.is_none() {
             results.push(e);
         }
-        pending.extend(
-            next.into_iter()
-                .map(|e| (e, fields.clone(), ancestors.clone())),
-        );
+        pending.extend(next.into_iter().map(|e| Step::Visit(e, fields)));
     }
     results
 }
@@ -238,10 +264,10 @@ pub(super) fn report(
             results(ctx, n.arguments.first()?.as_expression()?)
                 .into_iter()
                 .filter_map(|e| option(ctx, e))
-                .find(|e| raw_response(ctx, e, true))?
+                .find(|e| transport_response(ctx, e))?
         }
         _ => return None,
     };
-    (raw_response(ctx, transport, true) && reported.insert(resolve(ctx, transport).span()))
+    (transport_response(ctx, transport) && reported.insert(resolve(ctx, transport).span()))
         .then_some(transport.span().start as usize)
 }

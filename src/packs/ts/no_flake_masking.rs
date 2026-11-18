@@ -1,4 +1,4 @@
-use super::test_context::{is_test, member, root, suite};
+use super::test_context::{direct_member, is_test, root, suite};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
@@ -42,14 +42,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             AstKind::ObjectProperty(p) if name(p) == Some("test") => {
                 inspect(Some(&p.value), &[], findings);
             }
-            AstKind::CallExpression(c) if member(&c.callee, "vi", "setConfig") => inspect(
+            AstKind::CallExpression(c) if direct_member(&c.callee, "vi", "setConfig") => inspect(
                 c.arguments.first().and_then(Argument::as_expression),
                 &["testTimeout", "hookTimeout"],
                 findings,
             ),
             AstKind::CallExpression(c)
                 if root(&c.callee).is_some_and(|s| is_test(s) || suite(s))
-                    && !matches!(&c.callee,Expression::StaticMemberExpression(m) if matches!(m.property.name.as_str(),"each"|"for"|"extend"|"scoped"|"override")) =>
+                    && !super::test_context::static_method(
+                        &c.callee,
+                        &["each", "for", "extend", "scoped", "override"],
+                    ) =>
             {
                 let second = c.arguments.get(1).and_then(Argument::as_expression);
                 inspect(second, &["timeout"], findings);

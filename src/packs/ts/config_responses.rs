@@ -1,4 +1,4 @@
-use super::values::{declaration, global, resolve};
+use super::values::{declaration, resolve, resolves_to_global};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -31,16 +31,8 @@ fn returns<'a>(ctx: &TsCtx<'a>, function: NodeId, pending: &mut Vec<&'a Expressi
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         if let AstKind::ReturnStatement(ret) = node.kind()
             && let Some(arg) = &ret.argument
-            && ctx
-                .semantic
-                .nodes()
-                .ancestors(id)
-                .find(|n| {
-                    matches!(
-                        n.kind(),
-                        AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-                    )
-                })
+            && super::values::enclosing_functions(ctx, id)
+                .next()
                 .is_some_and(|n| n.id() == function)
         {
             pending.push(arg);
@@ -48,7 +40,18 @@ fn returns<'a>(ctx: &TsCtx<'a>, function: NodeId, pending: &mut Vec<&'a Expressi
     }
 }
 
-pub(super) fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, msw: bool) -> bool {
+#[derive(Clone, Copy)]
+enum ResponseKinds {
+    Native,
+    WithMsw,
+}
+pub(super) fn transport_response(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
+    raw_response(ctx, value, ResponseKinds::WithMsw)
+}
+fn config_response(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
+    raw_response(ctx, value, ResponseKinds::Native)
+}
+fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -> bool {
     let mut pending = vec![value];
     let mut seen = HashSet::new();
     while let Some(expr) = pending.pop() {
@@ -58,8 +61,8 @@ pub(super) fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, msw: bool) -
         }
         match expr {
             Expression::NewExpression(n)
-                if global(ctx, &n.callee, "Response")
-                    || msw
+                if resolves_to_global(ctx, &n.callee, "Response")
+                    || matches!(kinds, ResponseKinds::WithMsw)
                         && super::values::path(ctx, &n.callee)
                             .is_some_and(|p| p == ["msw", "HttpResponse"]) =>
             {
@@ -68,10 +71,10 @@ pub(super) fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, msw: bool) -
             Expression::CallExpression(call) => {
                 let invocation = super::double_mutations::invoked(ctx, call);
                 let callee = invocation.callee;
-                if super::values::path(ctx, callee).is_some_and(|p| p == ["Promise", "resolve"]) {
+                if invocation.path.as_deref() == Some(&["Promise", "resolve"]) {
                     pending.extend(invocation.arg(0));
                 }
-                if msw
+                if matches!(kinds, ResponseKinds::WithMsw)
                     && let Some(m) = callee.as_member_expression()
                     && super::values::path(ctx, m.object())
                         .is_some_and(|p| p == ["msw", "HttpResponse"])
@@ -99,7 +102,7 @@ pub(super) fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, msw: bool) -
                             .and_then(oxc::str::JSStr::as_str),
                         Some("json" | "redirect" | "error")
                     )
-                    && global(ctx, member.object(), "Response")
+                    && resolves_to_global(ctx, member.object(), "Response")
                 {
                     return true;
                 }
@@ -142,7 +145,7 @@ pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> boo
         }
     };
     match key {
-        Some("outboundService") => raw_response(ctx, &property.value, false),
+        Some("outboundService") => config_response(ctx, &property.value),
         Some("serviceBindings") => {
             let mut pending = vec![&property.value];
             let mut seen = HashSet::new();
@@ -156,9 +159,7 @@ pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> boo
                 for p in &obj.properties {
                     match p {
                         ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
-                        ObjectPropertyKind::ObjectProperty(p)
-                            if raw_response(ctx, &p.value, false) =>
-                        {
+                        ObjectPropertyKind::ObjectProperty(p) if config_response(ctx, &p.value) => {
                             return true;
                         }
                         ObjectPropertyKind::ObjectProperty(_) => (),

@@ -78,7 +78,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         }
         if !is_test(base)
             || chain_property(&c.callee, |s| s == "todo").is_some()
-            || matches!(&c.callee,Expression::StaticMemberExpression(m) if matches!(m.property.name.as_str(),"each"|"for"|"extend"))
+            || super::test_context::static_method(&c.callee, &["each", "for", "extend"])
         {
             continue;
         }

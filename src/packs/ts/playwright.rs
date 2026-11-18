@@ -18,11 +18,7 @@ fn typed(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
     let Expression::Identifier(id) = e else {
         return false;
     };
-    let Some(sym) = id
-        .reference_id
-        .get()
-        .and_then(|r| ctx.semantic.scoping().get_reference(r).symbol_id())
-    else {
+    let Some(sym) = super::values::symbol(ctx, id) else {
         return false;
     };
     let nodes = ctx.semantic.nodes();
@@ -43,11 +39,14 @@ fn typed(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
     let TSTypeName::IdentifierReference(name) = &t.type_name else {
         return false;
     };
-    let Some(AstKind::ImportSpecifier(s)) = declaration(ctx, name) else {
-        return false;
-    };
-    matches!(nodes.parent_kind(s.node_id.get()),AstKind::ImportDeclaration(i) if i.source.value.as_str().is_some_and(library))
-        && names.contains(&s.imported.name().as_str())
+    matches!(declaration(ctx, name), Some(AstKind::ImportSpecifier(_)))
+        && super::values::import_of(ctx, name).is_some_and(|(source, imported)| {
+            library(source)
+                && matches!(imported,super::values::Imported::Named(n) if names.contains(&n))
+        })
+}
+fn browser_engine(parts: &[&str]) -> bool {
+    matches!(parts,[source,"chromium"|"firefox"|"webkit"] if library(source))
 }
 fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
     let mut pending = vec![initial];
@@ -57,7 +56,14 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
         if !seen.insert(e.span()) {
             continue;
         }
-        if typed(ctx,e,&["Page","BrowserContext","Browser","BrowserType"]) || path(ctx,e).is_some_and(|p|matches!(p.as_slice(),[lib,n] if library(lib)&& matches!(n.as_str(),"chromium"|"firefox"|"webkit"))){return true}
+        if typed(
+            ctx,
+            e,
+            &["Page", "BrowserContext", "Browser", "BrowserType"],
+        ) || path(ctx, e).is_some_and(|p| browser_engine(&p))
+        {
+            return true;
+        }
         match e {
             Expression::AwaitExpression(a) => pending.push(&a.argument),
             Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
@@ -91,48 +97,15 @@ fn route(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
     let Expression::Identifier(id) = e else {
         return false;
     };
-    let Some(symbol) = id
-        .reference_id
-        .get()
-        .and_then(|r| ctx.semantic.scoping().get_reference(r).symbol_id())
-    else {
+    let Some(symbol) = super::values::symbol(ctx, id) else {
         return false;
     };
-    let nodes = ctx.semantic.nodes();
-    let Some(owner) = nodes
-        .ancestors(ctx.semantic.symbol_declaration(symbol).id())
-        .find(|n| {
-            matches!(
-                n.kind(),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        })
-    else {
+    let Some(call) = super::values::callback_call(ctx, symbol, 1) else {
         return false;
     };
-    let params = match owner.kind() {
-        AstKind::Function(f) => &f.params,
-        AstKind::ArrowFunctionExpression(f) => &f.params,
-        _ => return false,
-    };
-    if params
-        .items
-        .first()
-        .and_then(|p| p.pattern.get_binding_identifier())
-        .and_then(|id| id.symbol_id.get())
-        != Some(symbol)
-    {
-        return false;
-    }
-    let AstKind::CallExpression(c) = nodes.parent_kind(owner.id()) else {
-        return false;
-    };
-    let call = invoked(ctx, c);
-    call.arg(1).is_some_and(|e| e.span() == owner.span())
-        && call
-            .callee
-            .as_member_expression()
-            .is_some_and(|m| member_key(ctx, m) == Some("route") && page(ctx, m.object()))
+    call.callee
+        .as_member_expression()
+        .is_some_and(|m| member_key(ctx, m) == Some("route") && page(ctx, m.object()))
 }
 pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expression<'_>) -> bool {
     if !route(ctx, receiver) {

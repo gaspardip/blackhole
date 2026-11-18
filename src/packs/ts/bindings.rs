@@ -54,8 +54,7 @@ pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bo
     false
 }
 fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
-    if path(ctx, expr).is_some_and(|p| p.starts_with(&["cloudflare:workers".into(), "env".into()]))
-    {
+    if path(ctx, expr).is_some_and(|p| p.starts_with(&["cloudflare:workers", "env"])) {
         return true;
     }
     let mut e = expr;
@@ -79,49 +78,19 @@ fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
             e = init;
             continue;
         }
-        let Some(symbol) = id
-            .reference_id
-            .get()
-            .and_then(|r| ctx.semantic.scoping().get_reference(r).symbol_id())
-        else {
+        let Some(symbol) = super::values::symbol(ctx, id) else {
             return false;
         };
-        let decl = ctx.semantic.symbol_declaration(symbol);
-        let nodes = ctx.semantic.nodes();
-        let Some(function) = nodes.ancestors(decl.id()).find(|n| {
-            matches!(
-                n.kind(),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        }) else {
-            return false;
-        };
-        let params = match function.kind() {
-            AstKind::Function(f) => &f.params,
-            AstKind::ArrowFunctionExpression(f) => &f.params,
-            _ => return false,
-        };
-        if !params.items.iter().take(2).any(|p| {
-            p.pattern
-                .get_binding_identifier()
-                .is_some_and(|b| b.symbol_id.get() == Some(symbol))
-        }) {
-            return false;
-        }
-        let AstKind::CallExpression(c) = nodes.parent_kind(function.id()) else {
-            return false;
-        };
-        let call = invoked(ctx, c);
-        return call.arg(1).is_some_and(|e| e.span() == function.span())
-            && path(ctx, call.callee)
-                .is_some_and(|p| p == ["cloudflare:test", "runInDurableObject"]);
+        return super::values::callback_call(ctx, symbol, 2).is_some_and(|call| {
+            call.path.as_deref() == Some(&["cloudflare:test", "runInDurableObject"])
+        });
     }
 }
 pub(super) fn mutation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
-    let Some(p) = path(ctx, call.callee) else {
+    let Some(p) = &call.path else {
         return false;
     };
-    if p == ["cloudflare:workers", "withEnv"] {
+    if p.as_slice() == ["cloudflare:workers", "withEnv"] {
         return call.arg(0).is_some_and(|arg| contains_function(ctx, arg));
     }
     if !call.arg(0).is_some_and(|e| binding(ctx, e)) {
@@ -153,21 +122,25 @@ pub(super) fn assignment(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
         && contains_function(ctx, &a.right)
 }
 pub(super) fn spread(ctx: &TsCtx<'_>, obj: &ObjectExpression<'_>) -> bool {
+    let has_binding_spread = obj.properties.iter().any(|property| match property {
+        ObjectPropertyKind::SpreadProperty(spread) => binding(ctx, &spread.argument),
+        ObjectPropertyKind::ObjectProperty(_) => false,
+    });
+    if !has_binding_spread {
+        return false;
+    }
     if let AstKind::CallExpression(c) = ctx.semantic.nodes().parent_kind(obj.node_id.get())
-        && path(ctx, invoked(ctx, c).callee).is_some_and(|p| p == ["cloudflare:workers", "withEnv"])
+        && invoked(ctx, c).path.as_deref() == Some(&["cloudflare:workers", "withEnv"])
     {
         return false;
     }
-    obj.properties
-        .iter()
-        .any(|p| matches!(p,ObjectPropertyKind::SpreadProperty(s) if binding(ctx,&s.argument)))
-        && obj.properties.iter().any(|p| {
-            contains_function(
-                ctx,
-                match p {
-                    ObjectPropertyKind::SpreadProperty(s) => &s.argument,
-                    ObjectPropertyKind::ObjectProperty(o) => &o.value,
-                },
-            )
-        })
+    obj.properties.iter().any(|p| {
+        contains_function(
+            ctx,
+            match p {
+                ObjectPropertyKind::SpreadProperty(s) => &s.argument,
+                ObjectPropertyKind::ObjectProperty(o) => &o.value,
+            },
+        )
+    })
 }

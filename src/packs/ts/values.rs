@@ -1,4 +1,5 @@
 use crate::engine::TsCtx;
+use oxc::syntax::symbol::SymbolId;
 use oxc::{
     ast::{
         AstKind,
@@ -7,12 +8,54 @@ use oxc::{
     span::GetSpan,
 };
 use std::collections::HashSet;
+
+pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
+    ctx.semantic
+        .scoping()
+        .get_reference(id.reference_id.get()?)
+        .symbol_id()
+}
+#[derive(PartialEq)]
+pub(super) enum Imported<'a> {
+    Named(&'a str),
+    Default,
+    Namespace,
+}
+
+pub(super) fn import_of<'a>(
+    ctx: &TsCtx<'a>,
+    id: &IdentifierReference<'_>,
+) -> Option<(&'a str, Imported<'a>)> {
+    let decl = ctx.semantic.symbol_declaration(symbol(ctx, id)?);
+    let AstKind::ImportDeclaration(import) = ctx.semantic.nodes().parent_kind(decl.id()) else {
+        return None;
+    };
+    let name = match decl.kind() {
+        AstKind::ImportSpecifier(s) => Imported::Named(s.imported.name().as_str()),
+        AstKind::ImportDefaultSpecifier(_) => Imported::Default,
+        AstKind::ImportNamespaceSpecifier(_) => Imported::Namespace,
+        _ => return None,
+    };
+    Some((import.source.value.as_str()?, name))
+}
+pub(super) fn destructured<'a>(
+    ctx: &TsCtx<'a>,
+    pattern: &'a oxc::ast::ast::ObjectPattern<'a>,
+    matches: impl Fn(&oxc::ast::ast::BindingIdentifier<'a>) -> bool,
+) -> Option<&'a str> {
+    let property = pattern
+        .properties
+        .iter()
+        .find(|p| p.value.get_binding_identifier().is_some_and(&matches))?;
+    key(ctx, &property.key, property.computed)
+}
+
 pub(super) fn declaration<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<AstKind<'a>> {
     let scope = ctx.semantic.scoping();
-    let symbol = scope.get_reference(id.reference_id.get()?).symbol_id()?;
+    let symbol = symbol(ctx, id)?;
     (!scope.symbol_is_mutated(symbol) && scope.symbol_redeclarations(symbol).is_empty())
         .then(|| ctx.semantic.symbol_declaration(symbol).kind())
 }
@@ -46,8 +89,11 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
     }
 }
 
-pub(super) fn global(ctx: &TsCtx<'_>, expr: &Expression<'_>, name: &str) -> bool {
-    matches!(resolve(ctx,expr), Expression::Identifier(id) if id.name == name && ctx.semantic.is_reference_to_global_variable(id))
+pub(super) fn resolves_to_global(ctx: &TsCtx<'_>, expr: &Expression<'_>, name: &str) -> bool {
+    let Expression::Identifier(id) = resolve(ctx, expr) else {
+        return false;
+    };
+    id.name == name && ctx.semantic.is_reference_to_global_variable(id)
 }
 
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
@@ -79,7 +125,7 @@ pub(super) fn member_key<'a>(ctx: &TsCtx<'a>, member: &'a MemberExpression<'a>) 
     }
 }
 
-pub(super) fn path(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<Vec<String>> {
+pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<&'a str>> {
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
     let mut expr = expr;
@@ -89,7 +135,7 @@ pub(super) fn path(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<Vec<String>
             return None;
         }
         if let Some(member) = expr.as_member_expression() {
-            parts.push(member_key(ctx, member)?.to_owned());
+            parts.push(member_key(ctx, member)?);
             expr = member.object();
             continue;
         }
@@ -97,43 +143,72 @@ pub(super) fn path(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<Vec<String>
             return None;
         };
         if ctx.semantic.is_reference_to_global_variable(id) {
-            parts.push(id.name.to_string());
+            parts.push(id.name.as_str());
             break;
         }
         let decl = declaration(ctx, id)?;
         if let AstKind::VariableDeclarator(v) = decl
             && let BindingPattern::ObjectPattern(pattern) = &v.id
         {
-            let p = pattern.properties.iter().find(|p| {
-                p.value
-                    .get_binding_identifier()
-                    .is_some_and(|b| b.name == id.name)
-            })?;
-            parts.push(key(ctx, &p.key, p.computed)?.to_owned());
+            parts.push(destructured(ctx, pattern, |b| b.name == id.name)?);
             expr = v.init.as_ref()?;
             continue;
         }
-        let symbol = ctx
-            .semantic
-            .scoping()
-            .get_reference(id.reference_id.get()?)
-            .symbol_id()?;
-        let parent = ctx
-            .semantic
-            .nodes()
-            .parent_kind(ctx.semantic.symbol_declaration(symbol).id());
-        let AstKind::ImportDeclaration(import) = parent else {
-            return None;
-        };
-        match decl {
-            AstKind::ImportSpecifier(s) => parts.push(s.imported.name().as_str().to_owned()),
-            AstKind::ImportDefaultSpecifier(_) => parts.push("default".into()),
-            AstKind::ImportNamespaceSpecifier(_) => (),
-            _ => return None,
+        let (source, imported) = import_of(ctx, id)?;
+        match imported {
+            Imported::Named(name) => parts.push(name),
+            Imported::Default => parts.push("default"),
+            Imported::Namespace => (),
         }
-        parts.push(import.source.value.as_str()?.to_owned());
+        parts.push(source);
         break;
     }
     parts.reverse();
     Some(parts)
+}
+
+pub(super) fn enclosing_functions<'ctx, 'a>(
+    ctx: &'ctx TsCtx<'a>,
+    id: oxc::syntax::node::NodeId,
+) -> impl Iterator<Item = &'ctx oxc::semantic::AstNode<'a>> {
+    ctx.semantic.nodes().ancestors(id).filter(|node| {
+        matches!(
+            node.kind(),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        )
+    })
+}
+
+pub(super) fn parameter_index(
+    params: &oxc::ast::ast::FormalParameters<'_>,
+    symbol: SymbolId,
+) -> Option<usize> {
+    params.items.iter().position(|p| {
+        p.pattern
+            .get_binding_identifier()
+            .is_some_and(|id| id.symbol_id.get() == Some(symbol))
+    })
+}
+
+pub(super) fn callback_call<'a>(
+    ctx: &TsCtx<'a>,
+    symbol: SymbolId,
+    first_parameters: usize,
+) -> Option<super::double_mutations::Invocation<'a>> {
+    let function = enclosing_functions(ctx, ctx.semantic.symbol_declaration(symbol).id()).next()?;
+    let params = match function.kind() {
+        AstKind::Function(f) => &f.params,
+        AstKind::ArrowFunctionExpression(f) => &f.params,
+        _ => return None,
+    };
+    if parameter_index(params, symbol)? >= first_parameters {
+        return None;
+    }
+    let AstKind::CallExpression(c) = ctx.semantic.nodes().parent_kind(function.id()) else {
+        return None;
+    };
+    let call = super::double_mutations::invoked(ctx, c);
+    call.arg(1)
+        .is_some_and(|e| e.span() == function.span())
+        .then_some(call)
 }

@@ -1,3 +1,4 @@
+use super::values::symbol;
 use super::{
     double_mutations::{invoked, writes},
     values::{declaration, member_key, path, resolve},
@@ -6,21 +7,11 @@ use crate::engine::{Findings, TsCtx};
 use oxc::{
     ast::{
         AstKind,
-        ast::{
-            AssignmentExpression, Expression, Function, IdentifierReference, MemberExpression,
-            Statement,
-        },
+        ast::{AssignmentExpression, Expression, Function, MemberExpression, Statement},
     },
     span::GetSpan,
     syntax::symbol::SymbolId,
 };
-
-fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
-    ctx.semantic
-        .scoping()
-        .get_reference(id.reference_id.get()?)
-        .symbol_id()
-}
 
 fn same(ctx: &TsCtx<'_>, left: &MemberExpression<'_>, right: &MemberExpression<'_>) -> bool {
     let (mut left, mut right) = (left, right);
@@ -68,7 +59,10 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
     else {
         return false;
     };
-    let arg_id = |e: &Expression<'_>| matches!(resolve(ctx,e),Expression::Identifier(id) if symbol(ctx,id)==Some(args));
+    let arg_id = |e: &Expression<'_>| match resolve(ctx, e) {
+        Expression::Identifier(id) => symbol(ctx, id) == Some(args),
+        _ => false,
+    };
     for st in before {
         let Statement::ExpressionStatement(st) = st else {
             return false;
@@ -81,7 +75,7 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
             .callee
             .as_member_expression()
             .is_some_and(|m| arg_id(m.object()))
-            || (path(ctx, inv.callee).is_some_and(|p| {
+            || (inv.path.as_ref().is_some_and(|p| {
                 matches!(
                     p.join(".").as_str(),
                     "Reflect.set"
@@ -136,6 +130,15 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             _ => (),
         }
     }
+    let restores: Vec<_> = assignments
+        .iter()
+        .filter_map(|&(restore, member)| {
+            let Expression::Identifier(id) = &restore.right else {
+                return None;
+            };
+            Some((restore.span.start, symbol(ctx, id)?, member))
+        })
+        .collect();
     for &(a, m) in &assignments {
         let f = match resolve(ctx, &a.right) {
             Expression::FunctionExpression(f) => Some(&**f),
@@ -167,8 +170,18 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
-        if saved.iter().any(|&(start,id,old)| start<a.span.start && same(ctx,m,old) && !f.is_some_and(|f|delegates(ctx,f,id)) && assignments.iter().any(|&(restore,r)|restore.span.start>a.span.start && matches!(&restore.right,Expression::Identifier(n) if symbol(ctx,n)==Some(id)) && same(ctx,m,r))){
-            findings.report(a.span.start as usize,None);
+        let has_later_assignment = |id| {
+            restores.iter().any(|&(start, saved_id, member)| {
+                start > a.span.start && saved_id == id && same(ctx, m, member)
+            })
+        };
+        if saved.iter().any(|&(start, id, old)| {
+            start < a.span.start
+                && same(ctx, m, old)
+                && !f.is_some_and(|f| delegates(ctx, f, id))
+                && has_later_assignment(id)
+        }) {
+            findings.report(a.span.start as usize, None);
         }
     }
 }

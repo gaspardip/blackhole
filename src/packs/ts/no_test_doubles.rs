@@ -1,3 +1,4 @@
+use super::values::Imported;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
@@ -14,44 +15,23 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn framework(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> bool {
-    let Some(reference) = id.reference_id.get() else {
+    if id.reference_id.get().is_none() {
         return false;
-    };
-    let Some(symbol) = ctx.semantic.scoping().get_reference(reference).symbol_id() else {
+    }
+    if super::values::symbol(ctx, id).is_none() {
         return matches!(id.name.as_str(), "vi" | "jest");
-    };
-    let declaration = ctx.semantic.symbol_declaration(symbol);
-    let AstKind::ImportSpecifier(specifier) = declaration.kind() else {
-        return false;
-    };
-    let AstKind::ImportDeclaration(import) = ctx.semantic.nodes().parent_kind(declaration.id())
-    else {
-        return false;
-    };
-    (import.source.value == "vitest" && specifier.imported.name() == "vi")
-        || (import.source.value == "@jest/globals" && specifier.imported.name() == "jest")
+    }
+    matches!(
+        super::values::import_of(ctx, id),
+        Some(("vitest", Imported::Named("vi")) | ("@jest/globals", Imported::Named("jest")))
+    )
 }
 
 fn worker_entry(ctx: &TsCtx<'_>, receiver: &Expression<'_>) -> bool {
     let Expression::Identifier(id) = receiver else {
         return false;
     };
-    let Some(symbol) = id
-        .reference_id
-        .get()
-        .and_then(|r| ctx.semantic.scoping().get_reference(r).symbol_id())
-    else {
-        return false;
-    };
-    let declaration = ctx.semantic.symbol_declaration(symbol);
-    if !matches!(declaration.kind(), AstKind::ImportDefaultSpecifier(_)) {
-        return false;
-    }
-    let AstKind::ImportDeclaration(import) = ctx.semantic.nodes().parent_kind(declaration.id())
-    else {
-        return false;
-    };
-    let Some(path) = import.source.value.as_str() else {
+    let Some((path, Imported::Default)) = super::values::import_of(ctx, id) else {
         return false;
     };
     let Some(relative) = path.strip_prefix("../") else {
@@ -161,8 +141,17 @@ fn check_bindings(
         }
     }
 }
+fn runner_import(statement: &oxc::ast::ast::Statement<'_>) -> bool {
+    let oxc::ast::ast::Statement::ImportDeclaration(import) = statement else {
+        return false;
+    };
+    import.source.value.as_str().is_some_and(|source| {
+        matches!(source, "vitest" | "@jest/globals" | "node:test") || source.starts_with("vitest/")
+    })
+}
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let test_code = super::test_context::test_file(ctx.path) || ctx.program.body.iter().any(|s|matches!(s,oxc::ast::ast::Statement::ImportDeclaration(i) if i.source.value.as_str().is_some_and(|s|matches!(s,"vitest"|"@jest/globals"|"node:test") || s.starts_with("vitest/"))));
+    let test_code =
+        super::test_context::test_file(ctx.path) || ctx.program.body.iter().any(runner_import);
     if test_code {
         super::saved_methods::check(ctx, findings);
     }

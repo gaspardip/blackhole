@@ -17,15 +17,18 @@ use std::collections::HashSet;
 
 fn native(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<String> {
     let parts = path(ctx, expr)?;
+    Some(native_name(&parts))
+}
+fn native_name(parts: &[&str]) -> String {
     let skip = usize::from(
         parts
             .first()
-            .is_some_and(|s| matches!(s.as_str(), "window" | "globalThis" | "global" | "self")),
+            .is_some_and(|s| matches!(*s, "window" | "globalThis" | "global" | "self")),
     );
-    Some(parts[skip..].join("."))
+    parts[skip..].join(".")
 }
 
-fn member(ctx: &TsCtx<'_>, m: &MemberExpression<'_>) -> bool {
+fn protected_member(ctx: &TsCtx<'_>, m: &MemberExpression<'_>) -> bool {
     native(ctx, m.object())
         .zip(member_key(ctx, m))
         .is_some_and(|(owner, k)| protected(&owner, k))
@@ -40,12 +43,12 @@ pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
             target => target
                 .as_simple_assignment_target()
                 .and_then(|t| t.as_member_expression())
-                .is_some_and(|m| member(ctx, m)),
+                .is_some_and(|m| protected_member(ctx, m)),
         },
         AstKind::UnaryExpression(u) if u.operator.is_delete() => u
             .argument
             .as_member_expression()
-            .is_some_and(|m| member(ctx, m)),
+            .is_some_and(|m| protected_member(ctx, m)),
         _ => false,
     }
 }
@@ -84,6 +87,8 @@ fn defines(ctx: &TsCtx<'_>, initial: &Expression<'_>, owner: &str) -> bool {
 
 pub(super) struct Invocation<'a> {
     pub(super) callee: &'a Expression<'a>,
+    pub(super) path: Option<Vec<&'a str>>,
+    native_path: Option<String>,
     pub(super) args: Vec<Option<&'a Expression<'a>>>,
 }
 impl<'a> Invocation<'a> {
@@ -105,7 +110,12 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
     let mut callee = resolve(ctx, &call.callee);
     let mut args: Vec<_> = call.arguments.iter().map(Argument::as_expression).collect();
     let mut seen = HashSet::new();
-    while seen.insert(callee.span()) {
+    let (path, native_path) = loop {
+        let parts = path(ctx, callee);
+        let native_path = parts.as_deref().map(native_name);
+        if !seen.insert(callee.span()) {
+            break (parts, native_path);
+        }
         if let Expression::CallExpression(c) = callee
             && let Some(m) = resolve(ctx, &c.callee).as_member_expression()
             && member_key(ctx, m) == Some("bind")
@@ -114,7 +124,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
             callee = resolve(ctx, m.object());
             continue;
         }
-        if native(ctx, callee).as_deref() == Some("Reflect.apply")
+        if native_path.as_deref() == Some("Reflect.apply")
             && let Some(target) = args.first().copied().flatten()
         {
             args = array_args(ctx, args.get(2).copied().flatten());
@@ -122,25 +132,30 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
             continue;
         }
         let Some(m) = callee.as_member_expression() else {
-            break;
+            break (parts, native_path);
         };
         match member_key(ctx, m) {
             Some("call") => {
                 args.drain(..args.len().min(1));
             }
             Some("apply") => args = array_args(ctx, args.get(1).copied().flatten()),
-            _ => break,
+            _ => break (parts, native_path),
         }
         callee = resolve(ctx, m.object());
+    };
+    Invocation {
+        callee,
+        path,
+        native_path,
+        args,
     }
-    Invocation { callee, args }
 }
 
 pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     let Some(owner) = call.arg(0).and_then(|e| native(ctx, e)) else {
         return false;
     };
-    match native(ctx, call.callee).as_deref() {
+    match call.native_path.as_deref() {
         Some(
             "Object.defineProperty"
             | "Reflect.defineProperty"
@@ -174,12 +189,7 @@ fn method<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<&'a str> {
     let BindingPattern::ObjectPattern(pattern) = &v.id else {
         return None;
     };
-    let p = pattern.properties.iter().find(|p| {
-        p.value
-            .get_binding_identifier()
-            .is_some_and(|b| b.name == id.name)
-    })?;
-    key(ctx, &p.key, p.computed)
+    super::values::destructured(ctx, pattern, |b| b.name == id.name)
 }
 fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     if call.args.len() != 2 {
@@ -217,10 +227,10 @@ pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     }) {
         return true;
     }
-    let Some(parts) = path(ctx, call.callee) else {
+    let Some(parts) = &call.path else {
         return false;
     };
-    let parts: Vec<_> = parts.iter().map(String::as_str).collect();
+
     match parts.as_slice() {
         [
             "@tauri-apps/api/mocks",
@@ -232,7 +242,7 @@ pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
             match *m {
                 "fn" => call
                     .arg(0)
-                    .is_some_and(|e| !super::values::global(ctx, e, "undefined")),
+                    .is_some_and(|e| !super::values::resolves_to_global(ctx, e, "undefined")),
                 "mockObject" => *owner == "jest" || !observation(ctx, call),
                 "mock"
                 | "doMock"

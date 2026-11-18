@@ -34,31 +34,55 @@ pub(super) fn root<'a>(mut e: &'a Expression<'a>) -> Option<&'a str> {
 pub(super) fn is_test(name: &str) -> bool {
     matches!(name, "it" | "test" | "specify")
 }
-pub(super) fn member(e: &Expression<'_>, receiver: &str, key: &str) -> bool {
-    matches!(e,Expression::StaticMemberExpression(m) if m.property.name==key && matches!(&m.object,Expression::Identifier(id) if id.name==receiver))
+pub(super) fn direct_member(e: &Expression<'_>, receiver: &str, key: &str) -> bool {
+    let Expression::StaticMemberExpression(m) = e else {
+        return false;
+    };
+    m.property.name == key && matches!(&m.object,Expression::Identifier(id) if id.name==receiver)
 }
-fn line<'a>(body: &'a FunctionBody<'a>, allow_return: bool) -> Option<&'a Expression<'a>> {
+pub(super) fn static_method(e: &Expression<'_>, names: &[&str]) -> bool {
+    let Expression::StaticMemberExpression(m) = e else {
+        return false;
+    };
+    names.contains(&m.property.name.as_str())
+}
+fn single_statement<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Statement<'a>> {
     if !body.directives.is_empty() {
         return None;
     }
-    match body.statements.as_slice() {
-        [Statement::ExpressionStatement(s)] => Some(&s.expression),
-        [Statement::ReturnStatement(s)] if allow_return => s.argument.as_ref(),
+    let [statement] = body.statements.as_slice() else {
+        return None;
+    };
+    Some(statement)
+}
+fn callback_value<'a>(
+    callback: &'a Expression<'a>,
+    statement: fn(&'a Statement<'a>) -> Option<&'a Expression<'a>>,
+) -> Option<&'a Expression<'a>> {
+    let body = match callback {
+        Expression::FunctionExpression(f) => f.body.as_deref()?,
+        Expression::ArrowFunctionExpression(f) => match &f.body {
+            ArrowFunctionBody::FunctionBody(b) => b,
+            other => return other.as_expression(),
+        },
+        _ => return None,
+    };
+    statement(single_statement(body)?)
+}
+fn expression_statement<'a>(s: &'a Statement<'a>) -> Option<&'a Expression<'a>> {
+    match s {
+        Statement::ExpressionStatement(s) => Some(&s.expression),
         _ => None,
     }
 }
-pub(super) fn single<'a>(
-    callback: &'a Expression<'a>,
-    allow_return: bool,
-) -> Option<&'a Expression<'a>> {
-    match callback {
-        Expression::FunctionExpression(f) => line(f.body.as_ref()?, allow_return),
-        Expression::ArrowFunctionExpression(f) => match &f.body {
-            ArrowFunctionBody::FunctionBody(b) => line(b, allow_return),
-            b => b.as_expression(),
-        },
-        _ => None,
-    }
+pub(super) fn single_effect<'a>(callback: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    callback_value(callback, expression_statement)
+}
+pub(super) fn single_value<'a>(callback: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    callback_value(callback, |s| match s {
+        Statement::ReturnStatement(r) => r.argument.as_ref(),
+        _ => expression_statement(s),
+    })
 }
 pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
