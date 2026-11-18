@@ -1,0 +1,1 @@
+delete FileReader.prototype.readAsBinaryString;

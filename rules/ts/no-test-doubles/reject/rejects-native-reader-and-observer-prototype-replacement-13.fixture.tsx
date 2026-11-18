@@ -1,0 +1,1 @@
+MutationObserver.prototype.observe = replacement;

@@ -1,0 +1,1 @@
+jest.replaceProperty(process, "env", {});

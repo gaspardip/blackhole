@@ -1,0 +1,1 @@
+vi.spyOn(AbortSignal, 'timeout');

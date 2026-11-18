@@ -7,7 +7,17 @@ pub mod ledger;
 pub mod objections;
 mod packs {
     pub(crate) mod ts {
+        mod bindings;
+        mod config_responses;
+        mod double_mutations;
+        mod native_properties;
         pub(crate) mod no_comments;
+        pub(crate) mod no_test_doubles;
+        mod playwright;
+        mod saved_methods;
+        mod test_context;
+        mod transports;
+        mod values;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;

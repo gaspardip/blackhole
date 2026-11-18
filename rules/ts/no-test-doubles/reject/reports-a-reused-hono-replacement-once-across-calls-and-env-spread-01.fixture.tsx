@@ -1,0 +1,1 @@
+import {Hono} from "hono"; import {env} from "cloudflare:workers"; const app = new Hono(); const bindings = {...env, API: {fetch: async () => new Response()}}; app.request("/", {}, bindings); app.request("/again", {}, bindings);

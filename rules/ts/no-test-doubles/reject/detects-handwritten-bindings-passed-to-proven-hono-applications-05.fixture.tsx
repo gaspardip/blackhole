@@ -1,0 +1,1 @@
+import { Hono } from "hono"; const app = new Hono(); function fixture() { const env = {AUTH: {verify: () => true}}; return {env}; } function send(env) { return app.request("/", {}, env); } const {env} = fixture(); send(env);

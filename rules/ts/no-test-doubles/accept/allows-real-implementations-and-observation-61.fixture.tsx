@@ -1,0 +1,1 @@
+vi.fn.call(vi);

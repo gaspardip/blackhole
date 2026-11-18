@@ -1,0 +1,1 @@
+AbortSignal.prototype.throwIfAborted = check;

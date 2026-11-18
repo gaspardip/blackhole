@@ -1,0 +1,1 @@
+ globalThis.history.pushState = push;
