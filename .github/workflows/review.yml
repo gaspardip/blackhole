@@ -1,6 +1,6 @@
 name: review
 
-# A review changes the verdict, but this file comes from the pull request. So it only marks the moment, and rejudge does the work.
+# A review changes the verdict, but this file comes from the pull request. So it only marks the moment, and judge does the work.
 on:
   pull_request_review:
     types: [submitted, dismissed]

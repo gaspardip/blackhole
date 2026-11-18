@@ -99,7 +99,8 @@ fn protected(i: &Inputs<'_>, moved: &Counts, v: &mut Verdict) -> io::Result<()> 
     for c in i.changes {
         // shortcut: a file emptied in place, or moved over two pull requests, still leaves unseen; protect every addition under an excluded path when a repository can afford that approval
         let left = match &c.kind {
-            Kind::Moved(old) => judged(old),
+            // Git may pair the arrival with another excluded file and leave the judged one as a deletion.
+            Kind::Moved(old) => judged(old) || dropped,
             Kind::Added => dropped,
             Kind::Deleted | Kind::Edited => false,
         };

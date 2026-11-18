@@ -95,14 +95,16 @@ fn a_move_git_reports_as_two_changes_is_protected() {
         .add(Glob::new("vendor/**").unwrap())
         .build()
         .unwrap();
-    for (added, deleted, expected) in [
-        ("vendor/x", Some("a"), "protected"),
-        ("vendor/x", None, ""),
-        ("vendor/x", Some("vendor/y"), ""),
-        ("x", Some("a"), ""),
+    for (old, added, deleted, expected) in [
+        (None, "vendor/x", Some("a"), "protected"),
+        (None, "vendor/x", None, ""),
+        (None, "vendor/x", Some("vendor/y"), ""),
+        (None, "x", Some("a"), ""),
+        (Some("vendor/old"), "vendor/x", Some("a"), "protected"),
+        (Some("vendor/old"), "vendor/x", None, ""),
     ] {
         let mut changes = vec![Change {
-            kind: Kind::Added,
+            kind: old.map_or(Kind::Added, |old: &str| Kind::Moved(old.into())),
             path: added.into(),
         }];
         changes.extend(deleted.map(|path| Change {
@@ -124,7 +126,7 @@ fn a_move_git_reports_as_two_changes_is_protected() {
         assert_eq!(
             result.gates.into_iter().collect::<Vec<_>>().join(" "),
             expected,
-            "{added} {deleted:?}"
+            "{old:?} {added} {deleted:?}"
         );
     }
 }
