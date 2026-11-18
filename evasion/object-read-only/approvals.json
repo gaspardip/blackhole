@@ -1,0 +1,11 @@
+{
+  "author": "author",
+  "reviews": [
+    {
+      "login": "peer",
+      "state": "APPROVED",
+      "commit": "HEAD",
+      "permission": "read"
+    }
+  ]
+}

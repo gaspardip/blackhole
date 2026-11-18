@@ -1,3 +1,6 @@
+pub mod ci;
+mod git;
+pub mod verdict;
 use std::fmt::Write as _;
 mod config;
 pub mod engine;
@@ -23,15 +26,24 @@ use std::{
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
     let scan = scan(paths, output)?;
-    for (key, allowed) in &scan.stale {
+    report_stale(&scan.stale, &scan.actual, output)?;
+    Ok(scan.over || !scan.stale.is_empty())
+}
+
+fn report_stale(
+    stale: &ledger::Counts,
+    actual: &ledger::Counts,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    for (key, allowed) in stale {
         let (rule, path) = key;
-        let found = scan.actual.get(key).copied().unwrap_or(0);
+        let found = actual.get(key).copied().unwrap_or(0);
         writeln!(
             output,
             "{path} {rule}: ledger allows {allowed}, found {found}; run blackhole ledger"
         )?;
     }
-    Ok(scan.over || !scan.stale.is_empty())
+    Ok(())
 }
 
 /// Regenerates the repository ledger within its existing allowances.
@@ -93,15 +105,12 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     names.retain(|name| !excludes.is_match(name));
     let home = root.join(".blackhole");
     let base = read_ledger(&home)?;
-    let rules = engine::registry();
-    let mut findings = Vec::new();
-    for name in &names {
-        let bytes = files::read(&root.join(name))
-            .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
-        if let Some(bytes) = bytes {
-            findings.extend(engine::run(rules, [(name.as_str(), bytes.as_slice())]));
-        }
-    }
+    let mut findings = scan_files(names.iter().filter_map(|name| {
+        files::read(&root.join(name))
+            .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))
+            .map(|bytes| bytes.map(|bytes| (name.as_str(), bytes)))
+            .transpose()
+    }))?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(
@@ -128,8 +137,23 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     })
 }
 
-fn report(findings: &[engine::Finding], output: &mut impl Write) -> io::Result<()> {
-    for f in findings {
+fn scan_files<'a>(
+    files: impl Iterator<Item = io::Result<(&'a str, Vec<u8>)>>,
+) -> io::Result<Vec<engine::Finding>> {
+    let mut findings = Vec::new();
+    for file in files {
+        let (path, bytes) = file?;
+        findings.extend(engine::run(engine::registry(), [(path, bytes.as_slice())]));
+    }
+    Ok(findings)
+}
+
+fn report<'a>(
+    findings: impl IntoIterator<Item = &'a engine::Finding>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let findings: Vec<_> = findings.into_iter().collect();
+    for f in &findings {
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
         if let Some(note) = &f.note {
             write!(output, " {note}")?;

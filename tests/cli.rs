@@ -407,3 +407,84 @@ fn objection_commands_and_shrink() {
     fs::write(path, "invalid").unwrap();
     check(root, &[], 2);
 }
+
+#[test]
+fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
+    let dir = repo();
+    let root = dir.path();
+    run(root, &["ci", "--base", "1234", "--head", "abcd"], 2);
+    fs::write(root.join("a.py"), "pass").unwrap();
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.org",
+            "commit",
+            "-qm",
+            "clean",
+        ],
+    );
+    fs::write(root.join("a.py"), "# noqa staged").unwrap();
+    git(root, &["add", "."]);
+    fs::write(root.join("a.py"), "# noqa unstaged").unwrap();
+    let index = fs::read(root.join(".git/index")).unwrap();
+    assert_eq!(
+        run(root, &["ci", "--base", "HEAD", "--head", "HEAD"], 0).stdout,
+        b""
+    );
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    assert_eq!(fs::read(root.join("a.py")).unwrap(), b"# noqa unstaged");
+}
+
+#[test]
+fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
+    let dir = repo();
+    let root = dir.path();
+    let commit = || {
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.org",
+                "commit",
+                "-qm",
+                "tree",
+            ],
+        );
+    };
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    let file = root.join(".blackhole/objections");
+    let valid = format!("{RULE}\ta.py\t1\t2026-11-01\t-\treason\n");
+    fs::write(&file, &valid).unwrap();
+    fs::write(root.join("a.py"), "# noqa").unwrap();
+    git(root, &["add", "."]);
+    commit();
+    fs::write(
+        file,
+        format!("{valid}{RULE}\tb.py\t1\t2026-11-19\t-\treason\n"),
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    commit();
+    let out = run(
+        root,
+        &[
+            "ci",
+            "--base",
+            "HEAD~",
+            "--head",
+            "HEAD",
+            "--today",
+            "2026-11-18",
+        ],
+        1,
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains(&format!("objection: {RULE} b.py:")));
+    assert!(stdout.ends_with("blackhole ci: red (findings, objections, protected)\n"));
+}
