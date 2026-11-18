@@ -15,6 +15,7 @@ mod packs {
         pub(crate) mod no_test_doubles;
         mod playwright;
         mod saved_methods;
+        pub(crate) mod strict_msw;
         mod test_context;
         mod transports;
         mod values;
