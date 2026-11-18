@@ -81,7 +81,13 @@ pub fn registry() -> &'static [Rule] {
 // A UTF-32LE mark starts with the UTF-16LE mark.
 fn decode(bytes: &[u8]) -> (String, Option<usize>) {
     let wide = |unit: fn([u8; 2]) -> u16| {
-        let units: Vec<_> = bytes[2..].as_chunks().0.iter().copied().map(unit).collect();
+        let (pairs, tail) = bytes[2..].as_chunks();
+        let units: Vec<_> = pairs
+            .iter()
+            .copied()
+            .map(unit)
+            .chain((!tail.is_empty()).then_some(0xfffd))
+            .collect();
         String::from_utf16_lossy(&units)
     };
     let utf32 = |unit: fn([u8; 4]) -> u32| {
@@ -138,6 +144,16 @@ fn parse<'a>(
         })
         .parse();
     if let Some(error) = parsed.diagnostics.first() {
+        // TS1490 means the lexer encountered a standalone replacement character, but carries no span.
+        if error.labels.is_empty()
+            && error.code.scope.as_deref() == Some("TS")
+            && error.code.number.as_deref() == Some("1490")
+        {
+            let mut replacements = text.match_indices(char::REPLACEMENT_CHARACTER);
+            if let (Some((at, _)), None) = (replacements.next(), replacements.next()) {
+                return Err((at, error.message.to_string()));
+            }
+        }
         return Err(diagnostic(error));
     }
     if parsed.fatal_error {

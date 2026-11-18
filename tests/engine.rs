@@ -7,6 +7,51 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn incomplete_wide_source_retains_the_replacement_character() {
+    let mut inputs = Vec::new();
+    for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+        for (source, expected) in [
+            ("const x = 1;", vec![("core/unparseable", 1, 13)]),
+            (
+                "// @ts-ignore",
+                vec![("ts/no-comments", 1, 1), ("core/no-suppression", 1, 4)],
+            ),
+        ] {
+            let mut bytes: Vec<_> = format!("\u{feff}{source}")
+                .encode_utf16()
+                .flat_map(encode)
+                .collect();
+            bytes.push(0x2f);
+            inputs.push((bytes, expected));
+        }
+        let units = "\u{feff}const "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("x=1;".encode_utf16());
+        inputs.push((
+            units.flat_map(encode).collect(),
+            vec![("core/unparseable", 1, 7)],
+        ));
+    }
+    for encode in [u32::to_le_bytes, u32::to_be_bytes] {
+        for tail in 1..=3 {
+            let mut bytes: Vec<_> = "\u{feff}const x = 1;"
+                .chars()
+                .flat_map(|c| encode(u32::from(c)))
+                .collect();
+            bytes.extend(vec![0x2f; tail]);
+            inputs.push((bytes, vec![("core/unparseable", 1, 13)]));
+        }
+    }
+    for (bytes, expected) in inputs {
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", bytes.as_slice())])),
+            expected
+        );
+    }
+}
+
+#[test]
 fn default_export_documentation_matches_the_expression_span() {
     for (export, col) in [
         ("export default /** docs */ (x);", Some(16)),
