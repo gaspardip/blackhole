@@ -131,12 +131,14 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
         }
     }
     names.retain(|name| !excludes.is_match(name));
+    // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
+    let filed = policy(entered, "objections")?.unwrap_or_default();
     let findings = scan_files(names.iter().map(String::as_str), |name| {
         files::read(&root.join(name))
     })?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
-    let objections = objections::parse(&policy(entered, "objections")?.unwrap_or_default(), today)?;
+    let objections = objections::parse(&filed, today)?;
     let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
     let mut stale = ledger::excess(&base, &actual);
     if !selection.is_empty() {
