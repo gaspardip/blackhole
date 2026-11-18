@@ -10,6 +10,10 @@ on:
     types: [created, edited]
   release:
     types: [created, edited, published]
+  # Rescans every ref: GitHub sends no push event for a tag pushed with more than two others.
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read

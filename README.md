@@ -19,13 +19,20 @@ the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`
 Without the list the guard refuses to run and the commit is blocked.
 
 CI scans only what people with write access wrote or pushed. For a pull request
-from anyone else, or from a fork, the `name-guard` check passes without scanning,
-so scan it locally before merging. A squash merge copies the title and body into
-`main`, so the command scans those too:
+from anyone else, or from a fork, the `name-guard` check passes without scanning.
+Merge those with the script that scans the commits, title and body, then merges
+exactly what it scanned:
 
 ```sh
-git fetch origin pull/<number>/head && GUARD_TEXT_PR="$(gh pr view <number> --json title,body,headRefName --jq '.title, .body, .headRefName')" python3 -I tools/name_guard.py range origin/main FETCH_HEAD
+bin/merge-outside <number>
 ```
+
+A squash merge copies the title and body into `main`. Text typed into the merge
+dialog is scanned only after it lands, so merge without editing the message.
+
+The guard stops mistakes. It cannot stop someone with write access who sets out
+to publish a name: they could change the workflow on their own branch, or post
+the name anywhere else.
 
 ## License
 
