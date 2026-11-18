@@ -47,6 +47,11 @@ fn malformed() {
         "\t1\ta\\x\n",
         "\t1\ta\rb\n",
         "\t1\ta\tb\n",
+        "\t1\ta\0.py\n",
+        "\t1\t./a.py\n",
+        "\t1\tdir//a.py\n",
+        "\t1\tdir/./a.py\n",
+        "\t1\tdir/\n",
     ] {
         cases.push((format!("{HEADER}{RULE}{suffix}"), 2));
     }
@@ -119,8 +124,12 @@ fn rename_allowances() {
 }
 
 #[test]
-fn unrepresentable_paths() {
-    for path in ["a\tb", "a\nb"] {
-        assert!(write(&entries(&[(path, 1)])).is_err());
+fn unrepresentable_rows() {
+    let injected = format!("a\n{RULE}\t5\tz");
+    for path in ["a\tb", "a\nb", injected.as_str()] {
+        assert!(write(&entries(&[(path, 1)])).is_err(), "{path:?}");
     }
+    assert!(write(&entries(&[("a", 0)])).is_err());
+    let unknown = Counts::from([(("unknown".to_owned(), "a".to_owned()), 1)]);
+    assert!(write(&unknown).is_err());
 }
