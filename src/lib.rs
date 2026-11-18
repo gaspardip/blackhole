@@ -9,6 +9,7 @@ mod packs {
     pub(crate) mod ts {
         pub(crate) mod no_comments;
         pub(crate) mod no_explicit_any;
+        pub(crate) mod no_non_null_assertion;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;
