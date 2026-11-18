@@ -48,8 +48,61 @@ fn clean_selection_is_silent() {
     git(root, &["add", "deleted.py"]);
     fs::remove_file(root.join("deleted.py")).unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink("ignored.py", root.join("link.py")).unwrap();
+    {
+        use std::os::unix::fs::symlink;
+        fs::create_dir(root.join("app")).unwrap();
+        symlink("app", root.join("linked")).unwrap();
+        symlink("nowhere", root.join("dangling.py")).unwrap();
+    }
     assert_eq!(check(root, &[], 0).stdout, b"");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_file_is_checked_under_its_own_name() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("payload.txt"), "#noqa").unwrap();
+    std::os::unix::fs::symlink("payload.txt", root.join("alias.py")).unwrap();
+    let found = check(root, &[], 1).stdout;
+    assert!(found.starts_with(b"alias.py:1:1 core/no-suppression\n"));
+    assert_eq!(check(root, &["alias.py"], 1).stdout, found);
+    assert_eq!(check(root, &["payload.txt"], 0).stdout, b"");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_is_resolved_the_way_the_filesystem_does() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join("real/sub")).unwrap();
+    fs::write(root.join("real/clean.py"), "#noqa").unwrap();
+    fs::write(root.join("clean.py"), "").unwrap();
+    std::os::unix::fs::symlink("real/sub", root.join("redirect")).unwrap();
+    let found = check(root, &["redirect/../clean.py"], 1).stdout;
+    assert!(found.starts_with(b"real/clean.py:1:1 core/no-suppression\n"));
+}
+
+#[test]
+fn git_variables_cannot_point_at_another_repository() {
+    let dir = repo();
+    let root = dir.path();
+    let other = repo();
+    fs::write(root.join("bad.py"), "#noqa").unwrap();
+    for (name, value) in [
+        ("GIT_DIR", other.path().join(".git")),
+        ("GIT_WORK_TREE", other.path().to_owned()),
+        ("GIT_INDEX_FILE", other.path().join("index")),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .env(name, value)
+            .arg("check")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}: {out:?}");
+        assert!(out.stdout.starts_with(b"bad.py:1:1 "), "{name}");
+    }
 }
 
 #[test]
@@ -86,5 +139,6 @@ fn invalid_path_is_an_error() {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
     let dir = repo();
     fs::write(dir.path().join(OsStr::from_bytes(b"bad\xff")), "").unwrap();
-    check(dir.path(), &[], 2);
+    let message = check(dir.path(), &[], 2).stderr;
+    assert_eq!(message, b"blackhole: path is not valid UTF-8: bad\\xff\n");
 }

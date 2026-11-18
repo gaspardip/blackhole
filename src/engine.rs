@@ -47,13 +47,28 @@ pub fn registry() -> &'static [Rule] {
     &[crate::packs::core::no_suppression::RULE]
 }
 
+// TypeScript and C# read UTF-16 when a byte order mark says so, and UTF-32 is the same text with NULs in between.
+fn decode(bytes: &[u8]) -> String {
+    let wide = |unit: fn([u8; 2]) -> u16| {
+        let units: Vec<_> = bytes[2..].as_chunks().0.iter().copied().map(unit).collect();
+        String::from_utf16_lossy(&units)
+    };
+    let mut text = match bytes {
+        [0xff, 0xfe, ..] => wide(u16::from_le_bytes),
+        [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    };
+    text.retain(|c| c != '\0');
+    text
+}
+
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let text = String::from_utf8_lossy(bytes);
+        let text = decode(bytes);
         let ctx = FileCtx { path, text: &text };
         let mut hits = Vec::new();
         for rule in rules {
@@ -70,8 +85,10 @@ pub fn run<'a>(
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
-            for ch in text[previous..offset].chars() {
-                if ch == '\n' {
+            for (at, ch) in text[previous..offset].char_indices() {
+                // A carriage return before a line feed is the same break, counted at the line feed.
+                let alone = ch == '\r' && !text[previous + at + 1..].starts_with('\n');
+                if alone || matches!(ch, '\n' | '\u{2028}' | '\u{2029}') {
                     line += 1;
                     col = 1;
                 } else {

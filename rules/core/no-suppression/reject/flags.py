@@ -20,3 +20,9 @@ x = 1  # fixme pylint: disable=invalid-name
 # ty: ignore[x]
 # flake8=noqa
 # noqa
+x = 1  # pragma: no branch
+# isort: skip_file
+import os  # isort:skip
+# isort: off
+# pytype: skip-file
+#pragma no branch

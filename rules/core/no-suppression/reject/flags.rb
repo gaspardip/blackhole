@@ -3,3 +3,4 @@
 # :nocov:
 # rubocop : disable all
 # typed: ignore
+# typed: false

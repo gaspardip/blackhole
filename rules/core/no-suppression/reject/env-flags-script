@@ -1,0 +1,2 @@
+#!/usr/bin/env -S -u FOO python3
+#noqa

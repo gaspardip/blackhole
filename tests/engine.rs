@@ -41,3 +41,44 @@ fn registry_sorted_and_unique() {
     assert!(rules.iter().any(|r| r.id == "core/no-suppression"));
     assert!(rules.windows(2).all(|w| w[0].id < w[1].id));
 }
+
+fn places(text: &[u8]) -> Vec<(usize, usize)> {
+    let rule = Rule {
+        id: "a",
+        family: Family::Judge,
+        provenance: "test",
+        fix: "fix",
+        run: Run::File(mark),
+    };
+    run(&[rule], [("a", text)])
+        .iter()
+        .map(|f| (f.line, f.col))
+        .collect()
+}
+
+#[test]
+fn every_line_break_counts_once() {
+    assert_eq!(
+        places("x\rx\r\nx\u{2028}x\u{2029}x".as_bytes()),
+        [(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+    );
+}
+
+#[test]
+fn wide_encodings_are_decoded() {
+    assert_eq!(places(b"\xff\xfea\0\n\0x\0"), [(2, 1)]);
+    assert_eq!(places(b"\xfe\xff\0a\0\n\0x"), [(2, 1)]);
+    assert_eq!(places(b"\0\0\xfe\xff\0\0\0\n\0\0\0x"), [(2, 1)]);
+}
+
+#[test]
+fn an_attribute_too_long_to_read_is_reported() {
+    let pad = "y".repeat(5000);
+    let text = format!("{}[/*{pad}*/allow(dead_code)]\nfn f() {{}}\n", '#');
+    let found = run(registry(), [("a.rs", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].line, found[0].col), (1, 1));
+    assert_eq!(found[0].note.as_deref(), Some("attribute too long to read"));
+    let short = format!("{}[/*{}*/allow(dead_code)]", '#', "y".repeat(50));
+    assert_eq!(run(registry(), [("a.rs", short.as_bytes())])[0].note, None);
+}

@@ -1,11 +1,21 @@
 use std::{
     env, fs, io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Command,
 };
 
 fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
-    let output = Command::new("git").args(args).current_dir(dir).output()?;
+    let mut command = Command::new("git");
+    // The caller's git variables must not point discovery at another repository or index.
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.args(args).current_dir(dir).output()?;
     if !output.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&output.stderr)
@@ -18,16 +28,13 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn normalize(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for part in path.components() {
-        if part == Component::ParentDir {
-            result.pop();
-        } else {
-            result.push(part);
-        }
-    }
-    result
+// Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
+fn resolve(path: &Path) -> io::Result<PathBuf> {
+    let found = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent).map(|dir| dir.join(name)),
+        _ => fs::canonicalize(path),
+    };
+    found.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
 pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
@@ -35,15 +42,21 @@ pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
     let output = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let root = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
         .map_err(io::Error::other)?;
-    let root = Path::new(root);
-    let paths: Vec<_> = paths.iter().map(|p| normalize(&cwd.join(p))).collect();
+    let root = &fs::canonicalize(root)?;
+    let paths = paths
+        .iter()
+        .map(|p| resolve(&cwd.join(p)))
+        .collect::<io::Result<Vec<_>>>()?;
     let mut matched = vec![false; paths.len()];
     let mut selected = Vec::new();
     let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
     for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
-        let name = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+        let name = std::str::from_utf8(bytes).map_err(|_| {
+            io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
+        })?;
         let file = root.join(name);
-        match fs::symlink_metadata(&file) {
+        // A link to a file is read under the link's name, or a link could hide what kind of file it is.
+        match fs::metadata(&file) {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => continue,
             Err(e)

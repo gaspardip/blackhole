@@ -12,3 +12,7 @@
 // $FlowFixMe
 // $FlowExpectedError
 /* istanbul ignore next */
+/* exported unused */
+/* global window */
+/* globals a, b */
+/* eslint-env node */
