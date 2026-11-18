@@ -15,6 +15,7 @@ mod packs {
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;
+        pub(crate) mod no_runtime_typeof;
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
         pub(crate) mod no_unknown_type_aliases;
