@@ -31,8 +31,8 @@ fn recorder(mut e: &Expression<'_>) -> Option<bool> {
         }
     }
 }
-fn assertion(e: &Expression<'_>) -> bool {
-    let Expression::CallExpression(c) = e else {
+fn assertion(ctx: &TsCtx<'_>, e: &Expression<'_>) -> bool {
+    let Some(c) = super::values::call_expr(e) else {
         return false;
     };
     let Some(m) = c.callee.get_member_expr() else {
@@ -46,7 +46,7 @@ fn assertion(e: &Expression<'_>) -> bool {
     let Expression::CallExpression(call) = subject else {
         return false;
     };
-    if !call.callee.is_specific_id("expect") {
+    if super::test_context::runner(ctx, &super::values::invoked(ctx, call)) != ["expect"] {
         return false;
     }
     call.arguments
@@ -84,14 +84,15 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let poll = c.callee.is_specific_member_access("expect", "poll");
-        if !poll && !c.callee.is_specific_member_access("vi", "waitFor") {
+        let call = super::values::invoked(ctx, c);
+        let path = super::test_context::runner(ctx, &call);
+        let poll = path == ["expect", "poll"];
+        if !poll && path != ["vi", "waitFor"] {
             continue;
         }
-        let Some(value) = c
-            .arguments
-            .first()
-            .and_then(|a| a.as_expression())
+        let Some(value) = call
+            .arg(0)
+            .map(|e| super::values::resolve(ctx, e))
             .and_then(single_value)
         else {
             continue;
@@ -104,7 +105,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     .and_then(|n| n.as_member_expression_kind())
                     .and_then(|m| MemberKeys::Literal.read_kind(m))
                     == Some("toHaveLength")
-            || !poll && assertion(value)
+            || !poll && assertion(ctx, value)
         {
             findings.report(c.span.start as usize, None);
         }

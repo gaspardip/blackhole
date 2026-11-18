@@ -4,8 +4,8 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            BindingPattern, Expression, IdentifierReference, MemberExpression, ObjectPropertyKind,
-            PropertyKey,
+            Argument, BindingPattern, CallExpression, Expression, IdentifierReference,
+            MemberExpression, ObjectPropertyKind, PropertyKey,
         },
     },
     span::GetSpan,
@@ -79,6 +79,18 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
     let mut seen = HashSet::new();
     loop {
         expr = expr.get_inner_expression();
+        if let Expression::ChainExpression(chain) = expr
+            && let oxc::ast::ast::ChainElement::TSNonNullExpression(n) = &chain.expression
+        {
+            expr = &n.expression;
+            continue;
+        }
+        if let Expression::SequenceExpression(seq) = expr
+            && let Some(last) = seq.expressions.last()
+        {
+            expr = last;
+            continue;
+        }
         let Expression::Identifier(id) = expr else {
             return expr;
         };
@@ -295,4 +307,164 @@ pub(super) fn any_property<'a>(
         }
     }
     false
+}
+
+pub(super) fn unqualified<'p, 'a>(p: &'p [&'a str]) -> &'p [&'a str] {
+    match p {
+        [root, rest @ ..] if global_object(root) => rest,
+        _ => p,
+    }
+}
+pub(super) struct Invocation<'a> {
+    pub(super) callee: &'a Expression<'a>,
+    pub(super) path: Option<Vec<&'a str>>,
+
+    pub(super) args: Vec<Option<&'a Expression<'a>>>,
+}
+impl<'a> Invocation<'a> {
+    pub(super) fn arg(&self, i: usize) -> Option<&'a Expression<'a>> {
+        self.args.get(i).copied().flatten()
+    }
+}
+fn array_args<'a>(
+    ctx: &TsCtx<'a>,
+    arg: Option<&'a Expression<'a>>,
+) -> Vec<Option<&'a Expression<'a>>> {
+    if let Some(Expression::ArrayExpression(a)) = arg.map(|a| resolve(ctx, a)) {
+        a.elements.iter().map(|e| e.as_expression()).collect()
+    } else {
+        Vec::new()
+    }
+}
+pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invocation<'a> {
+    let mut callee = resolve(ctx, &call.callee);
+    let mut args: Vec<_> = call.arguments.iter().map(Argument::as_expression).collect();
+    let mut seen = HashSet::new();
+    let path = loop {
+        let parts = path(ctx, callee);
+
+        if !seen.insert(callee.span()) {
+            break parts;
+        }
+        if let Expression::CallExpression(c) = callee
+            && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
+            && MemberKeys::Resolve(ctx).read(m) == Some("bind")
+        {
+            args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
+            callee = resolve(ctx, m.object());
+            continue;
+        }
+        if parts.as_deref().map(unqualified) == Some(&["Reflect", "apply"])
+            && let Some(target) = args.first().copied().flatten()
+        {
+            args = array_args(ctx, args.get(2).copied().flatten());
+            callee = resolve(ctx, target);
+            continue;
+        }
+        let Some(m) = callee.get_member_expr() else {
+            break parts;
+        };
+        match MemberKeys::Resolve(ctx).read(m) {
+            Some("call") => {
+                args.drain(..args.len().min(1));
+            }
+            Some("apply") => args = array_args(ctx, args.get(1).copied().flatten()),
+            _ => break parts,
+        }
+        callee = resolve(ctx, m.object());
+    };
+    Invocation { callee, path, args }
+}
+
+pub(super) fn call_expr<'a>(e: &'a Expression<'a>) -> Option<&'a CallExpression<'a>> {
+    match e.get_inner_expression() {
+        Expression::CallExpression(c) => Some(c),
+        Expression::ChainExpression(c) => match &c.expression {
+            oxc::ast::ast::ChainElement::CallExpression(c) => Some(c),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(super) struct Properties<'a> {
+    pub(super) named: std::collections::BTreeMap<&'a str, &'a oxc::ast::ast::ObjectProperty<'a>>,
+    pub(super) unknown: bool,
+}
+pub(super) fn properties<'a>(
+    ctx: &TsCtx<'a>,
+    initial: &'a Expression<'a>,
+) -> Option<Properties<'a>> {
+    enum Step<'a> {
+        Value(&'a Expression<'a>),
+        Property(&'a ObjectPropertyKind<'a>),
+        Leave(u32),
+    }
+    let mut pending = vec![Step::Value(initial)];
+    let mut active = HashSet::new();
+    let mut result = Properties {
+        named: std::collections::BTreeMap::new(),
+        unknown: false,
+    };
+    if !matches!(resolve(ctx, initial), Expression::ObjectExpression(_)) {
+        return None;
+    }
+    while let Some(step) = pending.pop() {
+        match step {
+            Step::Value(e) => {
+                if let Expression::ObjectExpression(o) = resolve(ctx, e)
+                    && active.insert(o.span.start)
+                {
+                    pending.push(Step::Leave(o.span.start));
+                    pending.extend(o.properties.iter().rev().map(Step::Property));
+                } else {
+                    result.unknown = true;
+                    result.named.clear();
+                }
+            }
+            Step::Property(ObjectPropertyKind::ObjectProperty(p)) => {
+                if let Some(name) = key(ctx, &p.key) {
+                    result.named.insert(name, p);
+                } else {
+                    result.unknown = true;
+                    result.named.clear();
+                }
+            }
+            Step::Property(ObjectPropertyKind::SpreadProperty(s)) => {
+                pending.push(Step::Value(&s.argument));
+            }
+            Step::Leave(start) => {
+                active.remove(&start);
+            }
+        }
+    }
+    Some(result)
+}
+
+pub(super) fn receiver<'a>(
+    ctx: &TsCtx<'a>,
+    callee: &'a Expression<'a>,
+) -> Option<(&'a Expression<'a>, &'a str)> {
+    if let Some(m) = callee.get_member_expr() {
+        return Some((m.object(), MemberKeys::Resolve(ctx).read(m)?));
+    }
+    let id = callee.get_identifier_reference()?;
+    let AstKind::VariableDeclarator(v) = declaration(ctx, id)? else {
+        return None;
+    };
+    let BindingPattern::ObjectPattern(pattern) = &v.id else {
+        return None;
+    };
+    Some((
+        v.init.as_ref()?,
+        destructured(ctx, pattern, |b| b.name == id.name)?,
+    ))
+}
+
+pub(super) fn member_span(ctx: &TsCtx<'_>, member: &MemberExpression<'_>) -> oxc::span::Span {
+    match member {
+        MemberExpression::StaticMemberExpression(m) => m.property.span,
+        MemberExpression::ComputedMemberExpression(m) => resolve(ctx, &m.expression).span(),
+        MemberExpression::PrivateFieldExpression(m) => m.field.span,
+    }
 }

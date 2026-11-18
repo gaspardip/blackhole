@@ -69,27 +69,63 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let Some(base) = root(&c.callee) else {
+        let inv = super::values::invoked(ctx, c);
+        let parts = super::test_context::runner(ctx, &inv);
+        if parts.is_empty()
+            && let Some(id) = c.callee.get_identifier_reference()
+        {
+            let name = id.name.as_str();
+            if (name.starts_with("expect") && name != "expect")
+                || (name.starts_with("assert") && name != "assert")
+            {
+                assertions.entry(c.span.start).or_default();
+            }
+        }
+        let Some(&base) = parts.first() else {
             continue;
         };
         if base.starts_with("expect") || base.starts_with("assert") {
-            let found = tautology(ctx, c);
+            if matches!(
+                parts.as_slice(),
+                [
+                    "expect",
+                    "assertions"
+                        | "hasAssertions"
+                        | "any"
+                        | "anything"
+                        | "arrayContaining"
+                        | "arrayOf"
+                        | "objectContaining"
+                        | "stringContaining"
+                        | "stringMatching"
+                        | "closeTo"
+                ]
+            ) {
+                continue;
+            }
+            let bare_literal = parts == ["expect"]
+                && inv.arg(0).is_some_and(literal)
+                && !matches!(super::values::outer(ctx,n.id()),Some(kind) if kind.as_member_expression_kind().is_some());
+            let found = bare_literal || tautology(ctx, c);
             *assertions.entry(c.span.start).or_default() |= found;
         }
         if !is_test(base)
-            || chain_property(&c.callee, |s| s == "todo").is_some()
+            || chain_property(ctx, &c.callee, |s| s == "todo").is_some()
             || super::test_context::static_method(&c.callee, &["each", "for", "extend"])
         {
             continue;
         }
         // shortcut: callbacks passed by reference need interprocedural analysis before their assertions can be judged.
-        if let Some(body) = c.arguments.iter().skip(1).find_map(|a| {
-            match a.as_expression()?.get_inner_expression() {
+        if let Some(body) = inv
+            .args
+            .iter()
+            .flatten()
+            .find_map(|a| match a.get_inner_expression() {
                 Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
                 Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
                 _ => None,
-            }
-        }) {
+            })
+        {
             tests.push((c.span.start, body));
         }
     }

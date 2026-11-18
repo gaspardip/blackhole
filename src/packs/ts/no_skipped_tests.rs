@@ -1,4 +1,4 @@
-use super::test_context::{chain_property, is_test, root, suite, test_file};
+use super::test_context::{chain_property, is_test, suite, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -16,15 +16,6 @@ fn modifier(name: &str) -> bool {
     matches!(
         name,
         "skip" | "only" | "todo" | "skipIf" | "runIf" | "fixme" | "fails" | "failing"
-    )
-}
-fn focused_or_skipped(e: &Expression<'_>) -> bool {
-    let Some(id) = e.get_identifier_reference() else {
-        return false;
-    };
-    matches!(
-        id.name.as_str(),
-        "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe"
     )
 }
 fn body_skip(e: &Expression<'_>) -> Option<usize> {
@@ -51,20 +42,36 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let position = if root(&c.callee).is_some_and(|s| is_test(s) || suite(s)) {
-            chain_property(&c.callee, modifier)
-        } else if focused_or_skipped(&c.callee) {
-            Some(c.callee.span().start as usize)
+        let call = super::values::invoked(ctx, c);
+        let path = super::test_context::runner(ctx, &call);
+        let base = path.first().copied().unwrap_or("");
+        let position = if is_test(base) || suite(base) {
+            if path.iter().skip(1).any(|k| modifier(k)) {
+                Some(
+                    chain_property(ctx, call.callee, modifier)
+                        .unwrap_or(call.callee.span().start as usize),
+                )
+            } else {
+                call.arg(1).and_then(|e|super::values::properties(ctx,e)).and_then(|opts| {
+                    opts.named.into_iter().find_map(|(key,p)|{
+                        (matches!(key,"skip"|"todo") && matches!(super::values::resolve(ctx,&p.value),Expression::BooleanLiteral(b) if b.value)).then_some(p.key.span().start as usize)
+                    })
+                })
+            }
+        } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe") {
+            Some(call.callee.span().start as usize)
         } else if is_test_file
-            && let Some(at) = body_skip(&c.callee)
             && super::values::enclosing_functions(ctx, id).any(|f| {
-                match nodes.parent_kind(f.id()) {
-                    AstKind::CallExpression(parent) => root(&parent.callee).is_some_and(is_test),
-                    _ => false,
-                }
+                let Some(AstKind::CallExpression(parent)) = super::values::outer(ctx, f.id())
+                else {
+                    return false;
+                };
+                super::test_context::runner(ctx, &super::values::invoked(ctx, parent))
+                    .first()
+                    .is_some_and(|s| is_test(s))
             })
         {
-            Some(at)
+            body_skip(call.callee)
         } else {
             None
         };

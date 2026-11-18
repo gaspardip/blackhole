@@ -82,15 +82,17 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
-pub(super) fn chain_property(e: &Expression<'_>, wanted: impl Fn(&str) -> bool) -> Option<usize> {
+pub(super) fn chain_property(
+    ctx: &TsCtx<'_>,
+    e: &Expression<'_>,
+    wanted: impl Fn(&str) -> bool,
+) -> Option<usize> {
     let mut current = e;
     loop {
-        current = current.get_inner_expression();
+        current = resolve(ctx, current);
         if let Some(m) = current.get_member_expr() {
-            if let Some((span, key)) = m.static_property_info()
-                && key.as_str().is_some_and(&wanted)
-            {
-                return Some(span.start as usize);
+            if MemberKeys::Resolve(ctx).read(m).is_some_and(&wanted) {
+                return Some(super::values::member_span(ctx, m).start as usize);
             }
             current = m.object();
             continue;
@@ -100,5 +102,53 @@ pub(super) fn chain_property(e: &Expression<'_>, wanted: impl Fn(&str) -> bool) 
             Expression::TaggedTemplateExpression(t) => current = &t.tag,
             _ => return None,
         }
+    }
+}
+
+use super::values::{Invocation, call_expr, invoked, path, resolve, unqualified};
+use crate::engine::TsCtx;
+use oxc::span::GetSpan;
+
+pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Vec<&'a str> {
+    let mut e = call.callee;
+    let mut suffix = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        e = resolve(ctx, e);
+        if !seen.insert(e.span()) {
+            return Vec::new();
+        }
+        if let Some(parts) = path(ctx, e) {
+            let mut parts = match unqualified(&parts) {
+                ["node:test", "default", rest @ ..] => {
+                    let mut p = vec!["test"];
+                    p.extend(rest);
+                    p
+                }
+                [
+                    "vitest" | "@jest/globals" | "node:test" | "@playwright/test",
+                    rest @ ..,
+                ] => rest.to_vec(),
+                other => other.to_vec(),
+            };
+            parts.extend(suffix.into_iter().rev());
+            return parts;
+        }
+        if let Some(m) = e.get_member_expr()
+            && let Some(k) = MemberKeys::Resolve(ctx).read(m)
+        {
+            suffix.push(k);
+            e = m.object();
+            continue;
+        }
+        if let Some(c) = call_expr(e) {
+            e = invoked(ctx, c).callee;
+            continue;
+        }
+        if let Expression::TaggedTemplateExpression(t) = e {
+            e = &t.tag;
+            continue;
+        }
+        return Vec::new();
     }
 }

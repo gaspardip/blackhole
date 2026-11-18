@@ -1,0 +1,1 @@
+test("x", () => { expect.hasAssertions(); });

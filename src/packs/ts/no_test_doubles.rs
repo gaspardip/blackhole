@@ -3,30 +3,17 @@ use super::values::MemberKeys;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{Expression, IdentifierReference, ObjectPropertyKind},
+    ast::{Expression, ObjectPropertyKind},
 };
 use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-test-doubles",
     family: Family::Tests,
-    provenance: "Ports of landmines testing/no-test-doubles and anti-slop no-module-mocking.",
+    provenance: "Ports of landmines testing/no-test-doubles and anti-slop no-module-mocking. Spy-only module mocks follow landmines as observation.",
     fix: "Exercise the real implementation. Intercept network requests with MSW and use spies only to observe calls.",
     run: Run::Ts(check),
 };
-
-fn framework(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> bool {
-    if id.reference_id.get().is_none() {
-        return false;
-    }
-    if super::values::symbol(ctx, id).is_none() {
-        return matches!(id.name.as_str(), "vi" | "jest");
-    }
-    matches!(
-        super::values::import_of(ctx, id),
-        Some(("vitest", Imported::Named("vi")) | ("@jest/globals", Imported::Named("jest")))
-    )
-}
 
 fn worker_entry(ctx: &TsCtx<'_>, receiver: &Expression<'_>) -> bool {
     let Expression::Identifier(id) = receiver else {
@@ -213,12 +200,6 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             && let Some(value) = invocation.arg(2)
         {
             check_bindings(ctx, value, &mut reported, findings);
-        }
-        if matches!(method, "mock" | "doMock" | "unstable_mockModule")
-            && let Expression::Identifier(id) = member.object().get_inner_expression()
-            && framework(ctx, id)
-        {
-            findings.report(call.span.start as usize, None);
         }
     }
 }

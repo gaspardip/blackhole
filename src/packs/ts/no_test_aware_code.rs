@@ -54,21 +54,31 @@ fn unbound_name(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
     };
     names.contains(&id.name.as_str()) && ctx.semantic.is_reference_to_global_variable(id)
 }
-fn env<'a>(e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+fn env<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
     let m = e.get_member_expr()?;
-    (MemberKeys::Literal.read(m)? == "env").then(|| m.object())
+    (MemberKeys::Resolve(ctx).read(m)? == "env").then(|| m.object())
+}
+fn process_env(ctx: &TsCtx<'_>, e: &Expression<'_>, suffix: &[&str]) -> bool {
+    super::values::path(ctx, e).is_some_and(|p| match super::values::unqualified(&p) {
+        ["process" | "node:process", "env", rest @ ..]
+        | ["node:process", "default", "env", rest @ ..] => rest == suffix,
+        _ => false,
+    })
 }
 fn mode(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Span> {
     let e = e.get_inner_expression();
+    if process_env(ctx, e, &["NODE_ENV"]) {
+        return Some(e.span());
+    }
     let m = e.get_member_expr()?;
-    let owner = env(m.object())?;
-    let name = MemberKeys::Literal.read(m)?;
+    let owner = env(ctx, m.object())?;
+    let name = MemberKeys::Resolve(ctx).read(m)?;
     (marker(name, Marker::Mode)
         && (meta(owner) || name == "NODE_ENV" && unbound_name(ctx, owner, &["process"])))
     .then_some(e.span())
 }
 fn comparison(ctx: &TsCtx<'_>, left: &Expression<'_>, right: &Expression<'_>) -> Option<Span> {
-    let test = |e: &Expression<'_>| matches!(e.get_inner_expression(),Expression::StringLiteral(s) if s.value=="test");
+    let test = |e: &Expression<'_>| super::values::literal(ctx, e) == Some("test");
     if test(right) {
         mode(ctx, left)
     } else if test(left) {
@@ -80,13 +90,14 @@ fn comparison(ctx: &TsCtx<'_>, left: &Expression<'_>, right: &Expression<'_>) ->
 fn read(ctx: &TsCtx<'_>, id: NodeId, span: Span) -> bool {
     match super::values::outer(ctx, id) {
         Some(AstKind::AssignmentExpression(a)) => !a.operator.is_assign() || a.left.span() != span,
+        Some(AstKind::AssignmentTargetPropertyProperty(p)) => p.binding.span() != span,
+        Some(AstKind::AssignmentTargetWithDefault(p)) => p.binding.span() != span,
         Some(AstKind::UnaryExpression(u)) => !u.operator.is_delete(),
         _ => true,
     }
 }
 fn test_member(ctx: &TsCtx<'_>, object: &Expression<'_>, name: &str) -> bool {
-    (marker(name, Marker::Worker)
-        && env(object).is_some_and(|e| unbound_name(ctx, e, &["process"])))
+    (marker(name, Marker::Worker) && process_env(ctx, object, &[]))
         || (name == "vitest" && meta(object))
         || (marker(name, Marker::Runner)
             && unbound_name(ctx, object, &["window", "globalThis", "global"]))
@@ -107,7 +118,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         let span = match node.kind() {
             kind if let Some(m) = kind.as_member_expression_kind()
-                && MemberKeys::Literal
+                && MemberKeys::Resolve(ctx)
                     .read_kind(m)
                     .is_some_and(|name| test_member(ctx, m.object(), name))
                 && read(ctx, id, node.span()) =>
@@ -139,10 +150,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 None
             }
             AstKind::VariableDeclarator(v)
-                if v.init
-                    .as_ref()
-                    .and_then(env)
-                    .is_some_and(|e| unbound_name(ctx, e, &["process"])) =>
+                if v.init.as_ref().is_some_and(|e| process_env(ctx, e, &[])) =>
             {
                 if let BindingPattern::ObjectPattern(p) = &v.id {
                     for prop in &p.properties {
@@ -153,9 +161,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 }
                 None
             }
-            AstKind::AssignmentExpression(a)
-                if env(&a.right).is_some_and(|e| unbound_name(ctx, e, &["process"])) =>
-            {
+            AstKind::AssignmentExpression(a) if process_env(ctx, &a.right, &[]) => {
                 if let AssignmentTarget::ObjectAssignmentTarget(o) = &a.left {
                     for p in &o.properties {
                         match p {

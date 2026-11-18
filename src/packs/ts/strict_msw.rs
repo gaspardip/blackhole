@@ -1,9 +1,8 @@
-use super::values::MemberKeys;
 use super::values::symbol;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{AssignmentTarget, Expression, ObjectPropertyKind},
+    ast::{AssignmentTarget, Expression},
 };
 use oxc::syntax::symbol::SymbolId;
 use std::collections::HashMap;
@@ -22,45 +21,32 @@ enum Factory {
     Ambiguous,
 }
 fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
-    let Expression::CallExpression(c) = e else {
+    let call = super::values::call_expr(super::values::resolve(ctx, e))?;
+    let inv = super::values::invoked(ctx, call);
+    let [source, name] = inv.path.as_deref()? else {
         return None;
     };
-    let id = c.callee.get_identifier_reference()?;
-    let (source, super::values::Imported::Named(name)) = super::values::import_of(ctx, id)? else {
-        return None;
-    };
-    if source != "msw" && !source.starts_with("msw/") {
+    if *source != "msw" && !source.starts_with("msw/") {
         return None;
     }
-    match name {
+    match *name {
         "setupServer" => Some(Factory::Server),
         "setupWorker" => Some(Factory::Worker),
         _ => None,
     }
 }
 fn strict(ctx: &TsCtx<'_>, opts: Option<&Expression<'_>>) -> bool {
-    let Some(Expression::ObjectExpression(o)) = opts.map(Expression::get_inner_expression) else {
+    let Some(p) = opts
+        .and_then(|e| super::values::properties(ctx, e))
+        .and_then(|p| p.named.get("onUnhandledRequest").copied())
+    else {
         return false;
     };
-    for prop in o.properties.iter().rev() {
-        let ObjectPropertyKind::ObjectProperty(p) = prop else {
-            return false;
-        };
-        match super::values::key(ctx, &p.key) {
-            Some("onUnhandledRequest") => {
-                return match &p.value {
-                    Expression::StringLiteral(s) => s.value == "error",
-                    Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
-                        true
-                    }
-                    _ => false,
-                };
-            }
-            None => return false,
-            _ => (),
-        }
-    }
-    false
+    super::values::literal(ctx, &p.value) == Some("error")
+        || matches!(
+            super::values::resolve(ctx, &p.value),
+            Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
+        )
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut factories = HashMap::<SymbolId, Factory>::new();
@@ -95,17 +81,18 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = node.kind() else {
             continue;
         };
-        let Some(m) = c.callee.get_member_expr() else {
+        let inv = super::values::invoked(ctx, c);
+        let Some((object, key)) = super::values::receiver(ctx, inv.callee) else {
             continue;
         };
-        let kind = match m.object().get_inner_expression() {
+        let kind = match super::values::resolve(ctx, object) {
             Expression::Identifier(id) => symbol(ctx, id).and_then(|s| factories.get(&s).copied()),
             other => factory(ctx, other),
         };
         if matches!(
-            (kind, MemberKeys::Literal.read(m)),
+            (kind, Some(key)),
             (Some(Factory::Server), Some("listen")) | (Some(Factory::Worker), Some("start"))
-        ) && !strict(ctx, c.arguments.first().and_then(|a| a.as_expression()))
+        ) && !strict(ctx, inv.arg(0))
         {
             findings.report(c.span.start as usize, None);
         }

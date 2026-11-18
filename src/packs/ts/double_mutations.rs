@@ -3,17 +3,10 @@ use super::{
     values::{MemberKeys, declaration, key, literal, path, resolve},
 };
 use crate::engine::TsCtx;
-use oxc::{
-    ast::{
-        AstKind,
-        ast::{
-            Argument, AssignmentTarget, BindingPattern, CallExpression, Expression,
-            MemberExpression, ObjectPropertyKind,
-        },
-    },
-    span::GetSpan,
+use oxc::ast::{
+    AstKind,
+    ast::{AssignmentTarget, BindingPattern, Expression, MemberExpression},
 };
-use std::collections::HashSet;
 
 fn native(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<String> {
     let parts = path(ctx, expr)?;
@@ -30,8 +23,8 @@ fn native_name(parts: &[&str]) -> String {
 
 fn protected_member(ctx: &TsCtx<'_>, m: &MemberExpression<'_>) -> bool {
     native(ctx, m.object())
-        .zip(MemberKeys::Resolve(ctx).read(m))
-        .is_some_and(|(owner, k)| protected(&owner, k))
+        .and_then(|owner| super::native_properties::owner_properties(&owner))
+        .is_some_and(|protected| MemberKeys::Resolve(ctx).read(m).is_none_or(protected))
 }
 
 pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
@@ -59,15 +52,10 @@ pub(super) enum Mutation {
     Delete,
 }
 
-pub(super) struct Invocation<'a> {
-    pub(super) callee: &'a Expression<'a>,
-    pub(super) path: Option<Vec<&'a str>>,
-    native_path: Option<String>,
-    pub(super) args: Vec<Option<&'a Expression<'a>>>,
-}
-impl<'a> Invocation<'a> {
+pub(super) use super::values::{Invocation, invoked};
+impl Invocation<'_> {
     pub(super) fn mutation(&self) -> Option<Mutation> {
-        match self.native_path.as_deref()? {
+        match native_name(self.path.as_deref()?).as_str() {
             "Object.assign" => Some(Mutation::Assign),
             "Object.defineProperties" => Some(Mutation::DefineMany),
             "Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set" => {
@@ -77,65 +65,7 @@ impl<'a> Invocation<'a> {
             _ => None,
         }
     }
-    pub(super) fn arg(&self, i: usize) -> Option<&'a Expression<'a>> {
-        self.args.get(i).copied().flatten()
-    }
 }
-fn array_args<'a>(
-    ctx: &TsCtx<'a>,
-    arg: Option<&'a Expression<'a>>,
-) -> Vec<Option<&'a Expression<'a>>> {
-    if let Some(Expression::ArrayExpression(a)) = arg.map(|a| resolve(ctx, a)) {
-        a.elements.iter().map(|e| e.as_expression()).collect()
-    } else {
-        Vec::new()
-    }
-}
-pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invocation<'a> {
-    let mut callee = resolve(ctx, &call.callee);
-    let mut args: Vec<_> = call.arguments.iter().map(Argument::as_expression).collect();
-    let mut seen = HashSet::new();
-    let (path, native_path) = loop {
-        let parts = path(ctx, callee);
-        let native_path = parts.as_deref().map(native_name);
-        if !seen.insert(callee.span()) {
-            break (parts, native_path);
-        }
-        if let Expression::CallExpression(c) = callee
-            && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
-            && MemberKeys::Resolve(ctx).read(m) == Some("bind")
-        {
-            args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
-            callee = resolve(ctx, m.object());
-            continue;
-        }
-        if native_path.as_deref() == Some("Reflect.apply")
-            && let Some(target) = args.first().copied().flatten()
-        {
-            args = array_args(ctx, args.get(2).copied().flatten());
-            callee = resolve(ctx, target);
-            continue;
-        }
-        let Some(m) = callee.get_member_expr() else {
-            break (parts, native_path);
-        };
-        match MemberKeys::Resolve(ctx).read(m) {
-            Some("call") => {
-                args.drain(..args.len().min(1));
-            }
-            Some("apply") => args = array_args(ctx, args.get(1).copied().flatten()),
-            _ => break (parts, native_path),
-        }
-        callee = resolve(ctx, m.object());
-    };
-    Invocation {
-        callee,
-        path,
-        native_path,
-        args,
-    }
-}
-
 pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     let Some(kind) = call.mutation() else {
         return false;
@@ -177,15 +107,14 @@ fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     if call.args.len() != 2 {
         return false;
     }
-    let Some(Expression::ObjectExpression(obj)) = call.arg(1) else {
+    let Some(opts) = call.arg(1).and_then(|e| super::values::properties(ctx, e)) else {
         return false;
     };
-    let [ObjectPropertyKind::ObjectProperty(p)] = obj.properties.as_slice() else {
-        return false;
-    };
-    !p.method
-        && key(ctx, &p.key) == Some("spy")
-        && matches!(&p.value,Expression::BooleanLiteral(v) if v.value)
+    !opts.unknown
+        && opts.named.len() == 1
+        && opts.named.get("spy").is_some_and(|p| {
+            !p.method && matches!(resolve(ctx,&p.value),Expression::BooleanLiteral(v) if v.value)
+        })
 }
 
 pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
@@ -212,7 +141,7 @@ pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
         return false;
     };
 
-    match parts.as_slice() {
+    match super::values::unqualified(parts) {
         [
             "@tauri-apps/api/mocks",
             "mockIPC" | "mockWindows" | "mockConvertFileSrc",
@@ -224,10 +153,8 @@ pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
                 "fn" => call
                     .arg(0)
                     .is_some_and(|e| !super::values::resolves_to_global(ctx, e, "undefined")),
-                "mockObject" => *owner == "jest" || !observation(ctx, call),
-                "mock"
-                | "doMock"
-                | "stubGlobal"
+                "mockObject" | "mock" | "doMock" => *owner == "jest" || !observation(ctx, call),
+                "stubGlobal"
                 | "unstable_mockModule"
                 | "importMock"
                 | "createMockFromModule"

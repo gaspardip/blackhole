@@ -1,10 +1,9 @@
-use super::test_context::{is_test, root, single_effect};
+use super::test_context::{is_test, single_effect};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{Expression, ImportDeclarationSpecifier, NewExpression},
+    ast::{Expression, NewExpression},
 };
-use std::collections::HashSet;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
@@ -18,14 +17,14 @@ fn calls_resolver(body: Option<&Expression<'_>>, name: &str) -> bool {
     };
     c.callee.is_specific_id(name)
 }
-fn promise(n: &NewExpression<'_>) -> bool {
-    if !n.callee.is_specific_id("Promise") {
+fn promise(ctx: &TsCtx<'_>, n: &NewExpression<'_>) -> bool {
+    if !super::values::resolves_to_global(ctx, &n.callee, "Promise") {
         return false;
     }
     let Some(callback) = n.arguments.first().and_then(|a| a.as_expression()) else {
         return false;
     };
-    let params = match callback {
+    let params = match callback.get_inner_expression() {
         Expression::ArrowFunctionExpression(f) => &f.params,
         Expression::FunctionExpression(f) => &f.params,
         _ => return false,
@@ -37,7 +36,9 @@ fn promise(n: &NewExpression<'_>) -> bool {
     else {
         return false;
     };
-    let Some(Expression::CallExpression(c)) = single_effect(callback) else {
+    let Some(Expression::CallExpression(c)) =
+        single_effect(callback.get_inner_expression()).map(Expression::get_inner_expression)
+    else {
         return false;
     };
     if !(c.callee.is_specific_id("setTimeout")
@@ -47,7 +48,12 @@ fn promise(n: &NewExpression<'_>) -> bool {
     {
         return false;
     }
-    match c.arguments.first().and_then(|a| a.as_expression()) {
+    match c
+        .arguments
+        .first()
+        .and_then(|a| a.as_expression())
+        .map(Expression::get_inner_expression)
+    {
         Some(Expression::Identifier(id)) => id.name == resolve.name,
         Some(Expression::ArrowFunctionExpression(f)) => {
             calls_resolver(f.body.as_expression(), resolve.name.as_str())
@@ -57,52 +63,33 @@ fn promise(n: &NewExpression<'_>) -> bool {
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
-    let mut timers = HashSet::new();
-    for n in nodes.iter() {
-        match n.kind() {
-            AstKind::CallExpression(c)
-                if c.callee.is_specific_member_access("vi", "useFakeTimers") =>
-            {
-                return;
-            }
-            AstKind::ImportDeclaration(i)
-                if matches!(
-                    i.source.value.as_str(),
-                    Some("node:timers/promises" | "timers/promises")
-                ) =>
-            {
-                for spec in i.specifiers.iter().flatten() {
-                    if let ImportDeclarationSpecifier::ImportSpecifier(s) = spec
-                        && s.imported.name() == "setTimeout"
-                    {
-                        timers.insert(s.local.name.as_str());
-                    }
-                }
-            }
-            _ => (),
-        }
-    }
+    if nodes.iter().any(|n|matches!(n.kind(),AstKind::CallExpression(c) if super::test_context::runner(ctx,&super::values::invoked(ctx,c))==["vi","useFakeTimers"])){return;}
     for (id, n) in nodes.iter_enumerated() {
         let AstKind::AwaitExpression(a) = n.kind() else {
             continue;
         };
-        let sleep = match &a.argument {
-            Expression::NewExpression(n) => promise(n),
-            Expression::CallExpression(c) => {
-                c.callee.is_specific_member_access("scheduler", "wait")
-                    || c.callee.is_specific_member_access("Bun", "sleep")
-                    || c.callee
-                        .get_identifier_reference()
-                        .is_some_and(|i| timers.contains(i.name.as_str()))
-            }
-            _ => false,
+        let value = super::values::resolve(ctx, &a.argument);
+        let sleep = if let Expression::NewExpression(n) = value {
+            promise(ctx, n)
+        } else {
+            super::values::call_expr(value).is_some_and(|c| {
+                matches!(
+                    super::test_context::runner(ctx, &super::values::invoked(ctx, c)).as_slice(),
+                    ["scheduler", "wait"]
+                        | ["Bun", "sleep"]
+                        | ["node:timers/promises" | "timers/promises", "setTimeout"]
+                )
+            })
         };
         if sleep
             && let Some(f) = super::values::enclosing_functions(ctx, id).next()
-            && let AstKind::CallExpression(c) = nodes.parent_kind(f.id())
-            && root(&c.callee).is_some_and(|s| {
-                is_test(s) || matches!(s, "beforeEach" | "beforeAll" | "afterEach" | "afterAll")
-            })
+            && let Some(AstKind::CallExpression(c)) = super::values::outer(ctx, f.id())
+            && super::test_context::runner(ctx, &super::values::invoked(ctx, c))
+                .first()
+                .is_some_and(|s| {
+                    is_test(s)
+                        || matches!(*s, "beforeEach" | "beforeAll" | "afterEach" | "afterAll")
+                })
         {
             findings.report(a.span.start as usize, None);
         }

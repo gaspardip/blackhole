@@ -1,0 +1,1 @@
+globalThis.vi.mock("client");
