@@ -1,5 +1,5 @@
 use super::{
-    dictionary_types::{Class, Resolution},
+    dictionary_types::{Class, Judged, Resolution, report},
     function_types::{
         bindings::{ConstBindings, declaration},
         contains_unknown, direct_binding,
@@ -81,9 +81,9 @@ fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings<()>, expr: &'a Expres
 fn guard_argument<'a>(
     resolution: &Resolution,
     ctx: &TsCtx<'a>,
-    bindings: &mut ConstBindings<()>,
+    bindings: &mut ConstBindings<Judged<()>>,
     call: &'a CallExpression<'a>,
-) -> Option<&'a Expression<'a>> {
+) -> Option<(&'a Expression<'a>, Judged<()>)> {
     let (params, ret) = local_function(ctx, &call.callee)?;
     let subject = predicate_subject(ret?)?;
     let index = params.items.iter().position(|p| {
@@ -98,7 +98,12 @@ fn guard_argument<'a>(
         |mut expr| loop {
             expr = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(expr.node_id())) {
-                return Break(resolution.informative(ctx, ty).then_some(()));
+                return Break(
+                    resolution
+                        .informative(ctx, ty)
+                        .map(|yes| yes.then_some(()))
+                        .transpose(),
+                );
             }
             match expr {
                 Expression::TSNonNullExpression(n) => expr = &n.expression,
@@ -107,11 +112,15 @@ fn guard_argument<'a>(
                     return Break(
                         local_function(ctx, &n.callee)
                             .and_then(|(_, r)| r)
-                            .is_some_and(|r| resolution.informative(ctx, &r.type_annotation))
-                            .then_some(()),
+                            .and_then(|r| {
+                                resolution
+                                    .informative(ctx, &r.type_annotation)
+                                    .map(|yes| yes.then_some(()))
+                                    .transpose()
+                            }),
                     );
                 }
-                _ => return value_or_binding(expr),
+                _ => return value_or_binding(expr).map_break(|v| v.map(Ok)),
             }
         },
         |_, kind| {
@@ -120,12 +129,13 @@ fn guard_argument<'a>(
                 Break(
                     resolution
                         .informative(ctx, &a.type_annotation)
-                        .then_some(()),
+                        .map(|yes| yes.then_some(()))
+                        .transpose(),
                 )
             })
         },
     );
-    (evidence.is_some() || resolution.incomplete()).then_some(arg)
+    evidence.map(|answer| (arg, answer))
 }
 
 fn typed_flow<'a>(
@@ -177,42 +187,46 @@ fn loses_evidence<'a>(
     bindings: &mut ConstBindings<()>,
     expr: &'a Expression<'a>,
     ty: &'a TSType<'a>,
-) -> bool {
-    match resolution.target(ctx, ty) {
+) -> Judged<bool> {
+    Ok(match resolution.target(ctx, ty)? {
         Class::None => false,
         Class::Dictionary if matches!(expr.get_inner_expression(), Expression::ObjectExpression(n) if n.properties.is_empty()) => {
             false
         }
         _ => known(ctx, bindings, expr),
-    }
+    })
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let resolution = Resolution::default();
+    check_with_resolution(ctx, findings, &Resolution::default());
+}
+
+pub(super) fn check_with_resolution(
+    ctx: &TsCtx<'_>,
+    findings: &mut Findings,
+    resolution: &Resolution,
+) {
     let mut bindings = ConstBindings::default();
     // Guard calls use declared types as evidence, so their cached origins belong to a separate walk.
     let mut guard_bindings = ConstBindings::default();
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let expression = match node.kind() {
+        let candidate = match node.kind() {
             AstKind::CallExpression(call) => {
-                guard_argument(&resolution, ctx, &mut guard_bindings, call)
+                guard_argument(resolution, ctx, &mut guard_bindings, call)
+                    .map(|(expr, answer)| (expr, answer.map(|()| true)))
             }
-            kind => typed_flow(ctx, id, kind)
-                .filter(|(expr, ty)| {
-                    loses_evidence(&resolution, ctx, &mut bindings, expr, ty)
-                        || resolution.incomplete()
-                })
-                .map(|(expr, _)| expr),
+            kind => typed_flow(ctx, id, kind).map(|(expr, ty)| {
+                (
+                    expr,
+                    loses_evidence(resolution, ctx, &mut bindings, expr, ty),
+                )
+            }),
         };
-        if resolution.incomplete() {
-            // A guard origin derived from an unfinished query cannot serve a later call.
-            guard_bindings = ConstBindings::default();
-        }
-        if let Some(expr) = expression {
-            resolution.report(
+        if let Some((expr, answer)) = candidate {
+            report(
                 findings,
                 expr.without_parentheses().span().start as usize,
-                true,
+                answer,
             );
         }
     }

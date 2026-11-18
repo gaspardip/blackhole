@@ -1,4 +1,4 @@
-use super::dictionary_types::Resolution;
+use super::dictionary_types::{Resolution, report};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::AstKind;
 
@@ -17,7 +17,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
 pub(super) fn check_aliases(ctx: &TsCtx<'_>, findings: &mut Findings, resolution: &Resolution) {
     for node in ctx.semantic.nodes().iter() {
         if let AstKind::TSTypeAliasDeclaration(alias) = node.kind() {
-            resolution.report(
+            report(
                 findings,
                 alias.id.span.start as usize,
                 resolution.unknown_alias(ctx, &alias.type_annotation),

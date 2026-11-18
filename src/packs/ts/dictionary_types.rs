@@ -169,23 +169,18 @@ struct Solver {
     envs: Environments,
     memo: HashMap<Goal, Class>,
     budget: Option<Budget>,
-    incomplete: bool,
 }
 impl Solver {
-    fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Class {
+    fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
         let budget = self.budget.get_or_insert_with(|| Budget {
             // shortcut: 128 steps per syntax node per rule, revisit when ordinary aliases approach it.
             remaining: ctx.semantic.nodes().len().saturating_mul(128),
             exhausted: false,
         });
-        if let Some(v) = evaluate(&mut self.memo, goal, budget, |g, b| {
+        evaluate(&mut self.memo, goal, budget, |g, b| {
             self.envs.plan(ctx, g, b)
-        }) {
-            v
-        } else {
-            self.incomplete = true;
-            Class::None
-        }
+        })
+        .ok_or(Unjudged)
     }
 }
 
@@ -621,23 +616,19 @@ fn empty(members: &[TSSignature<'_>], budget: &mut Budget) -> bool {
 
 #[derive(Default)]
 pub(super) struct Resolution(RefCell<Solver>);
+#[derive(Clone, Copy)]
+pub(super) struct Unjudged;
+pub(super) type Judged<T> = Result<T, Unjudged>;
+
+pub(super) fn report(findings: &mut crate::engine::Findings, offset: usize, answer: Judged<bool>) {
+    match answer {
+        Ok(true) => findings.report(offset, None),
+        Err(Unjudged) => findings.report(offset, Some("type too complex to judge")),
+        Ok(false) => {}
+    }
+}
 impl Resolution {
-    pub(super) fn incomplete(&self) -> bool {
-        self.0.borrow().incomplete
-    }
-    pub(super) fn report(
-        &self,
-        findings: &mut crate::engine::Findings,
-        offset: usize,
-        matched: bool,
-    ) {
-        if std::mem::take(&mut self.0.borrow_mut().incomplete) {
-            findings.report(offset, Some("type too complex to judge"));
-        } else if matched {
-            findings.report(offset, None);
-        }
-    }
-    fn query(&self, ctx: &TsCtx<'_>, node: NodeId, query: Query) -> Class {
+    fn query(&self, ctx: &TsCtx<'_>, node: NodeId, query: Query) -> Judged<Class> {
         self.0.borrow_mut().solve(
             ctx,
             Goal {
@@ -657,33 +648,41 @@ impl Resolution {
             && let Some(sym) = symbol(ctx, i)
             && ctx.semantic.scoping().symbol_flags(sym).is_type_alias()
             && let Some(decl) = type_declarations(ctx, sym).next()
-            && let Class::AliasBody(id) = self.query(ctx, decl, Query::PlainAlias)
+            && let Ok(Class::AliasBody(id)) = self.query(ctx, decl, Query::PlainAlias)
             && let AstKind::TSTypeAliasDeclaration(alias) = ctx.semantic.nodes().kind(id)
         {
             return &alias.type_annotation;
         }
         ty
     }
-    pub(super) fn unsafe_dictionary(&self, ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
-        matches!(
+    pub(super) fn unsafe_dictionary(&self, ctx: &TsCtx<'_>, kind: AstKind<'_>) -> Judged<bool> {
+        if !matches!(
             kind,
             AstKind::TSTypeReference(_) | AstKind::TSTypeLiteral(_) | AstKind::TSMappedType(_)
-        ) && self.query(ctx, kind.node_id(), Query::UnsafeDictionary) != Class::None
+        ) {
+            return Ok(false);
+        }
+        self.query(ctx, kind.node_id(), Query::UnsafeDictionary)
+            .map(|v| v != Class::None)
     }
-    pub(super) fn target(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Class {
+    pub(super) fn target(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<Class> {
         self.query(ctx, ty.node_id(), Query::Target)
     }
-    pub(super) fn informative(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-        self.query(ctx, ty.node_id(), Query::Value) == Class::None
+    pub(super) fn informative(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+        self.query(ctx, ty.node_id(), Query::Value)
+            .map(|v| v == Class::None)
     }
-    pub(super) fn object_input(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-        self.query(ctx, ty.node_id(), Query::ObjectInput) != Class::None
+    pub(super) fn object_input(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+        self.query(ctx, ty.node_id(), Query::ObjectInput)
+            .map(|v| v != Class::None)
     }
-    pub(super) fn unknown_alias(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-        self.query(ctx, ty.node_id(), Query::UnknownAlias) != Class::None
+    pub(super) fn unknown_alias(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+        self.query(ctx, ty.node_id(), Query::UnknownAlias)
+            .map(|v| v != Class::None)
     }
-    pub(super) fn unknown_return(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-        self.query(ctx, ty.node_id(), Query::UnknownReturn) != Class::None
+    pub(super) fn unknown_return(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+        self.query(ctx, ty.node_id(), Query::UnknownReturn)
+            .map(|v| v != Class::None)
     }
 }
 
@@ -692,6 +691,48 @@ mod tests {
     use super::{Budget, Class, Combine, Goal, Plan, Query, Term, evaluate};
     use oxc::syntax::node::NodeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn repeated_guards_reuse_an_unjudged_origin() {
+        use super::super::no_known_value_widening::{RULE, check_with_resolution};
+        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        use std::{
+            fmt::Write as _,
+            time::{Duration, Instant},
+        };
+
+        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+            let resolution = super::Resolution::default();
+            resolution.0.borrow_mut().budget = Some(Budget {
+                remaining: 0,
+                exhausted: false,
+            });
+            check_with_resolution(ctx, findings, &resolution);
+        }
+        let mut source = String::from(
+            "declare function guard(v: unknown): v is string;\ndeclare const root: string;\nconst v0 = root;\n",
+        );
+        for i in 1..=4000 {
+            writeln!(source, "const v{i} = v{};", i - 1).unwrap();
+        }
+        source.push_str(&"guard(v4000);\n".repeat(4000));
+        let start = Instant::now();
+        let hits = run(
+            &[Rule {
+                run: Run::Ts(check),
+                ..RULE
+            }],
+            [("guard.ts", source.as_bytes())],
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert_eq!(hits.len(), 4000);
+        for (i, hit) in hits.iter().enumerate() {
+            assert_eq!(
+                (hit.line, hit.col, hit.note.as_deref()),
+                (4004 + i, 7, Some("type too complex to judge"))
+            );
+        }
+    }
 
     #[test]
     fn exhausted_alias_lookup_keeps_the_syntactic_assertion_verdict() {

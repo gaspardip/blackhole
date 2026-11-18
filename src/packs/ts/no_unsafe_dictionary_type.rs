@@ -1,4 +1,7 @@
-use super::{dictionary_types::Resolution, function_types::bindings::symbol};
+use super::{
+    dictionary_types::{Resolution, Unjudged, report},
+    function_types::bindings::symbol,
+};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::TSTypeName},
@@ -42,21 +45,23 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
             if !matches!(nodes.parent_kind(id), AstKind::TSTypeLiteral(_)) {
-                resolution.report(
+                report(
                     findings,
                     n.span.start as usize,
-                    !resolution.informative(ctx, &n.type_annotation.type_annotation),
+                    resolution
+                        .informative(ctx, &n.type_annotation.type_annotation)
+                        .map(|v| !v),
                 );
             }
             continue;
         }
-        let matched = resolution.unsafe_dictionary(ctx, kind);
-        if resolution.incomplete() {
-            resolution.report(findings, node.span().start as usize, false);
-            continue;
-        }
-        if !matched {
-            continue;
+        match resolution.unsafe_dictionary(ctx, kind) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(Unjudged) => {
+                report(findings, node.span().start as usize, Err(Unjudged));
+                continue;
+            }
         }
         dictionaries.insert(id);
         let mut needs_alias = plain_alias(ctx, kind);
