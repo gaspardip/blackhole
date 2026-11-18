@@ -281,30 +281,47 @@ class Push(Repo):
         self.write("a.txt", "Quokka\n")
         head = self.commit("feat: add a")
         line = f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
 
     def test_clean_push_passes(self) -> None:
         self.write("a.txt", "fine\n")
         head = self.commit("feat: add a")
         line = f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
 
     def test_pushed_ref_name_is_caught(self) -> None:
         head = self.commit("chore: start")
         line = f"refs/heads/x {head} refs/heads/quokka-fix {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
 
     def test_annotated_tag_message_is_caught(self) -> None:
         self.commit("chore: start")
         git(self.dir, "tag", "-a", "v1", "-m", "release for Quokka")
         tag = git(self.dir, "rev-parse", "refs/tags/v1")
         line = f"refs/tags/v1 {tag} refs/tags/v1 {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+
+    def test_a_tag_inside_a_tag_is_caught(self) -> None:
+        self.commit("chore: start")
+        git(self.dir, "tag", "-a", "inner", "-m", "release for Quokka")
+        git(self.dir, "tag", "-a", "outer", "-m", "fine", "refs/tags/inner")
+        tag = git(self.dir, "rev-parse", "refs/tags/outer")
+        line = f"refs/tags/outer {tag} refs/tags/outer {'0' * 40}\n"
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+
+    def test_only_the_pushed_remote_counts_as_already_published(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        line = f"refs/heads/main {head} refs/heads/new {'0' * 40}\n"
+        git(self.dir, "update-ref", "refs/remotes/other/main", head)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+        git(self.dir, "update-ref", "refs/remotes/origin/main", head)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
 
     def test_branch_delete_is_skipped(self) -> None:
         self.commit("chore: start")
         line = f"(delete) {'0' * 40} refs/heads/old {'1' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
+        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
 
 
 class Event(Repo):
@@ -316,7 +333,8 @@ class Event(Repo):
         self, name: str, payload: dict[str, object], **env: str
     ) -> subprocess.CompletedProcess[str]:
         path = self.dir / ".git" / "event.json"
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        repository = {"full_name": "o/r", "owner": {"type": "User"}}
+        path.write_text(json.dumps({"repository": repository} | payload), encoding="utf-8")
         env |= {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
         return run(["event"], self.dir, env=env)
 
@@ -339,8 +357,7 @@ class Event(Repo):
             },
             "base": {"sha": self.base},
         }
-        payload = {"repository": {"full_name": "o/r"}, "pull_request": pull}
-        return self.event("pull_request_target", payload)
+        return self.event("pull_request_target", {"pull_request": pull})
 
     def test_clean_pull_request_passes(self) -> None:
         self.assertEqual(self.pull_request().returncode, 0)
@@ -359,7 +376,7 @@ class Event(Repo):
         self.assertEqual(self.pull_request(head=head).returncode, 1)
 
     def test_a_strangers_pull_request_gives_no_signal(self) -> None:
-        for association in ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR"]:
+        for association in ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "MEMBER"]:
             with self.subTest(association=association):
                 done = self.pull_request(title="Quokka?", association=association)
                 self.assertEqual(done.returncode, 0)
@@ -411,8 +428,34 @@ class Event(Repo):
         payload = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
         self.assertEqual(self.event("push", payload).returncode, 0)
 
+    def test_a_scheduled_run_scans_every_ref(self) -> None:
+        self.assertEqual(self.event("schedule", {}).returncode, 0)
+        git(self.dir, "tag", "quokka-1")
+        self.assertEqual(self.event("schedule", {}).returncode, 1)
+        git(self.dir, "tag", "-d", "quokka-1")
+        git(self.dir, "checkout", "-q", "-b", "side")
+        self.write("a.txt", "Quokka\n")
+        self.commit("feat: add a")
+        git(self.dir, "checkout", "-q", "-")
+        self.assertEqual(self.event("workflow_dispatch", {}).returncode, 1)
+
+    def test_an_organization_repository_fails_closed(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "MEMBER"}
+        payload = {"repository": {"full_name": "o/r", "owner": {"type": "Organization"}}}
+        self.assertEqual(self.event("issues", payload | {"issue": issue}).returncode, 2)
+
+    def test_a_field_of_the_wrong_type_fails_closed(self) -> None:
+        owner = {"title": "bug", "body": None, "author_association": "OWNER"}
+        for issue in [owner | {"author_association": None}, owner | {"body": []}, owner | {"title": 1}]:
+            with self.subTest(issue=issue):
+                self.assertEqual(self.event("issues", {"issue": issue}).returncode, 2)
+        push = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
+        for payload in [push | {"after": "main"}, push | {"before": None}, {"ref": push["ref"], "after": push["after"]}]:
+            with self.subTest(payload=payload):
+                self.assertEqual(self.event("push", payload).returncode, 2)
+
     def test_an_event_without_a_scan_fails_closed(self) -> None:
-        self.assertEqual(self.event("workflow_dispatch", {}).returncode, 2)
+        self.assertEqual(self.event("fork", {}).returncode, 2)
 
     def test_environment_text_is_not_scanned_for_an_event(self) -> None:
         issue = {"title": "bug", "body": None, "author_association": "NONE"}
@@ -433,9 +476,19 @@ class Errors(Repo):
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
 
     def test_an_unexpected_failure_is_not_reported_as_a_found_name(self) -> None:
-        done = run(["push"], self.dir, stdin="quokka\n")
+        done = run(["push", "origin"], self.dir, stdin="quokka\n")
         self.assertEqual(done.returncode, 2)
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+
+class Replaced(Repo):
+    def test_a_replacement_ref_does_not_hide_a_commit(self) -> None:
+        base = self.commit("chore: start")
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        clean = git(self.dir, "commit-tree", f"{base}^{{tree}}", "-p", base, "-m", "feat: add a")
+        git(self.dir, "replace", head, clean)
+        self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
 
 
 class HiddenSubmodules(Repo):

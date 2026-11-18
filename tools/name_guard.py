@@ -22,10 +22,11 @@ from typing import Any
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
 ZERO = re.compile(r"^0+$")
+SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 GITLINK = "160000"
 RAW = ("--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
-WRITERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event"
+WRITERS = frozenset({"OWNER", "COLLABORATOR"})
+USAGE = "usage: name_guard.py staged | message <file> | push <remote> | range <base> <head> | tree | text | event"
 
 
 class CannotRun(Exception):
@@ -74,8 +75,28 @@ def known(sha: str) -> bool:
     return subprocess.run(probe, capture_output=True, check=False).returncode == 0
 
 
-def by_writer(item: dict[str, Any]) -> bool:
-    return item["author_association"] in WRITERS
+def string(value: object) -> str:
+    if not isinstance(value, str):
+        raise CannotRun("the event payload is not what GitHub documents")
+    return value
+
+
+def optional(value: object) -> str:
+    return "" if value is None else string(value)
+
+
+def sha(value: object) -> str:
+    if not SHA.match(string(value)):
+        raise CannotRun("the event payload is not what GitHub documents")
+    return string(value)
+
+
+def by_writer(payload: dict[str, Any], item: dict[str, Any]) -> bool:
+    # Under a user, owners and collaborators can all write and only they can edit someone
+    # else's text. An organization's roles break both, so the guard refuses to guess there.
+    if string(payload["repository"]["owner"]["type"]) != "User":
+        raise CannotRun("the trust rule only holds for a repository owned by a user")
+    return string(item["author_association"]) in WRITERS
 
 
 def load_event() -> tuple[str, dict[str, Any]]:
@@ -183,9 +204,20 @@ class Guard:
         else:
             self.commits(head, base)
 
-    def tag(self, ref: str, sha: str) -> None:
-        if git("cat-file", "-t", sha).strip() == b"tag":
-            self.scan(f"tag {ref}", decode(git("cat-file", "tag", sha)))
+    def tag(self, ref: str, target: str) -> None:
+        # A tag can point at another tag, and each one carries its own message.
+        while git("cat-file", "-t", target).strip() == b"tag":
+            body = decode(git("cat-file", "tag", target))
+            self.scan(f"tag {ref}", body)
+            target = body.split("\n", 1)[0].removeprefix("object ")
+
+    def everything(self) -> None:
+        listed = decode(git("for-each-ref", "--format=%(objectname) %(refname)"))
+        for line in listed.splitlines():
+            target, ref = line.split(" ", 1)
+            self.name("ref", ref)
+            self.tag(ref, target)
+        self.commits("--all")
 
     def event(self, name: str, payload: dict[str, Any]) -> None:
         """Scans a GitHub event, and only what someone with write access wrote or pushed.
@@ -194,40 +226,48 @@ class Guard:
         """
         match name:
             case "push":
-                ref, after = payload["ref"], payload["after"]
+                ref = string(payload["ref"])
+                before, after = sha(payload["before"]), sha(payload["after"])
                 self.name("ref", ref)
                 if not ZERO.match(after):
                     self.tag(ref, after)
-                    self.range(payload["before"], f"{after}^{{commit}}")
+                    self.range(before, f"{after}^{{commit}}")
             case "pull_request_target":
                 pull = payload["pull_request"]
-                head = pull["head"]
+                head, source = pull["head"], pull["head"]["repo"]
                 # A head in another repository can be pushed to by people who cannot write here.
-                local = (head["repo"] or {}).get("full_name") == payload["repository"]["full_name"]
-                if by_writer(pull) and local:
-                    self.scan("pull request title", pull["title"])
-                    self.scan("pull request body", pull["body"] or "")
-                    self.name("ref", head["ref"])
-                    self.range(pull["base"]["sha"], head["sha"])
+                # GitHub sends no repository at all once a fork is deleted.
+                local = source is not None and string(source["full_name"]) == string(
+                    payload["repository"]["full_name"]
+                )
+                if by_writer(payload, pull) and local:
+                    self.scan("pull request title", string(pull["title"]))
+                    self.scan("pull request body", optional(pull["body"]))
+                    self.name("ref", string(head["ref"]))
+                    self.range(sha(pull["base"]["sha"]), sha(head["sha"]))
             case "issues":
                 issue = payload["issue"]
-                if by_writer(issue):
-                    self.scan("issue title", issue["title"])
-                    self.scan("issue body", issue["body"] or "")
+                if by_writer(payload, issue):
+                    self.scan("issue title", string(issue["title"]))
+                    self.scan("issue body", optional(issue["body"]))
             case "issue_comment":
                 # The issue a comment sits on can be a stranger's, so only the comment is scanned.
                 comment = payload["comment"]
-                if by_writer(comment):
-                    self.scan("comment", comment["body"])
+                if by_writer(payload, comment):
+                    self.scan("comment", string(comment["body"]))
             case "release":
                 release = payload["release"]
-                self.scan("release name", release["name"] or "")
-                self.scan("release body", release["body"] or "")
-                self.name("ref", release["tag_name"])
+                self.scan("release name", optional(release["name"]))
+                self.scan("release body", optional(release["body"]))
+                self.name("ref", string(release["tag_name"]))
+            case "schedule" | "workflow_dispatch":
+                # Catches what no event reported: GitHub sends no push event for a tag
+                # when more than three are pushed at once.
+                self.everything()
             case _:
                 raise CannotRun("no scan is defined for this event")
 
-    def push(self, lines: str) -> None:
+    def push(self, remote: str, lines: str) -> None:
         for line in lines.splitlines():
             local_ref, local_sha, remote_ref, remote_sha = line.split()
             self.name("ref", remote_ref)
@@ -235,7 +275,8 @@ class Guard:
                 continue
             self.name("ref", local_ref)
             self.tag(remote_ref, local_sha)
-            self.range(remote_sha, f"{local_sha}^{{commit}}", "--remotes")
+            # Only what this remote already has is published there; another remote's refs are not.
+            self.range(remote_sha, f"{local_sha}^{{commit}}", f"--remotes={remote}")
 
 
 def run(argv: list[str]) -> int:
@@ -245,8 +286,8 @@ def run(argv: list[str]) -> int:
             guard.staged()
         case ["message", path]:
             guard.scan("commit message", Path(path).read_text(encoding="utf-8", errors="replace"))
-        case ["push"]:
-            guard.push(sys.stdin.read())
+        case ["push", remote]:
+            guard.push(remote, sys.stdin.read())
         case ["range", base, head]:
             guard.range(base, head)
         case ["tree"]:
@@ -268,6 +309,8 @@ def run(argv: list[str]) -> int:
 
 
 def main() -> int:
+    # A local replacement ref would show the guard a different object than the one git sends.
+    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
         return run(sys.argv[1:])
     except CannotRun as error:
