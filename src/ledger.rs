@@ -36,10 +36,7 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         if !crate::engine::can_allow(rules, rule) {
             return Err(error("unknown or prohibited rule"));
         }
-        if count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(error("invalid count"));
-        }
-        let count = count.parse().map_err(|_| error("invalid count"))?;
+        let count = count_of(count).ok_or_else(|| error("invalid count"))?;
         if invalid_path(path) {
             return Err(error("invalid path"));
         }
@@ -50,6 +47,18 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         rows.insert(key, count);
     }
     Ok(rows)
+}
+
+/// A repository without a ledger allows nothing, which is what an empty one says.
+pub(crate) fn load(bytes: Option<Vec<u8>>) -> io::Result<Counts> {
+    bytes.map_or_else(|| Ok(Counts::new()), |bytes| parse(&bytes, registry()))
+}
+
+// A count has one spelling, so a file has one spelling too.
+pub(crate) fn count_of(text: &str) -> Option<usize> {
+    (!text.starts_with('0') && text.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 // Git stores one spelling of a path, so any other spelling is a line no file can match.
@@ -90,8 +99,9 @@ pub fn excess(counts: &Counts, allowed: &Counts) -> Counts {
         .collect()
 }
 
+/// The base counts, each under the path a rename gave its file.
 #[must_use]
-pub fn growth(base: &Counts, head: &Counts, renames: &[(&str, &str)]) -> Counts {
+pub fn moved(base: &Counts, renames: &[(&str, &str)]) -> Counts {
     let renames: BTreeMap<_, _> = renames.iter().copied().collect();
     let mut moved = Counts::new();
     for ((rule, path), &n) in base {
@@ -99,5 +109,5 @@ pub fn growth(base: &Counts, head: &Counts, renames: &[(&str, &str)]) -> Counts 
         let allowance = moved.entry((rule.clone(), dest.to_owned())).or_default();
         *allowance = allowance.saturating_add(n);
     }
-    excess(head, &moved)
+    moved
 }
