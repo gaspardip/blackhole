@@ -101,7 +101,7 @@ pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
         other => other?,
     };
     if named.is_file() {
-        // shortcut: a link swapped in after the look is still opened, though never read, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
+        // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
         let mut file = fs::File::open(path)?;
         // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
         if same(&named, &file.metadata()?) {
