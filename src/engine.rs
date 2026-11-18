@@ -47,13 +47,25 @@ pub fn registry() -> &'static [Rule] {
     &[crate::packs::core::no_suppression::RULE]
 }
 
-// TypeScript and C# read UTF-16 when a byte order mark says so, and UTF-32 is the same text with NULs in between.
+// A UTF-32LE mark starts with the UTF-16LE mark.
 fn decode(bytes: &[u8]) -> String {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let units: Vec<_> = bytes[2..].as_chunks().0.iter().copied().map(unit).collect();
         String::from_utf16_lossy(&units)
     };
+    let utf32 = |unit: fn([u8; 4]) -> u32| {
+        let (chars, tail) = bytes[4..].as_chunks();
+        chars
+            .iter()
+            .copied()
+            .map(unit)
+            .map(|value| char::from_u32(value).unwrap_or(char::REPLACEMENT_CHARACTER))
+            .chain((!tail.is_empty()).then_some(char::REPLACEMENT_CHARACTER))
+            .collect()
+    };
     let mut text = match bytes {
+        [0xff, 0xfe, 0, 0, ..] => utf32(u32::from_le_bytes),
+        [0, 0, 0xfe, 0xff, ..] => utf32(u32::from_be_bytes),
         [0xff, 0xfe, ..] => wide(u16::from_le_bytes),
         [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),

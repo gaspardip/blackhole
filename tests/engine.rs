@@ -104,3 +104,16 @@ fn a_directive_too_long_to_read_is_reported() {
     // A comment that never closes before the end of the file hides nothing.
     assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
 }
+
+#[test]
+fn utf32_directives_have_character_coordinates() {
+    for encode in [u32::to_be_bytes, u32::to_le_bytes] {
+        let text = "\u{feff}//\n🌑é#pragma warning disable CS0001";
+        let bytes: Vec<_> = text.chars().flat_map(|c| encode(u32::from(c))).collect();
+        let found = run(registry(), [("example.cs", bytes.as_slice())]);
+        assert_eq!(
+            found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
+            [(2, 3)]
+        );
+    }
+}
