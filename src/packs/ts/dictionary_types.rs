@@ -31,9 +31,11 @@ struct Resolution<'a> {
     arguments: HashMap<SymbolId, &'a TSType<'a>>,
     visiting: HashSet<NodeId>,
 }
+
 pub(super) fn target<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Class {
     Resolution::default().classify(ctx, ty, Query::Target)
 }
+
 pub(super) fn informative<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::Value) == Class::None
 }
@@ -41,9 +43,11 @@ pub(super) fn informative<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
 pub(super) fn object_input<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::ObjectInput) != Class::None
 }
+
 pub(super) fn unknown_alias<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::UnknownAlias) != Class::None
 }
+
 pub(super) fn unknown_return<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::UnknownReturn) != Class::None
 }

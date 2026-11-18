@@ -1,4 +1,12 @@
+use super::{
+    dictionary_types::{informative, unsafe_dictionary},
+    function_types::bindings::declaration,
+};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::{
+    ast::{AstKind, ast::TSTypeName},
+    span::GetSpan,
+};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unsafe-dictionary-type",
@@ -6,15 +14,6 @@ pub(crate) const RULE: Rule = Rule {
     provenance: "Port of anti-slop no-unsafe-dictionary-type.",
     fix: "Use an owner or schema-derived value type. Parse external payloads before inserting them.",
     run: Run::Ts(check),
-};
-
-use super::{
-    dictionary_types::{informative, unsafe_dictionary},
-    function_types::bindings::declaration,
-};
-use oxc::{
-    ast::{AstKind, ast::TSTypeName},
-    span::GetSpan,
 };
 
 fn plain_alias(ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {

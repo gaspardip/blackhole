@@ -1,4 +1,6 @@
+use super::{dictionary_types::unknown_return, function_types::returns};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unknown-returns",
@@ -8,8 +10,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-use super::{dictionary_types::unknown_return, function_types::returns};
-use oxc::span::GetSpan;
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for n in ctx.semantic.nodes().iter() {
         if let Some(a) = returns(n.kind())

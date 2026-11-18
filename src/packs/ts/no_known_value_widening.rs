@@ -1,4 +1,27 @@
+use super::{
+    dictionary_types::{Class, informative, target},
+    function_types::{
+        bindings::{ConstBindings, declaration},
+        contains_unknown,
+        expressions::{assertion, known_value, parent},
+        predicate_subject,
+    },
+};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::{
+    ast::{
+        AstKind,
+        ast::{
+            AssignmentTarget, BindingPattern, CallExpression, Expression, FormalParameters,
+            IdentifierReference, TSType, TSTypeAnnotation,
+        },
+    },
+    span::GetSpan,
+};
+use std::{
+    collections::HashSet,
+    ops::ControlFlow::{self, Break, Continue},
+};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-known-value-widening",
@@ -7,28 +30,6 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Keep the inferred type, check the value with satisfies, or name the owning contract.",
     run: Run::Ts(check),
 };
-
-use super::{
-    dictionary_types::{Class, informative, target},
-    function_types::{
-        bindings::{ConstBindings, declaration},
-        contains_unknown,
-        expressions::{assertion, known_value, parent},
-    },
-};
-use oxc::{
-    ast::{
-        AstKind,
-        ast::{
-            AssignmentTarget, BindingPattern, CallExpression, Expression, FormalParameters,
-            IdentifierReference, TSType, TSTypeAnnotation, TSTypePredicateName,
-        },
-    },
-    span::GetSpan,
-};
-use std::collections::HashSet;
-
-use std::ops::ControlFlow::{self, Break, Continue};
 
 type Signature<'a> = (&'a FormalParameters<'a>, Option<&'a TSTypeAnnotation<'a>>);
 fn signature(kind: AstKind<'_>) -> Option<Signature<'_>> {
@@ -58,13 +59,13 @@ fn local_function<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Signa
 
 fn value_or_binding<'a>(
     expr: &'a Expression<'a>,
-) -> ControlFlow<Option<bool>, &'a IdentifierReference<'a>> {
+) -> ControlFlow<Option<()>, &'a IdentifierReference<'a>> {
     let value = expr.get_inner_expression();
     match value {
         Expression::Identifier(i) => Continue(i),
-        _ => Break(Some(
-            known_value(value) || matches!(value, Expression::UnaryExpression(_)),
-        )),
+        _ => Break(
+            (known_value(value) || matches!(value, Expression::UnaryExpression(_))).then_some(()),
+        ),
     }
 }
 
@@ -73,7 +74,7 @@ fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings, expr: &'a Expression
         .walk(ctx, expr, HashSet::new(), value_or_binding, |_, _| {
             Continue(())
         })
-        .unwrap_or(false)
+        .is_some()
 }
 
 fn guard_argument<'a>(
@@ -82,37 +83,35 @@ fn guard_argument<'a>(
     call: &'a CallExpression<'a>,
 ) -> Option<&'a Expression<'a>> {
     let (params, ret) = local_function(ctx, &call.callee)?;
-    let TSType::TSTypePredicate(pred) = &ret?.type_annotation else {
-        return None;
-    };
-    let TSTypePredicateName::Identifier(name) = &pred.parameter_name else {
-        return None;
-    };
+    let subject = predicate_subject(ret?)?;
     let index = params.items.iter().position(|p| {
-        p.pattern.get_identifier_name() == Some(name.name)
+        p.pattern
+            .get_identifier_name()
+            .is_some_and(|name| name == subject)
             && p.type_annotation
                 .as_ref()
                 .is_some_and(|a| contains_unknown(&a.type_annotation))
     })?;
     let arg = call.arguments.get(index)?.as_expression()?;
-    let known = bindings.walk(
+    bindings.walk(
         ctx,
         arg,
         HashSet::new(),
         |mut expr| loop {
             expr = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(expr.node_id())) {
-                return Break(Some(informative(ctx, ty)));
+                return Break(informative(ctx, ty).then_some(()));
             }
             match expr {
                 Expression::TSNonNullExpression(n) => expr = &n.expression,
                 Expression::TSSatisfiesExpression(n) => expr = &n.expression,
                 Expression::CallExpression(n) => {
-                    return Break(Some(
+                    return Break(
                         local_function(ctx, &n.callee)
                             .and_then(|(_, r)| r)
-                            .is_some_and(|r| informative(ctx, &r.type_annotation)),
-                    ));
+                            .is_some_and(|r| informative(ctx, &r.type_annotation))
+                            .then_some(()),
+                    );
                 }
                 _ => return value_or_binding(expr),
             }
@@ -128,11 +127,11 @@ fn guard_argument<'a>(
                 _ => None,
             };
             annotation.map_or(Continue(()), |a| {
-                Break(Some(informative(ctx, &a.type_annotation)))
+                Break(informative(ctx, &a.type_annotation).then_some(()))
             })
         },
     )?;
-    known.then_some(arg)
+    Some(arg)
 }
 
 fn typed_flow<'a>(
@@ -175,18 +174,31 @@ fn typed_flow<'a>(
     Some((expr, &a.type_annotation))
 }
 
+fn loses_evidence<'a>(
+    ctx: &TsCtx<'a>,
+    bindings: &mut ConstBindings,
+    expr: &'a Expression<'a>,
+    ty: &'a TSType<'a>,
+) -> bool {
+    match target(ctx, ty) {
+        Class::None => false,
+        Class::Dictionary if matches!(expr.get_inner_expression(), Expression::ObjectExpression(n) if n.properties.is_empty()) => {
+            false
+        }
+        _ => known(ctx, bindings, expr),
+    }
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut bindings = ConstBindings::default();
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
-        let expr=match node.kind(){
-            AstKind::CallExpression(call)=>guard_argument(ctx,&mut bindings,call),
-            kind=>typed_flow(ctx,id,kind).and_then(|(expr,ty)|{
-                let class=target(ctx,ty);
-                let empty=matches!(expr.get_inner_expression(),Expression::ObjectExpression(n) if n.properties.is_empty());
-                (class!=Class::None && !(class==Class::Dictionary && empty) && known(ctx,&mut bindings,expr)).then_some(expr)
-            }),
+        let expression = match node.kind() {
+            AstKind::CallExpression(call) => guard_argument(ctx, &mut bindings, call),
+            kind => typed_flow(ctx, id, kind)
+                .filter(|(expr, ty)| loses_evidence(ctx, &mut bindings, expr, ty))
+                .map(|(expr, _)| expr),
         };
-        if let Some(expr) = expr {
+        if let Some(expr) = expression {
             findings.report(expr.without_parentheses().span().start as usize, None);
         }
     }

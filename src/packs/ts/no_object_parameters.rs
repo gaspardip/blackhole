@@ -1,4 +1,6 @@
+use super::{dictionary_types::object_input, function_types::parameter};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-object-parameters",
@@ -8,8 +10,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-use super::{dictionary_types::object_input, function_types::parameter};
-use oxc::span::GetSpan;
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for node in ctx.semantic.nodes().iter() {
         if let Some((_, ty)) = parameter(node.kind())

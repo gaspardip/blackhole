@@ -1,4 +1,6 @@
+use super::function_types::expressions::{assertion, parent};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-chained-type-assertions",
@@ -7,9 +9,6 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Keep the original precise type, or parse untrusted input before narrowing it.",
     run: Run::Ts(check),
 };
-
-use super::function_types::expressions::{assertion, parent};
-use oxc::span::GetSpan;
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();

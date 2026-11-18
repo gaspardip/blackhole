@@ -1,4 +1,9 @@
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::{
+    ast::{AstKind, ast::Expression},
+    span::GetSpan,
+    syntax::operator::UnaryOperator,
+};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-runtime-typeof",
@@ -8,11 +13,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-use oxc::{
-    ast::{AstKind, ast::Expression},
-    span::GetSpan,
-    syntax::operator::UnaryOperator,
-};
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
     for (id, node) in nodes.iter_enumerated() {
@@ -31,7 +31,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             } else {
                 &b.left
             };
-            if matches!(other.without_parentheses(),Expression::StringLiteral(s) if s.value=="undefined")
+            if matches!(other.without_parentheses(), Expression::StringLiteral(s) if s.value == "undefined")
             {
                 continue;
             }

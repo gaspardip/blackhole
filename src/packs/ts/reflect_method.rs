@@ -5,6 +5,7 @@ use oxc::semantic::IsGlobalReference;
 fn string_key(expr: &Expression<'_>, method: &str) -> bool {
     matches!(expr.without_parentheses(),Expression::StringLiteral(s) if s.value==method)
 }
+
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings, method: &str) {
     for n in ctx.semantic.nodes().iter() {
         let AstKind::CallExpression(call) = n.kind() else {

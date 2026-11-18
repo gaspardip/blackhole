@@ -1,4 +1,6 @@
+use super::dictionary_types::unknown_alias;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::ast::AstKind;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unknown-type-aliases",
@@ -8,8 +10,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-use super::dictionary_types::unknown_alias;
-use oxc::ast::AstKind;
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for node in ctx.semantic.nodes().iter() {
         if let AstKind::TSTypeAliasDeclaration(alias) = node.kind()

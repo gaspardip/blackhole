@@ -2,7 +2,7 @@ pub(super) mod bindings;
 pub(super) mod expressions;
 use oxc::ast::{
     AstKind,
-    ast::{BindingPattern, TSType, TSTypeAnnotation},
+    ast::{BindingPattern, TSType, TSTypeAnnotation, TSTypePredicateName},
 };
 pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
     match ty.without_parenthesized() {
@@ -11,6 +11,7 @@ pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
         _ => false,
     }
 }
+
 pub(super) fn parameter(kind: AstKind<'_>) -> Option<(&BindingPattern<'_>, &TSType<'_>)> {
     let (p, a) = match kind {
         AstKind::FormalParameter(p) => (&p.pattern, p.type_annotation.as_ref()?),
@@ -19,6 +20,7 @@ pub(super) fn parameter(kind: AstKind<'_>) -> Option<(&BindingPattern<'_>, &TSTy
     };
     Some((p, &a.type_annotation))
 }
+
 pub(super) fn returns(kind: AstKind<'_>) -> Option<&TSTypeAnnotation<'_>> {
     match kind {
         AstKind::Function(n) => n.return_type.as_deref(),
@@ -30,4 +32,14 @@ pub(super) fn returns(kind: AstKind<'_>) -> Option<&TSTypeAnnotation<'_>> {
         AstKind::TSMethodSignature(n) => n.return_type.as_deref(),
         _ => None,
     }
+}
+
+pub(super) fn predicate_subject<'a>(annotation: &TSTypeAnnotation<'a>) -> Option<&'a str> {
+    let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
+        return None;
+    };
+    let TSTypePredicateName::Identifier(name) = &predicate.parameter_name else {
+        return None;
+    };
+    Some(name.name.as_str())
 }

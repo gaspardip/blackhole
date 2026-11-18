@@ -1,4 +1,5 @@
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::ast::{AstKind, ast::TSType};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-explicit-return-types",
@@ -8,7 +9,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-use oxc::ast::{AstKind, ast::TSType};
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for node in ctx.semantic.nodes().iter() {
         let result = match node.kind() {

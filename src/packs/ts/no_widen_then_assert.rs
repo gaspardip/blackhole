@@ -1,17 +1,8 @@
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-
-pub(crate) const RULE: Rule = Rule {
-    id: "ts/no-widen-then-assert",
-    family: Family::Types,
-    provenance: "Port of anti-slop no-widen-then-assert.",
-    fix: "Keep the precise type from initialization through use. Parse boundary input once.",
-    run: Run::Ts(check),
-};
-
 use super::function_types::{
     bindings::{ConstBindings, symbol},
     expressions::{assertion, known_value},
 };
+use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
@@ -25,6 +16,14 @@ use oxc::{
 use std::{
     collections::HashSet,
     ops::ControlFlow::{Break, Continue},
+};
+
+pub(crate) const RULE: Rule = Rule {
+    id: "ts/no-widen-then-assert",
+    family: Family::Types,
+    provenance: "Port of anti-slop no-widen-then-assert.",
+    fix: "Keep the precise type from initialization through use. Parse boundary input once.",
+    run: Run::Ts(check),
 };
 
 fn reference<'a>(ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
@@ -66,9 +65,10 @@ fn broad_index(member: &TSSignature<'_>) -> bool {
     broad_key(&index.parameter.type_annotation.type_annotation)
         && top(&index.type_annotation.type_annotation)
 }
+
 fn broad_record(ty: &TSType<'_>) -> bool {
     if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
-        return matches!(n.members.as_slice(),[member] if broad_index(member));
+        return matches!(n.members.as_slice(), [member] if broad_index(member));
     }
     match reference(ty) {
         Some(("Readonly", [inner, ..])) => broad_record(inner),
@@ -76,6 +76,7 @@ fn broad_record(ty: &TSType<'_>) -> bool {
         _ => false,
     }
 }
+
 fn narrow_record(ty: &TSType<'_>) -> bool {
     if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
         return n
@@ -190,6 +191,7 @@ fn evidence<'a>(
         },
     )
 }
+
 fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSType<'_>) -> bool {
     if broad(target).is_some() {
         return false;
