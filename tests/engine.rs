@@ -128,3 +128,15 @@ fn utf32_directives_have_character_coordinates() {
         );
     }
 }
+
+#[test]
+fn c_splices_inside_directive_tokens() {
+    for splice in ["\\\r", "\\ \n", "??/\t\r\n"] {
+        let text = format!("#pragma GCC diagnostic ign{splice}ored \"-Wunused-variable\"");
+        assert_eq!(
+            run(registry(), [("x.c", text.as_bytes())]).len(),
+            1,
+            "{splice:?}"
+        );
+    }
+}

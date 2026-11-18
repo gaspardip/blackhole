@@ -207,9 +207,14 @@ struct End;
 // A C compiler joins a line ending in a backslash to the next one, and reads a comment as a space, before it reads a pragma.
 fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     loop {
-        let mut rest = ["\\\n", "\\\r\n", "??/\n", "??/\r\n"]
-            .iter()
-            .find_map(|splice| text.strip_prefix(splice))
+        let mut rest = text
+            .strip_prefix('\\')
+            .or_else(|| text.strip_prefix("??/"))
+            .map(|line| line.trim_start_matches([' ', '\t']))
+            .and_then(|line| {
+                line.strip_prefix("\r\n")
+                    .or_else(|| line.strip_prefix(['\r', '\n']))
+            })
             .unwrap_or(text);
         if gaps {
             // The tools read a byte order mark as whitespace too.
