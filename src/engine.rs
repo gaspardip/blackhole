@@ -5,6 +5,7 @@ use oxc::{
     parser::{ParseOptions, Parser},
     semantic::{Semantic, SemanticBuilder},
     span::SourceType,
+    syntax::line_terminator::is_line_terminator,
 };
 
 pub enum Family {
@@ -174,9 +175,9 @@ fn collect(
     rules: &[Rule],
     path: &str,
     text: &str,
-    parsed: Option<&Result<TsCtx<'_>, (usize, String)>>,
+    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit> {
-    let ts = parsed.and_then(|parsed| parsed.as_ref().ok());
+    let ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
         text,
@@ -193,7 +194,7 @@ fn collect(
                 }
             }
             Run::ParseError => {
-                if let Some(Err((at, message))) = parsed {
+                if let Err((at, message)) = parsed {
                     findings.report(*at, Some(message));
                 }
             }
@@ -203,33 +204,26 @@ fn collect(
     hits
 }
 
-fn parsed_hits(rules: &[Rule], path: &str, text: &str, kind: SourceType) -> Vec<Hit> {
+fn parsed_hits(
+    rules: &[Rule],
+    path: &str,
+    text: &str,
+    kind: SourceType,
+) -> Result<Vec<Hit>, (usize, String)> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
-    let judged = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(STACK_BYTES)
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
-                collect(rules, path, text, Some(&parse(&arena, path, text, kind)))
+                let ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&ts))))
             })
-            .map(std::thread::ScopedJoinHandle::join)
-    });
-    match judged {
-        Ok(Ok(hits)) => hits,
-        Ok(Err(_)) => collect(
-            rules,
-            path,
-            text,
-            Some(&Err((0, "Parser panicked".to_owned()))),
-        ),
-        Err(e) => collect(
-            rules,
-            path,
-            text,
-            Some(&Err((0, format!("Cannot start parser thread: {e}")))),
-        ),
-    }
+            .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
+            .join()
+            .map_err(|_| (0, "Parser panicked".to_owned()))?
+    })
 }
 
 pub fn run<'a>(
@@ -240,22 +234,18 @@ pub fn run<'a>(
     for (path, bytes) in files {
         let (text, nul) = decode(bytes);
         let mut hits = match (source_type(path), nul) {
-            (Some(_), Some(at)) => collect(
-                rules,
-                path,
-                &text,
-                Some(&Err((at, "NUL in source text".to_owned()))),
-            ),
+            (Some(_), Some(at)) => Err((at, "NUL in source text".to_owned())),
             (Some(kind), None) => parsed_hits(rules, path, &text, kind),
-            (None, _) => collect(rules, path, &text, None),
-        };
+            (None, _) => Ok(collect(rules, path, &text, Ok(None))),
+        }
+        .unwrap_or_else(|error| collect(rules, path, &text, Err(&error)));
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
             for (at, ch) in text[previous..offset].char_indices() {
                 // A carriage return before a line feed is the same break, counted at the line feed.
-                let alone = ch == '\r' && !text[previous + at + 1..].starts_with('\n');
-                if alone || matches!(ch, '\n' | '\u{2028}' | '\u{2029}') {
+                let crlf = ch == '\r' && text[previous + at + 1..].starts_with('\n');
+                if is_line_terminator(ch) && !crlf {
                     line += 1;
                     col = 1;
                 } else {
