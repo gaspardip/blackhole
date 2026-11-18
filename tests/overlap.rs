@@ -1,4 +1,6 @@
-use blackhole_check::engine::{registry, run};
+#[path = "common/run_rule.rs"]
+mod rule_runner;
+use rule_runner::run_rule;
 
 struct Case {
     silent: &'static str,
@@ -171,14 +173,7 @@ fn upstream_accept_cases_with_other_findings() {
     let mut failures = Vec::new();
     for case in CASES {
         for (id, expected_clean) in [(case.silent, true), (case.reporting, false)] {
-            let rule = registry()
-                .iter()
-                .find(|r| r.id == id)
-                .unwrap_or_else(|| panic!("missing rule {id}"));
-            let hits = run(
-                std::slice::from_ref(rule),
-                [(case.path, case.snippet.as_bytes())],
-            );
+            let hits = run_rule(id, case.path, case.snippet);
             if hits.is_empty() != expected_clean {
                 failures.push(format!(
                     "{id} reported {} findings for {}: {}",
