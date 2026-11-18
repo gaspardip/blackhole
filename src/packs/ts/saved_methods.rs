@@ -1,7 +1,7 @@
 use super::values::symbol;
 use super::{
     double_mutations::{invoked, writes},
-    values::{declaration, member_key, path, resolve},
+    values::{MemberKeys, declaration, path, resolve},
 };
 use crate::engine::{Findings, TsCtx};
 use oxc::{
@@ -17,7 +17,9 @@ fn same(ctx: &TsCtx<'_>, left: &MemberExpression<'_>, right: &MemberExpression<'
     let (mut left, mut right) = (left, right);
     let mut seen = std::collections::HashSet::new();
     while seen.insert(left.span()) {
-        if member_key(ctx, left).is_none() || member_key(ctx, left) != member_key(ctx, right) {
+        if MemberKeys::Resolve(ctx).read(left).is_none()
+            || MemberKeys::Resolve(ctx).read(left) != MemberKeys::Resolve(ctx).read(right)
+        {
             return false;
         }
         let (left_object, right_object) =
@@ -94,7 +96,7 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
 }
 
 fn target<'a>(a: &'a AssignmentExpression<'a>) -> Option<&'a MemberExpression<'a>> {
-    a.left.as_simple_assignment_target()?.as_member_expression()
+    a.left.as_member_expression()
 }
 
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
@@ -144,17 +146,14 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
-        if member_key(ctx, m).is_some_and(|k| k.starts_with("on"))
+        if MemberKeys::Resolve(ctx)
+            .read(m)
+            .is_some_and(|k| k.starts_with("on"))
             && path(ctx, m.object()).is_some_and(|p| {
                 matches!(
-                    p.join(".").as_str(),
-                    "window"
-                        | "self"
-                        | "global"
-                        | "globalThis"
-                        | "document"
-                        | "window.document"
-                        | "globalThis.document"
+                    p.as_slice(),
+                    ["window" | "self" | "global" | "globalThis" | "document"]
+                        | ["window" | "globalThis", "document"]
                 )
             })
         {

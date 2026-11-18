@@ -1,6 +1,6 @@
 use super::{
     double_mutations::invoked,
-    values::{declaration, key, member_key, path, resolve},
+    values::{MemberKeys, declaration, key, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{
@@ -68,7 +68,7 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
             Expression::CallExpression(c) => {
                 if let Some(m) = invoked(ctx, c).callee.get_member_expr()
                     && matches!(
-                        member_key(ctx, m),
+                        MemberKeys::Resolve(ctx).read(m),
                         Some(
                             "launch"
                                 | "launchPersistentContext"
@@ -103,7 +103,7 @@ fn route(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
     };
     call.callee
         .get_member_expr()
-        .is_some_and(|m| member_key(ctx, m) == Some("route") && page(ctx, m.object()))
+        .is_some_and(|m| MemberKeys::Resolve(ctx).read(m) == Some("route") && page(ctx, m.object()))
 }
 pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expression<'_>) -> bool {
     if !route(ctx, receiver) {
@@ -134,7 +134,7 @@ pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expressio
                         ObjectPropertyKind::SpreadProperty(s) => pending.push((&s.argument, false)),
                         ObjectPropertyKind::ObjectProperty(p)
                             if matches!(
-                                key(ctx, &p.key, p.computed),
+                                key(ctx, &p.key),
                                 Some("body" | "json" | "status" | "contentType") | None
                             ) =>
                         {

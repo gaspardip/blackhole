@@ -47,10 +47,7 @@ fn protected_global(property: &str) -> bool {
 pub(super) fn protected(owner: &str, property: &str) -> bool {
     owner_properties(owner).is_some_and(|matches| matches(property))
 }
-pub(super) fn protected_owner(owner: &str) -> bool {
-    owner_properties(owner).is_some()
-}
-fn owner_properties(owner: &str) -> Option<fn(&str) -> bool> {
+pub(super) fn owner_properties(owner: &str) -> Option<fn(&str) -> bool> {
     Some(match owner {
         "" => protected_global,
         "document" | "Document.prototype" => |property| {

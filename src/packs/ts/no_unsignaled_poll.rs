@@ -1,4 +1,5 @@
 use super::test_context::single_value;
+use super::values::MemberKeys;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{AstKind, ast::Expression};
 pub(crate) const RULE: Rule = Rule {
@@ -13,7 +14,7 @@ fn recorder(mut e: &Expression<'_>) -> Option<bool> {
     let mut reads = false;
     loop {
         if let Some(m) = e.get_member_expr() {
-            let name = m.static_property_name().and_then(oxc::str::JSStr::as_str);
+            let name = MemberKeys::Literal.read(m);
             if name == Some("current") {
                 return None;
             }
@@ -40,7 +41,7 @@ fn assertion(e: &Expression<'_>) -> bool {
     let object = m.object().get_inner_expression();
     let subject = object
         .get_member_expr()
-        .filter(|n| n.static_property_name().is_some_and(|s| s == "not"))
+        .filter(|n| MemberKeys::Literal.read(n) == Some("not"))
         .map_or(object, |n| n.object().get_inner_expression());
     let Expression::CallExpression(call) = subject else {
         return false;
@@ -55,9 +56,7 @@ fn assertion(e: &Expression<'_>) -> bool {
         .is_some_and(|reads| {
             reads
                 || matches!(
-                    m.static_property_name()
-                        .and_then(oxc::str::JSStr::as_str)
-                        .unwrap_or(""),
+                    MemberKeys::Literal.read(m).unwrap_or(""),
                     "toHaveLength"
                         | "toHaveBeenCalled"
                         | "toHaveBeenCalledOnce"
@@ -101,13 +100,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if reads == Some(true)
             || poll
                 && reads.is_some()
-                && super::values::outer(ctx, id).is_some_and(|n| match n {
-                    AstKind::StaticMemberExpression(m) => m.property.name == "toHaveLength",
-                    AstKind::ComputedMemberExpression(m) => m
-                        .static_property_name()
-                        .is_some_and(|s| s == "toHaveLength"),
-                    _ => false,
-                })
+                && super::values::outer(ctx, id)
+                    .and_then(|n| n.as_member_expression_kind())
+                    .and_then(|m| MemberKeys::Literal.read_kind(m))
+                    == Some("toHaveLength")
             || !poll && assertion(value)
         {
             findings.report(c.span.start as usize, None);

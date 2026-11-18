@@ -1,3 +1,4 @@
+use super::values::MemberKeys;
 pub(super) fn test_file(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
@@ -36,8 +37,8 @@ pub(super) fn is_test(name: &str) -> bool {
 }
 pub(super) fn static_method(e: &Expression<'_>, names: &[&str]) -> bool {
     e.get_member_expr()
-        .and_then(oxc::ast::ast::MemberExpression::static_property_name)
-        .is_some_and(|key| names.iter().any(|name| key == *name))
+        .and_then(|m| MemberKeys::Literal.read(m))
+        .is_some_and(|key| names.contains(&key))
 }
 fn single_statement<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Statement<'a>> {
     if !body.directives.is_empty() {

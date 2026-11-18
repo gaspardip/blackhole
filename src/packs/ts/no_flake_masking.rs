@@ -21,7 +21,7 @@ fn inspect(ctx: &TsCtx<'_>, expr: Option<&Expression<'_>>, keys: &[&str], findin
     let mut unreadable = false;
     for p in &o.properties {
         if let ObjectPropertyKind::ObjectProperty(p) = p {
-            match super::values::key(ctx, &p.key, p.computed) {
+            match super::values::key(ctx, &p.key) {
                 Some(k) if k == "retry" || keys.contains(&k) => {
                     findings.report(p.span.start as usize, None);
                 }
@@ -37,9 +37,7 @@ fn inspect(ctx: &TsCtx<'_>, expr: Option<&Expression<'_>>, keys: &[&str], findin
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
-            AstKind::ObjectProperty(p)
-                if super::values::key(ctx, &p.key, p.computed) == Some("test") =>
-            {
+            AstKind::ObjectProperty(p) if super::values::key(ctx, &p.key) == Some("test") => {
                 inspect(ctx, Some(&p.value), &[], findings);
             }
             AstKind::CallExpression(c) if c.callee.is_specific_member_access("vi", "setConfig") => {

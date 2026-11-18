@@ -1,9 +1,10 @@
+use super::values::MemberKeys;
 use super::values::{declaration, resolve, resolves_to_global};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{ArrowFunctionBody, Expression, ObjectProperty, ObjectPropertyKind},
+        ast::{ArrowFunctionBody, Expression, ObjectProperty},
     },
     span::GetSpan,
     syntax::node::NodeId,
@@ -79,7 +80,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                     && super::values::path(ctx, m.object())
                         .is_some_and(|p| p == ["msw", "HttpResponse"])
                     && matches!(
-                        super::values::member_key(ctx, m),
+                        super::values::MemberKeys::Resolve(ctx).read(m),
                         Some(
                             "json"
                                 | "text"
@@ -97,9 +98,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                 }
                 if let Some(member) = callee.get_member_expr()
                     && matches!(
-                        member
-                            .static_property_name()
-                            .and_then(oxc::str::JSStr::as_str),
+                        MemberKeys::Literal.read(member),
                         Some("json" | "redirect" | "error")
                     )
                     && resolves_to_global(ctx, member.object(), "Response")
@@ -125,35 +124,10 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
 }
 
 pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> bool {
-    let key = super::values::key(ctx, &property.key, property.computed);
+    let key = super::values::key(ctx, &property.key);
     if matches!(key, Some("outboundService") | None) && config_response(ctx, &property.value) {
         return true;
     }
-    match key {
-        Some("serviceBindings") | None => {
-            let mut pending = vec![&property.value];
-            let mut seen = HashSet::new();
-            while let Some(expr) = pending.pop() {
-                let expr = resolve(ctx, expr);
-                if !seen.insert(expr.span()) {
-                    continue;
-                }
-                let Expression::ObjectExpression(obj) = expr else {
-                    pending.extend(super::values::alternatives(expr));
-                    continue;
-                };
-                for p in &obj.properties {
-                    match p {
-                        ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
-                        ObjectPropertyKind::ObjectProperty(p) if config_response(ctx, &p.value) => {
-                            return true;
-                        }
-                        ObjectPropertyKind::ObjectProperty(_) => (),
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
+    matches!(key, Some("serviceBindings") | None)
+        && super::values::any_property(ctx, &property.value, |p| config_response(ctx, &p.value))
 }

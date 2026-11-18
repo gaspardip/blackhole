@@ -1,6 +1,6 @@
 use super::{
     native_properties::protected,
-    values::{declaration, key, literal, member_key, path, resolve},
+    values::{MemberKeys, declaration, key, literal, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{
@@ -23,14 +23,14 @@ fn native_name(parts: &[&str]) -> String {
     let skip = usize::from(
         parts
             .first()
-            .is_some_and(|s| matches!(*s, "window" | "globalThis" | "global" | "self")),
+            .is_some_and(|s| super::values::global_object(s)),
     );
     parts[skip..].join(".")
 }
 
 fn protected_member(ctx: &TsCtx<'_>, m: &MemberExpression<'_>) -> bool {
     native(ctx, m.object())
-        .zip(member_key(ctx, m))
+        .zip(MemberKeys::Resolve(ctx).read(m))
         .is_some_and(|(owner, k)| protected(&owner, k))
 }
 
@@ -41,8 +41,7 @@ pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
                 ctx.semantic.is_reference_to_global_variable(id) && protected("", id.name.as_str())
             }
             target => target
-                .as_simple_assignment_target()
-                .and_then(|t| t.as_member_expression())
+                .as_member_expression()
                 .is_some_and(|m| protected_member(ctx, m)),
         },
         AstKind::UnaryExpression(u) if u.operator.is_delete() => u
@@ -51,37 +50,6 @@ pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
             .is_some_and(|m| protected_member(ctx, m)),
         _ => false,
     }
-}
-
-fn defines(ctx: &TsCtx<'_>, initial: &Expression<'_>, owner: &str) -> bool {
-    let mut pending = vec![initial];
-    let mut seen = HashSet::new();
-    while let Some(expr) = pending.pop() {
-        let expr = resolve(ctx, expr);
-        if !seen.insert(expr.span()) {
-            continue;
-        }
-        match expr {
-            Expression::ObjectExpression(obj) => {
-                for p in &obj.properties {
-                    match p {
-                        ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
-                        ObjectPropertyKind::ObjectProperty(p)
-                            if key(ctx, &p.key, p.computed).map_or_else(
-                                || super::native_properties::protected_owner(owner),
-                                |k| protected(owner, k),
-                            ) =>
-                        {
-                            return true;
-                        }
-                        ObjectPropertyKind::ObjectProperty(_) => (),
-                    }
-                }
-            }
-            _ => pending.extend(super::values::alternatives(expr)),
-        }
-    }
-    false
 }
 
 pub(super) enum Mutation {
@@ -135,7 +103,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
         }
         if let Expression::CallExpression(c) = callee
             && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
-            && member_key(ctx, m) == Some("bind")
+            && MemberKeys::Resolve(ctx).read(m) == Some("bind")
         {
             args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
             callee = resolve(ctx, m.object());
@@ -151,7 +119,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
         let Some(m) = callee.get_member_expr() else {
             break (parts, native_path);
         };
-        match member_key(ctx, m) {
+        match MemberKeys::Resolve(ctx).read(m) {
             Some("call") => {
                 args.drain(..args.len().min(1));
             }
@@ -169,33 +137,30 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
 }
 
 pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
-    let Some(owner) = call.arg(0).and_then(|e| native(ctx, e)) else {
+    let Some(kind) = call.mutation() else {
         return false;
     };
-    match call.mutation() {
-        Some(Mutation::SetProperty | Mutation::Delete) => call.arg(1).is_some_and(|e| {
-            literal(ctx, e).map_or_else(
-                || {
-                    !resolve(ctx, e).is_literal()
-                        && super::native_properties::protected_owner(&owner)
-                },
-                |k| protected(&owner, k),
-            )
+    let Some(protected) = call
+        .arg(0)
+        .and_then(|e| native(ctx, e))
+        .and_then(|owner| super::native_properties::owner_properties(&owner))
+    else {
+        return false;
+    };
+    let defines =
+        |e| super::values::any_property(ctx, e, |p| key(ctx, &p.key).is_none_or(protected));
+    match kind {
+        Mutation::SetProperty | Mutation::Delete => call.arg(1).is_some_and(|e| {
+            literal(ctx, e).map_or_else(|| !resolve(ctx, e).is_literal(), protected)
         }),
-        Some(Mutation::DefineMany) => call.arg(1).is_some_and(|e| defines(ctx, e, &owner)),
-        Some(Mutation::Assign) => call
-            .args
-            .iter()
-            .skip(1)
-            .flatten()
-            .any(|e| defines(ctx, e, &owner)),
-        _ => false,
+        Mutation::DefineMany => call.arg(1).is_some_and(defines),
+        Mutation::Assign => call.args.iter().skip(1).flatten().any(|e| defines(e)),
     }
 }
 
 fn method<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<&'a str> {
     if let Some(m) = callee.get_member_expr() {
-        return member_key(ctx, m);
+        return MemberKeys::Resolve(ctx).read(m);
     }
     let Expression::Identifier(id) = callee else {
         return None;
@@ -219,7 +184,7 @@ fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
         return false;
     };
     !p.method
-        && key(ctx, &p.key, p.computed) == Some("spy")
+        && key(ctx, &p.key) == Some("spy")
         && matches!(&p.value,Expression::BooleanLiteral(v) if v.value)
 }
 

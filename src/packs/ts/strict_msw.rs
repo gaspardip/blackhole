@@ -1,3 +1,4 @@
+use super::values::MemberKeys;
 use super::values::symbol;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
@@ -45,7 +46,7 @@ fn strict(ctx: &TsCtx<'_>, opts: Option<&Expression<'_>>) -> bool {
         let ObjectPropertyKind::ObjectProperty(p) = prop else {
             return false;
         };
-        match super::values::key(ctx, &p.key, p.computed) {
+        match super::values::key(ctx, &p.key) {
             Some("onUnhandledRequest") => {
                 return match &p.value {
                     Expression::StringLiteral(s) => s.value == "error",
@@ -102,10 +103,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             other => factory(ctx, other),
         };
         if matches!(
-            (
-                kind,
-                m.static_property_name().and_then(oxc::str::JSStr::as_str)
-            ),
+            (kind, MemberKeys::Literal.read(m)),
             (Some(Factory::Server), Some("listen")) | (Some(Factory::Worker), Some("start"))
         ) && !strict(ctx, c.arguments.first().and_then(|a| a.as_expression()))
         {

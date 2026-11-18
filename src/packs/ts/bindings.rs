@@ -1,6 +1,6 @@
 use super::{
     double_mutations::{Invocation, Mutation, invoked},
-    values::{declaration, member_key, path, resolve},
+    values::{MemberKeys, declaration, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{
@@ -31,7 +31,7 @@ pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bo
             }
             Expression::CallExpression(c) => {
                 if let Some(m) = resolve(ctx, &c.callee).get_member_expr()
-                    && member_key(ctx, m) == Some("bind")
+                    && MemberKeys::Resolve(ctx).read(m) == Some("bind")
                     && !matches!(resolve(ctx, m.object()), Expression::ObjectExpression(_))
                 {
                     pending.push(m.object());
@@ -87,19 +87,22 @@ pub(super) fn mutation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     if call.path.as_deref() == Some(&["cloudflare:workers", "withEnv"]) {
         return call.arg(0).is_some_and(|arg| contains_function(ctx, arg));
     }
+    let Some(kind) = call.mutation() else {
+        return false;
+    };
     if !call.arg(0).is_some_and(|e| binding(ctx, e)) {
         return false;
     }
-    match call.mutation() {
-        Some(Mutation::Assign) => call
+    match kind {
+        Mutation::Assign => call
             .args
             .iter()
             .skip(1)
             .flatten()
             .any(|e| contains_function(ctx, e)),
-        Some(Mutation::SetProperty) => call.arg(2).is_some_and(|e| contains_function(ctx, e)),
-        Some(Mutation::DefineMany) => call.arg(1).is_some_and(|e| contains_function(ctx, e)),
-        _ => false,
+        Mutation::SetProperty => call.arg(2).is_some_and(|e| contains_function(ctx, e)),
+        Mutation::DefineMany => call.arg(1).is_some_and(|e| contains_function(ctx, e)),
+        Mutation::Delete => false,
     }
 }
 pub(super) fn assignment(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
@@ -107,8 +110,7 @@ pub(super) fn assignment(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
         return false;
     };
     a.left
-        .as_simple_assignment_target()
-        .and_then(|t| t.as_member_expression())
+        .as_member_expression()
         .is_some_and(|m| binding(ctx, m.object()))
         && contains_function(ctx, &a.right)
 }

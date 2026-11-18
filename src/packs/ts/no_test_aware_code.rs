@@ -1,4 +1,5 @@
 use super::test_context::test_file;
+use super::values::MemberKeys;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
@@ -55,13 +56,13 @@ fn unbound_name(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
 }
 fn env<'a>(e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
     let m = e.get_member_expr()?;
-    (m.static_property_name()? == "env").then(|| m.object())
+    (MemberKeys::Literal.read(m)? == "env").then(|| m.object())
 }
 fn mode(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Span> {
     let e = e.get_inner_expression();
     let m = e.get_member_expr()?;
     let owner = env(m.object())?;
-    let name = m.static_property_name()?.as_str()?;
+    let name = MemberKeys::Literal.read(m)?;
     (marker(name, Marker::Mode)
         && (meta(owner) || name == "NODE_ENV" && unbound_name(ctx, owner, &["process"])))
     .then_some(e.span())
@@ -97,7 +98,7 @@ fn runner_global(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
     marker(id.name.as_str(), Marker::Runner) && ctx.semantic.is_reference_to_global_variable(id)
 }
 fn worker(ctx: &TsCtx<'_>, key: &PropertyKey<'_>, computed: bool) -> bool {
-    super::values::key(ctx, key, computed).map_or(computed, |name| marker(name, Marker::Worker))
+    super::values::key(ctx, key).map_or(computed, |name| marker(name, Marker::Worker))
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if test_file(ctx.path) {
@@ -105,19 +106,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     }
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         let span = match node.kind() {
-            AstKind::StaticMemberExpression(m)
-                if test_member(ctx, &m.object, m.property.name.as_str())
-                    && read(ctx, id, m.span) =>
+            kind if let Some(m) = kind.as_member_expression_kind()
+                && MemberKeys::Literal
+                    .read_kind(m)
+                    .is_some_and(|name| test_member(ctx, m.object(), name))
+                && read(ctx, id, node.span()) =>
             {
-                Some(m.span)
-            }
-            AstKind::ComputedMemberExpression(m)
-                if m.static_property_name()
-                    .and_then(oxc::str::JSStr::as_str)
-                    .is_some_and(|key| test_member(ctx, &m.object, key))
-                    && read(ctx, id, m.span) =>
-            {
-                Some(m.span)
+                Some(node.span())
             }
             AstKind::UnaryExpression(u)
                 if u.operator.is_typeof() && runner_global(ctx, &u.argument) =>

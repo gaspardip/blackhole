@@ -1,4 +1,5 @@
 use super::values::Imported;
+use super::values::MemberKeys;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
@@ -77,7 +78,7 @@ fn hono(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
                         .callee
                         .get_member_expr()
                         && matches!(
-                            super::values::member_key(ctx, m),
+                            super::values::MemberKeys::Resolve(ctx).read(m),
                             Some(
                                 "use"
                                     | "route"
@@ -123,7 +124,7 @@ fn check_bindings(
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
                     ObjectPropertyKind::ObjectProperty(p)
-                        if super::values::key(ctx, &p.key, p.computed).is_none_or(|k| {
+                        if super::values::key(ctx, &p.key).is_none_or(|k| {
                             k.starts_with(|c: char| c.is_ascii_uppercase())
                                 && k.bytes().all(|b| {
                                     b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
@@ -194,7 +195,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         }
         if test_code
             && let Some(m) = invocation.callee.get_member_expr()
-            && super::values::member_key(ctx, m) == Some("fulfill")
+            && super::values::MemberKeys::Resolve(ctx).read(m) == Some("fulfill")
             && let Some(arg) = invocation.arg(0)
             && super::playwright::canned(ctx, m.object(), arg)
         {
@@ -203,10 +204,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some(member) = call.callee.get_member_expr() else {
             continue;
         };
-        let Some(method) = member
-            .static_property_name()
-            .and_then(oxc::str::JSStr::as_str)
-        else {
+        let Some(method) = MemberKeys::Literal.read(member) else {
             continue;
         };
         if method == "request"

@@ -3,7 +3,10 @@ use oxc::syntax::symbol::SymbolId;
 use oxc::{
     ast::{
         AstKind,
-        ast::{BindingPattern, Expression, IdentifierReference, MemberExpression, PropertyKey},
+        ast::{
+            BindingPattern, Expression, IdentifierReference, MemberExpression, ObjectPropertyKind,
+            PropertyKey,
+        },
     },
     span::GetSpan,
 };
@@ -47,7 +50,7 @@ pub(super) fn destructured<'a>(
         .properties
         .iter()
         .find(|p| p.value.get_binding_identifier().is_some_and(&matches))?;
-    key(ctx, &property.key, property.computed)
+    key(ctx, &property.key)
 }
 
 pub(super) fn declaration<'a>(
@@ -119,12 +122,8 @@ pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&
     }
 }
 
-pub(super) fn key<'a>(
-    ctx: &TsCtx<'a>,
-    key: &'a PropertyKey<'a>,
-    computed: bool,
-) -> Option<&'a str> {
-    if !computed && let PropertyKey::StaticIdentifier(id) = key {
+pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    if let PropertyKey::StaticIdentifier(id) = key {
         return Some(id.name.as_str());
     }
     let expr = key.as_expression()?;
@@ -134,11 +133,26 @@ pub(super) fn key<'a>(
     literal(ctx, expr)
 }
 
-pub(super) fn member_key<'a>(ctx: &TsCtx<'a>, member: &'a MemberExpression<'a>) -> Option<&'a str> {
-    match member {
-        MemberExpression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
-        MemberExpression::ComputedMemberExpression(m) => literal(ctx, &m.expression),
-        MemberExpression::PrivateFieldExpression(_) => None,
+pub(super) enum MemberKeys<'ctx, 'a> {
+    Literal,
+    Resolve(&'ctx TsCtx<'a>),
+}
+impl<'a> MemberKeys<'_, 'a> {
+    pub(super) fn read(&self, member: &'a MemberExpression<'a>) -> Option<&'a str> {
+        use oxc::ast::MemberExpressionKind as Kind;
+        self.read_kind(match member {
+            MemberExpression::StaticMemberExpression(m) => Kind::Static(m),
+            MemberExpression::ComputedMemberExpression(m) => Kind::Computed(m),
+            MemberExpression::PrivateFieldExpression(m) => Kind::PrivateField(m),
+        })
+    }
+    pub(super) fn read_kind(&self, member: oxc::ast::MemberExpressionKind<'a>) -> Option<&'a str> {
+        match (self, member) {
+            (Self::Resolve(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => {
+                literal(ctx, &m.expression)
+            }
+            (_, m) => m.static_property_name()?.as_str(),
+        }
     }
 }
 
@@ -152,7 +166,7 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
             return None;
         }
         if let Some(member) = expr.get_member_expr() {
-            parts.push(member_key(ctx, member)?);
+            parts.push(MemberKeys::Resolve(ctx).read(member)?);
             expr = member.object();
             continue;
         }
@@ -247,4 +261,38 @@ pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Optio
                     | AstKind::TSTypeAssertion(_)
             )
         })
+}
+
+pub(super) fn global_object(name: &str) -> bool {
+    matches!(name, "window" | "self" | "global" | "globalThis")
+}
+
+pub(super) fn any_property<'a>(
+    ctx: &TsCtx<'a>,
+    initial: &'a Expression<'a>,
+    pred: impl Fn(&'a oxc::ast::ast::ObjectProperty<'a>) -> bool,
+) -> bool {
+    let mut pending = vec![initial];
+    let mut seen = HashSet::new();
+    while let Some(expr) = pending.pop() {
+        let expr = resolve(ctx, expr);
+        if !seen.insert(expr.span()) {
+            continue;
+        }
+        match expr {
+            Expression::ObjectExpression(obj) => {
+                for p in &obj.properties {
+                    match p {
+                        ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
+                        ObjectPropertyKind::ObjectProperty(p) if pred(p) => {
+                            return true;
+                        }
+                        ObjectPropertyKind::ObjectProperty(_) => (),
+                    }
+                }
+            }
+            _ => pending.extend(alternatives(expr)),
+        }
+    }
+    false
 }

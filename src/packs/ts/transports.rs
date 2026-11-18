@@ -1,3 +1,4 @@
+use super::values::global_object;
 use super::{
     config_responses::transport_response,
     values::{declaration, initializer, key, path, resolve},
@@ -12,9 +13,6 @@ use oxc::{
 };
 use std::collections::HashSet;
 
-fn global_object(name: &str) -> bool {
-    matches!(name, "window" | "self" | "global" | "globalThis")
-}
 fn fetch_path(parts: &[&str]) -> bool {
     match parts {
         ["fetch"] => true,
@@ -90,7 +88,7 @@ fn option<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Option<&'a Expres
                 }
             }
             Item::Field(f) => {
-                if key(ctx, &f.key, f.computed)
+                if key(ctx, &f.key)
                     .map_or_else(|| transport_response(ctx, &f.value), |name| name == "fetch")
                 {
                     return Some(&f.value);
@@ -184,7 +182,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             arguments(ctx, symbol, &mut next);
         }
         if let Some(m) = e.get_member_expr()
-            && let Some(k) = super::values::member_key(ctx, m)
+            && let Some(k) = super::values::MemberKeys::Resolve(ctx).read(m)
         {
             pending.push(Step::Visit(m.object(), Some(paths.push(fields, k))));
             continue;
@@ -197,9 +195,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
                     ObjectPropertyKind::SpreadProperty(s) => {
                         pending.push(Step::Visit(&s.argument, fields));
                     }
-                    ObjectPropertyKind::ObjectProperty(p)
-                        if key(ctx, &p.key, p.computed) == Some(wanted) =>
-                    {
+                    ObjectPropertyKind::ObjectProperty(p) if key(ctx, &p.key) == Some(wanted) => {
                         pending.push(Step::Visit(&p.value, parent));
                     }
                     ObjectPropertyKind::ObjectProperty(_) => (),
