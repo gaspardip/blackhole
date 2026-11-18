@@ -1,4 +1,4 @@
-use crate::verdict::Change;
+use crate::verdict::{Change, Kind};
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
@@ -143,6 +143,8 @@ impl Tree {
 
 pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
     let raw = run(&[
+        // A rename is scored by the attributes of its files, and the working tree's are not part of either commit.
+        &format!("--attr-source={base}"),
         "diff",
         "--no-ext-diff",
         "--no-textconv",
@@ -162,8 +164,17 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
                 .map(str::to_owned)
                 .ok_or_else(|| io::Error::other("incomplete git diff"))
         };
-        let old = status.starts_with('R').then(&mut path).transpose()?;
-        changes.push(Change { old, path: path()? });
+        let kind = match status.as_bytes().first() {
+            Some(b'A') => Kind::Added,
+            Some(b'D') => Kind::Deleted,
+            Some(b'M' | b'T') => Kind::Edited,
+            Some(b'R') => Kind::Moved(path()?),
+            _ => return Err(io::Error::other("unexpected git diff status")),
+        };
+        changes.push(Change {
+            kind,
+            path: path()?,
+        });
     }
     Ok(changes)
 }

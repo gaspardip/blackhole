@@ -44,9 +44,23 @@ impl Approvals {
         })
     }
 }
+pub enum Kind {
+    Added,
+    Deleted,
+    Edited,
+    Moved(String),
+}
 pub struct Change {
-    pub old: Option<String>,
+    pub kind: Kind,
     pub path: String,
+}
+impl Change {
+    fn old(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Moved(old) => Some(old),
+            _ => None,
+        }
+    }
 }
 pub struct Inputs<'a> {
     pub approved: bool,
@@ -74,36 +88,32 @@ impl Verdict {
     }
 }
 
-fn protected(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<()> {
-    if i.approved {
-        return Ok(());
-    }
-    let renames: Vec<_> = i
+fn protected(i: &Inputs<'_>, moved: &Counts, v: &mut Verdict) -> io::Result<()> {
+    let judged = |path: &str| !i.excludes.is_match(path);
+    // Git reports a move it does not recognise as a deletion and an addition.
+    let dropped = i
         .changes
         .iter()
-        .filter_map(|c| Some((c.old.as_deref()?, c.path.as_str())))
-        .collect();
+        .any(|c| matches!(c.kind, Kind::Deleted) && judged(&c.path));
     let mut paths = BTreeSet::new();
     for c in i.changes {
-        if c.old
-            .as_ref()
-            .is_some_and(|p| !i.excludes.is_match(p) && i.excludes.is_match(&c.path))
-        {
+        // shortcut: a file emptied in place, or moved over two pull requests, still leaves unseen; protect every addition under an excluded path when a repository can afford that approval
+        let left = match &c.kind {
+            Kind::Moved(old) => judged(old),
+            Kind::Added => dropped,
+            Kind::Deleted | Kind::Edited => false,
+        };
+        if left && !judged(&c.path) {
             paths.insert(c.path.as_str());
         }
-        for path in c.old.iter().chain([&c.path]).map(String::as_str) {
-            let guarded = match path {
-                ".blackhole/ledger" => !i
-                    .head_ledger
-                    .is_ok_and(|h| ledger::growth(i.base_ledger, h, &renames).is_empty()),
-                ".blackhole/objections" => !i
-                    .head_rows
-                    .is_ok_and(|h| h.iter().all(|(k, r)| i.base_rows.get(k) == Some(r))),
-                _ => {
-                    path == "blackhole.toml"
-                        || path.starts_with(".github/")
-                        || path.starts_with(".blackhole/")
-                }
+        for path in c.old().into_iter().chain([c.path.as_str()]) {
+            let guarded = if path == ".blackhole/ledger" {
+                !i.head_ledger
+                    .is_ok_and(|h| ledger::excess(h, moved).is_empty())
+            } else {
+                path == "blackhole.toml"
+                    || path.starts_with(".github/")
+                    || path.starts_with(".blackhole/")
             };
             if guarded {
                 paths.insert(path);
@@ -166,22 +176,34 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
 /// Propagates diagnostic formatting errors.
 pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
     let mut v = Verdict::default();
-    protected(i, &mut v)?;
-    let rows = eligible(i, &mut v)?;
     let empty = Counts::new();
     let head = i.head_ledger.unwrap_or(&empty);
+    let mut allowed = head.clone();
+    if !i.approved {
+        let renames: Vec<_> = i
+            .changes
+            .iter()
+            .filter_map(|c| Some((c.old()?, c.path.as_str())))
+            .collect();
+        let moved = ledger::moved(i.base_ledger, &renames);
+        protected(i, &moved, &mut v)?;
+        // A count that grew without an approval would otherwise excuse its own findings.
+        for (key, n) in &mut allowed {
+            *n = (*n).min(moved.get(key).copied().unwrap_or(0));
+        }
+    }
+    let rows = eligible(i, &mut v)?;
     if let Err(e) = i.head_ledger {
         v.gates.insert("ledger");
         writeln!(v.lines, "{e}")?;
     }
-    // An exact head ledger that did not grow keeps every ledger count within the base allowance.
     let actual = ledger::counts(i.findings);
     let stale = ledger::excess(head, &actual);
     if !stale.is_empty() {
         v.gates.insert("ledger");
         crate::report_stale(&stale, &actual, &mut v.lines)?;
     }
-    let over = ledger::excess(&actual, &objections::allowances(head, &rows, i.today));
+    let over = ledger::excess(&actual, &objections::allowances(&allowed, &rows, i.today));
     if !over.is_empty() {
         v.gates.insert("findings");
         crate::report(i.findings, &over, &mut v.lines)?;

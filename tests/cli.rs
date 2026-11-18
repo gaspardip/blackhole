@@ -494,6 +494,24 @@ fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     assert!(stdout.ends_with("blackhole ci: red (findings, objections, protected)\n"));
 }
 
+#[test]
+fn ci_reads_attributes_from_the_base_commit() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "x = 1  # noqa\ny = 2\nz = 3\n").unwrap();
+    baseline(root, &[("a.py", 1)]);
+    commit(root);
+    fs::remove_file(root.join("a.py")).unwrap();
+    fs::write(root.join("b.py"), "x = 1  # noqa\r\ny = 2\r\nz = 3\r\n").unwrap();
+    baseline(root, &[("b.py", 1)]);
+    commit(root);
+    let ci = ["ci", "--base", "HEAD~", "--head", "HEAD"];
+    run(root, &ci, 0);
+    // Git compares a file line by line, and so sees this rename, only while its attributes call it text.
+    fs::write(root.join(".gitattributes"), "*.py -diff\n").unwrap();
+    run(root, &ci, 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn ci_reads_a_link_the_way_a_checkout_does() {

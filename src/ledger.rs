@@ -99,8 +99,9 @@ pub fn excess(counts: &Counts, allowed: &Counts) -> Counts {
         .collect()
 }
 
+/// The base counts, each under the path a rename gave its file.
 #[must_use]
-pub fn growth(base: &Counts, head: &Counts, renames: &[(&str, &str)]) -> Counts {
+pub fn moved(base: &Counts, renames: &[(&str, &str)]) -> Counts {
     let renames: BTreeMap<_, _> = renames.iter().copied().collect();
     let mut moved = Counts::new();
     for ((rule, path), &n) in base {
@@ -108,5 +109,5 @@ pub fn growth(base: &Counts, head: &Counts, renames: &[(&str, &str)]) -> Counts 
         let allowance = moved.entry((rule.clone(), dest.to_owned())).or_default();
         *allowance = allowance.saturating_add(n);
     }
-    excess(head, &moved)
+    moved
 }
