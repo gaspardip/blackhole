@@ -1,9 +1,8 @@
 pub mod ci;
-mod git;
-pub mod verdict;
-use std::fmt::Write as _;
 mod config;
 pub mod engine;
+mod files;
+mod git;
 pub mod ledger;
 pub mod objections;
 mod packs {
@@ -11,10 +10,10 @@ mod packs {
         pub(crate) mod no_suppression;
     }
 }
-
-mod files;
+pub mod verdict;
 
 use std::{
+    fmt::Write as _,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -59,34 +58,25 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
             *n = (*n).min(scan.actual.get(key).copied().unwrap_or(0));
             *n > 0
         });
-        replace(&scan.ledger, &shrunk)?;
+        replace(&scan.ledger, &ledger::write(&shrunk)?)?;
     }
     Ok(scan.over)
 }
 
-// A repository without a ledger allows nothing, which is what an empty one says.
-// A link at either level would point the ledger at a file outside the repository.
-fn read_ledger(home: &Path) -> io::Result<ledger::Counts> {
-    let ledger = home.join("ledger");
-    for (path, directory) in [(home, true), (ledger.as_path(), false)] {
-        match fs::symlink_metadata(path) {
-            Ok(meta) if directory && meta.is_dir() || !directory && meta.is_file() => {}
-            Ok(_) => {
-                return Err(io::Error::other(
-                    ".blackhole must be a directory and .blackhole/ledger a regular file",
-                ));
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ledger::Counts::new()),
-            Err(e) => return Err(e),
-        }
+// A link in place of the directory would move the ledger and the objections outside the repository.
+fn home(root: &Path) -> io::Result<PathBuf> {
+    let home = root.join(".blackhole");
+    match fs::symlink_metadata(&home) {
+        Ok(meta) if !meta.is_dir() => Err(io::Error::other(".blackhole must be a directory")),
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(home),
     }
-    ledger::parse(&fs::read(ledger)?, engine::registry())
 }
 
-// The rename is the only write to the ledger, so a crash leaves the old one whole.
-fn replace(path: &Path, actual: &ledger::Counts) -> io::Result<()> {
-    let contents = ledger::write(actual)?;
-    let temp = path.with_file_name(format!("ledger.{}.tmp", std::process::id()));
+// The rename is the only write to the file, so a crash leaves the old one whole.
+fn replace(path: &Path, contents: &str) -> io::Result<()> {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(format!(".{}.tmp", std::process::id()));
     fs::File::create_new(&temp)?.write_all(contents.as_bytes())?;
     fs::rename(temp, path)
 }
@@ -101,20 +91,22 @@ struct Scan {
 
 fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     let (root, mut names) = files::list(paths)?;
-    let excludes = config::parse(&config::read_optional(&root.join("blackhole.toml"))?)?;
+    let excludes =
+        config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     names.retain(|name| !excludes.is_match(name));
-    let home = root.join(".blackhole");
-    let base = read_ledger(&home)?;
-    let mut findings = scan_files(names.iter().filter_map(|name| {
+    let home = home(&root)?;
+    // A repository without a ledger allows nothing, which is what an empty one says.
+    let base = files::policy(&home.join("ledger"))?.map_or_else(
+        || Ok(ledger::Counts::new()),
+        |bytes| ledger::parse(&bytes, engine::registry()),
+    )?;
+    let mut findings = scan_files(names.iter().map(String::as_str), |name| {
         files::read(&root.join(name))
-            .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))
-            .map(|bytes| bytes.map(|bytes| (name.as_str(), bytes)))
-            .transpose()
-    }))?;
+    })?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(
-        &config::read_optional(&root.join(".blackhole/objections"))?,
+        &files::policy(&home.join("objections"))?.unwrap_or_default(),
         today,
     )?;
     let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
@@ -135,12 +127,15 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
 }
 
 fn scan_files<'a>(
-    files: impl Iterator<Item = io::Result<(&'a str, Vec<u8>)>>,
+    names: impl Iterator<Item = &'a str>,
+    mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Vec<engine::Finding>> {
     let mut findings = Vec::new();
-    for file in files {
-        let (path, bytes) = file?;
-        findings.extend(engine::run(engine::registry(), [(path, bytes.as_slice())]));
+    for name in names {
+        let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
+        if let Some(bytes) = bytes {
+            findings.extend(engine::run(engine::registry(), [(name, bytes.as_slice())]));
+        }
     }
     Ok(findings)
 }
@@ -168,14 +163,11 @@ fn report<'a>(
 /// Files or renews an objection against the working tree.
 /// # Errors
 /// Rejects invalid objections, absent overages and repeated renewals.
-pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> io::Result<bool> {
-    let (root, _) = files::list(&[])?;
-    let dir = root.join(".blackhole");
-    fs::create_dir_all(&dir)?;
-    let lock = fs::File::open(&dir)?;
-    lock.lock()?;
+pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> io::Result<()> {
+    let _lock = files::lock()?;
+    let dir = home(&files::root()?)?;
     let file = dir.join("objections");
-    let bytes = config::read_optional(&file)?;
+    let bytes = files::policy(&file)?.unwrap_or_default();
     let today = objections::Date::today()?;
     let rows = objections::parse(&bytes, today)?;
     let key = (rule, path);
@@ -226,10 +218,11 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
             "{}\t{}\t{extra}\t{today}\t-\t{reason}",
             key.0, key.1
         )
-        .unwrap();
+        .map_err(io::Error::other)?;
     }
-    let temp = dir.join(format!("objections.{}.tmp", std::process::id()));
-    fs::File::create_new(&temp)?.write_all(contents.as_bytes())?;
-    fs::rename(temp, file)?;
-    Ok(false)
+    match fs::create_dir(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    replace(&file, &contents)
 }

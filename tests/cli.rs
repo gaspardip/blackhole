@@ -24,6 +24,17 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
+fn commit(root: &Path) {
+    git(root, &["add", "-A"]);
+    let identity = [
+        "-c",
+        "user.name=fixture",
+        "-c",
+        "user.email=fixture@example.org",
+    ];
+    git(root, &[&identity[..], &["commit", "-qm", "tree"]].concat());
+}
+
 fn check(dir: &Path, args: &[&str], code: i32) -> Output {
     run(dir, &[&["check"], args].concat(), code)
 }
@@ -388,19 +399,7 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
     let root = dir.path();
     run(root, &["ci", "--base", "1234", "--head", "abcd"], 2);
     fs::write(root.join("a.py"), "pass").unwrap();
-    git(root, &["add", "."]);
-    git(
-        root,
-        &[
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.org",
-            "commit",
-            "-qm",
-            "clean",
-        ],
-    );
+    commit(root);
     fs::write(root.join("a.py"), "# noqa staged").unwrap();
     git(root, &["add", "."]);
     fs::write(root.join("a.py"), "# noqa unstaged").unwrap();
@@ -410,6 +409,14 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
         b""
     );
     assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    let other = repo();
+    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("GIT_DIR", other.path().join(".git"))
+        .args(["ci", "--base", "HEAD", "--head", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(fs::read(root.join("a.py")).unwrap(), b"# noqa unstaged");
 }
 
@@ -417,34 +424,18 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
 fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     let dir = repo();
     let root = dir.path();
-    let commit = || {
-        git(
-            root,
-            &[
-                "-c",
-                "user.name=fixture",
-                "-c",
-                "user.email=fixture@example.org",
-                "commit",
-                "-qm",
-                "tree",
-            ],
-        );
-    };
     fs::create_dir(root.join(".blackhole")).unwrap();
     let file = root.join(".blackhole/objections");
     let valid = format!("{RULE}\ta.py\t1\t2026-11-01\t-\treason\n");
     fs::write(&file, &valid).unwrap();
     fs::write(root.join("a.py"), "# noqa").unwrap();
-    git(root, &["add", "."]);
-    commit();
+    commit(root);
     fs::write(
         file,
         format!("{valid}{RULE}\tb.py\t1\t2026-11-19\t-\treason\n"),
     )
     .unwrap();
-    git(root, &["add", "."]);
-    commit();
+    commit(root);
     let out = run(
         root,
         &[
@@ -461,4 +452,71 @@ fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains(&format!("objection: {RULE} b.py:")));
     assert!(stdout.ends_with("blackhole ci: red (findings, objections, protected)\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_reads_a_link_the_way_a_checkout_does() {
+    use std::os::unix::fs::symlink;
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("clean.py"), "pass").unwrap();
+    commit(root);
+    fs::create_dir(root.join("real")).unwrap();
+    fs::write(root.join("real/payload.txt"), "#noqa").unwrap();
+    symlink("real", root.join("dir")).unwrap();
+    symlink("dir/../dir/payload.txt", root.join("alias.py")).unwrap();
+    symlink("alias.py", root.join("again.py")).unwrap();
+    commit(root);
+    let ci = ["ci", "--base", "HEAD~", "--head", "HEAD"];
+    let out = String::from_utf8(run(root, &ci, 1).stdout).unwrap();
+    let found = format!("again.py:1:1 {RULE}\nalias.py:1:1 {RULE}\n");
+    assert!(out.starts_with(&found), "{out}");
+    // A link the commit cannot resolve could hide a file from the judge.
+    for target in [
+        "nowhere",
+        "../outside",
+        "/etc/hostname",
+        "loop.py",
+        "clean.py/x",
+    ] {
+        symlink(target, root.join("loop.py")).unwrap();
+        commit(root);
+        run(root, &ci, 2);
+        fs::remove_file(root.join("loop.py")).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn objections_refuse_a_linked_directory() {
+    let dir = repo();
+    let root = dir.path();
+    let other = tempdir().unwrap();
+    let outside = other.path().join("objections");
+    let row = format!("{RULE}\tbad.py\t1\t2026-01-01\t-\treason\n");
+    fs::write(&outside, &row).unwrap();
+    std::os::unix::fs::symlink(other.path(), root.join(".blackhole")).unwrap();
+    run(root, &["object", "--renew", RULE, "bad.py"], 2);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), row);
+}
+
+#[test]
+fn filing_waits_for_the_lock() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("bad.py"), "#noqa").unwrap();
+    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .args(["object", RULE, "bad.py", "reason"])
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!root.join(".blackhole/objections").exists());
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(root.join(".blackhole/objections").exists());
 }

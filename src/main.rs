@@ -42,7 +42,7 @@ fn main() -> ExitCode {
             path,
             reason,
             renew,
-        } => blackhole_check::object(rule, path, reason.as_deref(), renew),
+        } => blackhole_check::object(rule, path, reason.as_deref(), renew).map(|()| false),
         Action::Ci {
             base,
             head,

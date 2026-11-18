@@ -50,10 +50,8 @@ fn evaluate(base: &str, head: &str, approved: bool, today: Date) -> io::Result<V
     let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
     let findings = crate::scan_files(
-        head_tree
-            .blobs()
-            .filter(|(p, _)| !excludes.is_match(p))
-            .map(|(p, id)| Ok((p, batch.read(id)?))),
+        head_tree.paths().filter(|p| !excludes.is_match(p)),
+        |path| head_tree.read(path, &mut batch),
     )?;
     batch.finish()?;
     verdict::judge(&Inputs {

@@ -1,31 +1,10 @@
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
-    let mut command = Command::new("git");
-    // The caller's git variables must not point discovery at another repository or index.
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-    ] {
-        command.env_remove(name);
-    }
-    let output = command.args(args).current_dir(dir).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .next()
-                .unwrap_or("git failed")
-                .to_owned(),
-        ));
-    }
-    Ok(output.stdout)
+    crate::git::output(crate::git::command().args(args).current_dir(dir))
 }
 
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
@@ -86,9 +65,26 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+pub(crate) fn root() -> io::Result<PathBuf> {
+    fs::canonicalize(locate(&env::current_dir()?, "--show-toplevel")?)
+}
+
+// A policy file is read only as a regular file: a link would point it outside the repository.
+pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => fs::read(path).map(Some),
+        Ok(_) => Err(io::Error::other(format!(
+            "{} must be a regular file",
+            path.display()
+        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
     let cwd = env::current_dir()?;
-    let root = fs::canonicalize(locate(&cwd, "--show-toplevel")?)?;
+    let root = root()?;
     let paths = paths
         .iter()
         .map(|p| resolve(&cwd.join(p)))
