@@ -27,3 +27,31 @@ fn repeated_applications_share_their_default_bindings() {
         }
     }
 }
+
+#[test]
+fn large_declarations_and_repeated_local_lookups_finish_within_budget() {
+    for (declarations, uses) in [(8000, 2), (2, 8000)] {
+        let mut literal = String::from("type Big<T> = {\n");
+        let mut namespace = String::new();
+        for index in 0..declarations {
+            writeln!(literal, "m{index}: number;").unwrap();
+            writeln!(
+                namespace,
+                "namespace Local {{ export type X{index} = number; }}"
+            )
+            .unwrap();
+        }
+        literal.push_str("last: T };\n");
+        let last = declarations - 1;
+        for index in 0..uses {
+            writeln!(literal, "declare const l{index}: Big<number>;").unwrap();
+            writeln!(namespace, "declare const n{index}: Local.X{last};").unwrap();
+        }
+        for (path, source) in [("literal.ts", literal), ("namespace.ts", namespace)] {
+            let start = Instant::now();
+            let hits = run(registry(), [(path, source.as_bytes())]);
+            assert!(hits.is_empty(), "{path}: {} findings", hits.len());
+            assert!(start.elapsed() < Duration::from_secs(3), "{path}");
+        }
+    }
+}

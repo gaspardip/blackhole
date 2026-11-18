@@ -74,7 +74,14 @@ fn value_or_binding<'a>(
 
 fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings<()>, expr: &'a Expression<'a>) -> bool {
     bindings
-        .walk(ctx, expr, None, value_or_binding, |_, _| Continue(()))
+        .walk(
+            ctx,
+            expr,
+            None,
+            |()| true,
+            value_or_binding,
+            |_, _| Continue(()),
+        )
         .is_some()
 }
 
@@ -100,6 +107,7 @@ fn guard_argument<'a>(
         ctx,
         arg,
         None,
+        |value| value.is_ok(),
         |mut expr| loop {
             expr = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(expr.node_id())) {

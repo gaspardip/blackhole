@@ -69,6 +69,7 @@ fn evidence<'a>(
             ctx,
             expr,
             owner,
+            |value| value.is_ok(),
             |expr| {
                 let value = expr.without_parentheses();
                 if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {

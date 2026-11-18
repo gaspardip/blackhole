@@ -584,6 +584,39 @@ fn qualified_names_only_resolve_through_local_exports() {
 }
 
 #[test]
+fn import_equals_parameters_follow_the_exported_type() {
+    for (declaration, annotation) in [
+        (
+            "namespace N { export type X = unknown; }\nimport Y = N.X;",
+            "Y",
+        ),
+        ("type X = unknown;\n", "X"),
+        ("\n", "unknown"),
+    ] {
+        let source = format!("{declaration}\nfunction read(value: {annotation}) {{}}");
+        let hits = single::run_rule("ts/no-unknown-parameters", "import.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            [(3, 22, None)],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn guarding_an_imported_unknown_value_preserves_its_type() {
+    for annotation in ["Y", "unknown"] {
+        let source = format!(
+            "namespace N {{ export type X = unknown; }}\nimport Y = N.X;\ndeclare function isString(input: unknown): input is string;\nfunction read(value: {annotation}) {{ return isString(value); }}"
+        );
+        let hits = single::run_rule("ts/no-known-value-widening", "guard.ts", &source);
+        assert!(hits.is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn generic_declaration_identity_includes_bound_arguments() {
     for (local, target, expected) in [
         ("type Pass<T> = Owner<T>;", "Pass<Item>", true),
@@ -597,5 +630,198 @@ fn generic_declaration_identity_includes_bound_arguments() {
         );
         let hits = single::run_rule("ts/no-widen-then-assert", "owner.ts", &source);
         assert_eq!(hits.len(), usize::from(expected), "{source}");
+    }
+}
+
+#[test]
+fn a_plain_qualified_alias_reports_the_written_dictionary_once() {
+    for (declaration, name) in [
+        ("type X = Record<string, unknown>;", "X"),
+        (
+            "namespace N { export type X = Record<string, unknown>; }",
+            "N.X",
+        ),
+        (
+            "namespace A { export namespace B { export type X = Record<string, unknown>; } }",
+            "A.B.X",
+        ),
+        (
+            "namespace N { export type X = Record<string, unknown>; } import Y = N.X;",
+            "Y",
+        ),
+    ] {
+        let source = format!("{declaration}\nexport const a: {name} = {{}};");
+        let hits = single::run_rule("ts/no-unsafe-dictionary-type", "alias.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            [(1, declaration.find("Record").unwrap() + 1, None)],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn type_lookup_ignores_value_declaration_order() {
+    let mut differences = Vec::new();
+    for value in [
+        "const Index = 1;",
+        "let Index = 1;",
+        "function Index() {}",
+        "class Index {}",
+        "namespace Index {export const x = 1}",
+    ] {
+        for (owner, usage) in [
+            ("interface Index<T> { [key:string]: T }", "Index<unknown>"),
+            ("interface Index { [key:string]: unknown }", "Index"),
+            ("type Index<T> = Record<string,T>;", "Index<unknown>"),
+            ("type Index = Record<string,unknown>;", "Index"),
+        ] {
+            let verdict = |prefix: &str| {
+                let text = format!("{prefix}\nexport const v: {usage} = {{}};");
+                single::run_rule("ts/no-unsafe-dictionary-type", "order.ts", &text)
+                    .into_iter()
+                    .filter(|h| h.line == 2)
+                    .map(|h| (h.col, h.note))
+                    .collect::<Vec<_>>()
+            };
+            let before = verdict(&format!("{value} {owner}"));
+            let after = verdict(&format!("{owner} {value}"));
+            if before != after {
+                differences.push(format!("{value} {owner}: {before:?}, {after:?}"));
+            }
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn identity_follows_named_types_in_composite_positions() {
+    let mut differences = Vec::new();
+    for shape in [
+        "T[]",
+        "readonly T[]",
+        "[T]",
+        "T | string",
+        "T & {tag:1}",
+        "(T)",
+        "{p:T}",
+        "(v:T)=>string",
+        "()=>T",
+        "Container<T>",
+    ] {
+        let literal = shape.replace('T', "Model");
+        let named = shape.replace('T', "Id<Model>");
+        for (left, right) in [(&literal, &named), (&named, &literal), (&named, &named)] {
+            let source = format!(
+                "interface Model {{id:number}} interface Container<T> {{item:T}} type Id<T>=T;\ndeclare const original: {left};\nconst v: Record<string,unknown> = original;\nconst picked = v as {right};"
+            );
+            let hits = single::run_rule("ts/no-widen-then-assert", "equal.ts", &source);
+            if !hits
+                .iter()
+                .any(|h| (h.line, h.col, h.note.as_deref()) == (4, 16, None))
+            {
+                differences.push(format!("{left} to {right}"));
+            }
+        }
+    }
+    for left in ["Id<Model>[]", "Model[]"] {
+        for right in ["Pass<Model>[]", "Model[]"] {
+            let source = format!(
+                "interface Model {{ id: number }}\ntype Id<T> = T;\ntype Pass<T> = T;\ndeclare const original: {left};\nconst wide: Record<string,unknown> = original;\nconst back = wide as {right};"
+            );
+            let hits = single::run_rule("ts/no-widen-then-assert", "two-names.ts", &source);
+            assert_eq!(
+                hits.iter()
+                    .map(|h| (h.line, h.col, h.note.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(6, 14, None)],
+                "{left} to {right}"
+            );
+        }
+    }
+    for (left, right, same) in [
+        ("Arr<Model>", "Arr<Other>", false),
+        ("Arr<Model>", "Arr<Model>", true),
+        ("Arr<Model>", "Model[]", true),
+        ("Model | Other", "Other | Model", false),
+        ("Model & Other", "Other & Model", false),
+    ] {
+        let source = format!(
+            "interface Model {{id:number}} interface Other {{extra:string}} type Arr<T>=T[];\ndeclare const original: {left};\nconst v: Record<string,unknown> = original;\nconst picked = v as {right};"
+        );
+        let hits = single::run_rule("ts/no-widen-then-assert", "equal.ts", &source);
+        if hits.is_empty() == same {
+            differences.push(format!("{left} to {right}"));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn readonly_identity_preserves_the_spelled_out_verdict() {
+    for (source_type, target_type, reports) in [
+        ("T[]", "readonly T[]", true),
+        ("readonly T[]", "T[]", true),
+        ("readonly [T]", "[T]", true),
+        ("[T]", "readonly [T]", true),
+        ("ReadonlyArray<T>", "T[]", false),
+        ("T[]", "ReadonlyArray<T>", false),
+        ("readonly T[][]", "T[][]", true),
+    ] {
+        for left in ["Model", "Id<Model>"] {
+            for right in ["Model", "Id<Model>"] {
+                let left = source_type.replace('T', left);
+                let right = target_type.replace('T', right);
+                let source = format!(
+                    "interface Model {{ id: number }}\ntype Id<T> = T;\ndeclare const original: {left};\nconst wide: Record<string, unknown> = original;\nconst back = wide as {right};"
+                );
+                let hits = single::run_rule("ts/no-widen-then-assert", "readonly.ts", &source);
+                assert_eq!(
+                    hits.iter()
+                        .map(|h| (h.line, h.col, h.note.as_deref()))
+                        .collect::<Vec<_>>(),
+                    if reports { vec![(5, 14, None)] } else { vec![] },
+                    "{left} to {right}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn array_identity_distinguishes_shadowed_declarations() {
+    for inner in ["Model", "Other"] {
+        for shape in ["", "[]"] {
+            for source in ["Model", "Id<Model>"] {
+                for target in [inner.to_owned(), format!("Id<{inner}>")] {
+                    let source = format!(
+                        "interface Model {{ id: number }}\ntype Id<T> = T;\ndeclare const original: {source}{shape};\nconst wide: Record<string, unknown> = original;\n{{\n  interface {inner} {{ label: string }}\n  const back = wide as {target}{shape};\n}}"
+                    );
+                    let hits = single::run_rule("ts/no-widen-then-assert", "scope.ts", &source);
+                    assert!(hits.is_empty(), "{source}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn identity_aliases_of_a_function_parameter_report_at_the_assertion() {
+    for left in ["Other", "Id<Other>"] {
+        for right in ["Other", "Id<Other>"] {
+            let source = format!(
+                "interface Model {{ id: number }}\ntype Id<T> = T;\nfunction f<Other>(original: {left}[]) {{\n const wide: Record<string, unknown> = original;\n const back = wide as {right}[];\n}}"
+            );
+            let hits = single::run_rule("ts/no-widen-then-assert", "parameter.ts", &source);
+            assert_eq!(
+                hits.iter()
+                    .map(|h| (h.line, h.col, h.note.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(5, 15, None)],
+                "{source}"
+            );
+        }
     }
 }

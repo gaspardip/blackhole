@@ -62,9 +62,15 @@ pub(crate) fn value_declarations<'a>(
     declarations(ctx, symbol).filter_map(|(id, flags)| flags.is_value().then_some(id))
 }
 
+#[derive(Clone, Copy)]
+enum Origin<T> {
+    Finished(Option<T>),
+    RetryAt(NodeId),
+}
+
 pub(crate) struct ConstBindings<T> {
     immutable: HashMap<SymbolId, bool>,
-    origins: HashMap<(Option<NodeId>, NodeId), Option<T>>,
+    origins: HashMap<(Option<NodeId>, NodeId), Origin<T>>,
 }
 impl<T> Default for ConstBindings<T> {
     fn default() -> Self {
@@ -93,10 +99,12 @@ impl<T: Copy> ConstBindings<T> {
         ctx: &TsCtx<'a>,
         mut expr: &'a Expression<'a>,
         owner: Option<NodeId>,
+        finished: impl Fn(T) -> bool,
         inspect: impl Fn(&'a Expression<'a>) -> ControlFlow<Option<T>, &'a IdentifierReference<'a>>,
         binding: impl Fn(NodeId, AstKind<'a>) -> ControlFlow<Option<T>>,
     ) -> Option<T> {
         let mut path = std::collections::HashSet::new();
+        let mut last_binding = None;
         let end = loop {
             let ident = match inspect(expr) {
                 ControlFlow::Break(end) => break end,
@@ -109,9 +117,12 @@ impl<T: Copy> ConstBindings<T> {
                 break None;
             };
             let key = (owner, id);
-            if let Some(end) = self.origins.get(&key) {
-                break *end;
-            }
+            let id = match self.origins.get(&key) {
+                Some(Origin::Finished(end)) => break *end,
+                Some(Origin::RetryAt(id)) => *id,
+                None => id,
+            };
+            last_binding = Some(id);
             if !path.insert(key) {
                 break None;
             }
@@ -127,8 +138,12 @@ impl<T: Copy> ConstBindings<T> {
             }
             expr = init;
         };
+        let origin = match (end, last_binding) {
+            (Some(value), Some(id)) if !finished(value) => Origin::RetryAt(id),
+            _ => Origin::Finished(end),
+        };
         for key in path {
-            self.origins.insert(key, end);
+            self.origins.insert(key, origin);
         }
         end
     }
