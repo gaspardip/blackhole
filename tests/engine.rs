@@ -678,6 +678,55 @@ fn generic_forwarders_reuse_the_target_with_distinct_arguments() {
 }
 
 #[test]
+fn dictionaries_share_a_merged_interface_verdict() {
+    use std::fmt::Write as _;
+    let mut source = "interface X {}\n".repeat(4000);
+    for i in 0..4000 {
+        writeln!(source, "type D{i} = {{ [k: string]: X }};").unwrap();
+    }
+    let hits = timed_alias_findings(&source, 3);
+    assert_eq!(hits.len(), 4000);
+    for (i, f) in hits.iter().enumerate() {
+        assert_eq!(
+            (f.rule, f.line, f.note.as_deref()),
+            ("ts/no-unsafe-dictionary-type", 4001 + i, None)
+        );
+    }
+}
+
+#[test]
+fn unjudged_generic_aliases_form_a_suffix() {
+    use std::fmt::Write as _;
+    for sibling in ["T[]", "readonly T[]"] {
+        let mut text = String::from("type A0<T> = T;\n");
+        for i in 1..=24 {
+            let prev = i - 1;
+            writeln!(text, "type A{i}<T> = A{prev}<T[]> | A{prev}<{sibling}>;").unwrap();
+        }
+        text.push_str("type Result = A24<string>;");
+        let rule = registry()
+            .iter()
+            .find(|r| r.id == "ts/no-unknown-type-aliases")
+            .unwrap();
+        let hits = run(
+            std::slice::from_ref(rule),
+            [("boundary.ts", text.as_bytes())],
+        );
+        let first = hits.first().unwrap().line;
+        assert!(first > 1);
+        let expected: Vec<_> = (first..=text.lines().count())
+            .map(|line| (rule.id, line, 6, Some("type too complex to judge")))
+            .collect();
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.rule, h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn forward_union_members_settle_before_the_union() {
     use std::fmt::Write as _;
     let members = (0..4000)
