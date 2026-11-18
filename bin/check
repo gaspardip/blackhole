@@ -1,0 +1,8 @@
+#!/bin/sh
+# Everything CI runs. Green here means green there.
+set -eu
+cd "$(dirname "$0")/.."
+python3 -I -m unittest discover -s tools -p 'test_*.py'
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
