@@ -42,10 +42,24 @@ fn existing(path: &Path) -> io::Result<PathBuf> {
 
 // Found once per run: a repository that appears under the tree later must not move the ledger.
 pub(crate) fn root() -> io::Result<PathBuf> {
-    let output = git(&env::current_dir()?, &["rev-parse", "--show-toplevel"])?;
+    let cwd = env::current_dir()?;
+    let output = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let top = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
         .map_err(io::Error::other)?;
-    fs::canonicalize(top)
+    let top = fs::canonicalize(top)?;
+    for ancestor in cwd.ancestors() {
+        match ancestor.join(".git").symlink_metadata() {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+
+        if fs::canonicalize(ancestor)? == top {
+            return Ok(top);
+        }
+        break;
+    }
+    Err(io::Error::other("checkout root mismatch"))
 }
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.

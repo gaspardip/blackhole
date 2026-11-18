@@ -1,5 +1,6 @@
+mod common;
 use std::{
-    env, fs,
+    fs,
     path::Path,
     process::{Command, Output},
     thread,
@@ -14,21 +15,7 @@ fn repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let mut command = Command::new("git");
-    // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
-    for (name, _) in env::vars_os() {
-        if name.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(name);
-        }
-    }
-    assert!(
-        command
-            .current_dir(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success()
-    );
+    common::git(dir, args).unwrap();
 }
 
 fn commit(root: &Path) {
@@ -295,8 +282,8 @@ fn over_blocks_the_shrink() {
 #[test]
 fn regeneration_waits_for_the_lock() {
     let other = repo();
-    // Neither the caller's git variables nor a second repository on the same tree may move the lock away from the ledger it guards.
-    for case in ["plain", "variables", "nested"] {
+    // The caller's git variables must not move the lock away from the ledger it guards.
+    for case in ["plain", "variables"] {
         let dir = repo();
         let root = dir.path();
         fs::write(root.join("a.py"), "#noqa").unwrap();
@@ -309,15 +296,6 @@ fn regeneration_waits_for_the_lock() {
             command
                 .env("GIT_DIR", other.path().join(".git"))
                 .env("GIT_WORK_TREE", root);
-        }
-        if case == "nested" {
-            git(root, &["init", "-q", "nested"]);
-            let nested = root.join("nested");
-            git(
-                &nested,
-                &["config", "core.worktree", root.to_str().unwrap()],
-            );
-            command.current_dir(nested);
         }
         let mut child = command.spawn().unwrap();
         thread::sleep(Duration::from_millis(500));
@@ -707,4 +685,115 @@ fn parse_errors_cannot_be_banked_or_objected_to() {
     )
     .unwrap();
     check(root, &[], 2);
+}
+
+#[test]
+fn linked_worktree_locks_and_updates_its_own_ledger() {
+    let main = repo();
+    let fixture = tempdir().unwrap();
+    fs::create_dir(fixture.path().join("base")).unwrap();
+    common::commit(fixture.path(), main.path(), "base").unwrap();
+    let linked = fixture.path().join("linked");
+    git(
+        main.path(),
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    let main_lock = fs::File::open(main.path()).unwrap();
+    main_lock.lock().unwrap();
+    let linked_lock = fs::File::open(&linked).unwrap();
+    linked_lock.lock().unwrap();
+    let before = baseline(&linked, &[("gone.py", 1)]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(&linked)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(fs::read(linked.join(".blackhole/ledger")).unwrap(), before);
+    linked_lock.unlock().unwrap();
+    wait_for_exit(&mut child);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        fs::read(linked.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
+    assert!(!main.path().join(".blackhole").exists());
+}
+
+fn wait_for_exit(child: &mut std::process::Child) {
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("command did not exit while the lock was held");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn mismatched_root_is_rejected_before_locking() {
+    let main = repo();
+    let nested = main.path().join("nested");
+    git(main.path(), &["init", "-q", "nested"]);
+    git(
+        &nested,
+        &["config", "core.worktree", main.path().to_str().unwrap()],
+    );
+    let before = baseline(main.path(), &[("gone.py", 1)]);
+    let lock = fs::File::open(main.path()).unwrap();
+    lock.lock().unwrap();
+    for args in [
+        &["ledger"][..],
+        &["check"],
+        &["object", RULE, "gone.py", "reason"],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(&nested)
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_exit(&mut child);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(out.stdout, b"");
+        assert_eq!(out.stderr, b"blackhole: checkout root mismatch\n");
+        assert_eq!(
+            fs::read(main.path().join(".blackhole/ledger")).unwrap(),
+            before
+        );
+        let entries: Vec<_> = fs::read_dir(&nested)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [".git"]);
+    }
+}
+
+#[test]
+fn configured_worktree_must_resolve_to_the_checkout() {
+    let dir = repo();
+    let other = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    let expected = check(root, &[], 1).stdout;
+    assert_eq!(check(&sub, &[], 1).stdout, expected);
+    for value in ["..", "../."] {
+        git(root, &["config", "core.worktree", value]);
+        assert_eq!(check(&sub, &[], 1).stdout, expected);
+    }
+    for value in [other.path().to_str().unwrap(), sub.to_str().unwrap(), "."] {
+        git(root, &["config", "core.worktree", value]);
+        assert_eq!(
+            check(root, &[], 2).stderr,
+            b"blackhole: checkout root mismatch\n"
+        );
+        assert_eq!(fs::read_dir(other.path()).unwrap().count(), 1);
+    }
 }

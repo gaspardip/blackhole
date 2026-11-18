@@ -14,7 +14,18 @@ pub(crate) fn command() -> Command {
             command.env_remove(name);
         }
     }
-    command.arg("--no-replace-objects");
+    command.args([
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+    ]);
     command
 }
 fn failure(out: &Output) -> io::Error {
@@ -233,5 +244,18 @@ impl Drop for Batch {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn git_disables_checkout_fsmonitor() {
+        let git = super::command();
+        let args: Vec<_> = git.get_args().collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c", "core.fsmonitor=false"])
+        );
     }
 }
