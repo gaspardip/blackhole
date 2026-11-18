@@ -237,7 +237,7 @@ pub(super) fn callback_call<'a>(
     ctx: &TsCtx<'a>,
     symbol: SymbolId,
     first_parameters: usize,
-) -> Option<super::double_mutations::Invocation<'a>> {
+) -> Option<Invocation<'a>> {
     let function = enclosing_functions(ctx, ctx.semantic.symbol_declaration(symbol).id()).next()?;
     let params = match function.kind() {
         AstKind::Function(f) => &f.params,
@@ -250,7 +250,7 @@ pub(super) fn callback_call<'a>(
     let AstKind::CallExpression(c) = ctx.semantic.nodes().parent_kind(function.id()) else {
         return None;
     };
-    let call = super::double_mutations::invoked(ctx, c);
+    let call = invoked(ctx, c);
     call.arg(1)
         .is_some_and(|e| e.span() == function.span())
         .then_some(call)

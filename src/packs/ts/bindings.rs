@@ -1,6 +1,6 @@
 use super::{
-    double_mutations::{Invocation, Mutation, invoked},
-    values::{MemberKeys, declaration, path, resolve},
+    double_mutations::Mutation,
+    values::{Invocation, MemberKeys, declaration, invoked, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{

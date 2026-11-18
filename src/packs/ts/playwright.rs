@@ -1,7 +1,4 @@
-use super::{
-    double_mutations::invoked,
-    values::{MemberKeys, declaration, key, path, resolve},
-};
+use super::values::{MemberKeys, declaration, invoked, key, path, resolve};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{

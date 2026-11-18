@@ -70,7 +70,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                 return true;
             }
             Expression::CallExpression(call) => {
-                let invocation = super::double_mutations::invoked(ctx, call);
+                let invocation = super::values::invoked(ctx, call);
                 let callee = invocation.callee;
                 if invocation.path.as_deref() == Some(&["Promise", "resolve"]) {
                     pending.extend(invocation.arg(0));

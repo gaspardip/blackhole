@@ -17,21 +17,6 @@ pub(super) fn test_file(path: &str) -> bool {
 
 use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
 
-pub(super) fn root<'a>(mut e: &'a Expression<'a>) -> Option<&'a str> {
-    loop {
-        e = e.get_inner_expression();
-        if let Some(m) = e.get_member_expr() {
-            e = m.object();
-            continue;
-        }
-        match e {
-            Expression::CallExpression(c) => e = &c.callee,
-            Expression::TaggedTemplateExpression(t) => e = &t.tag,
-            Expression::Identifier(id) => return Some(id.name.as_str()),
-            _ => return None,
-        }
-    }
-}
 pub(super) fn is_test(name: &str) -> bool {
     matches!(name, "it" | "test" | "specify")
 }

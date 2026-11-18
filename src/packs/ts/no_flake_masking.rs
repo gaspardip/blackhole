@@ -56,7 +56,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         findings,
                     ),
                     ["test", "describe", "configure"] => {
-                        config(ctx, call.arg(0), &["retries"], findings)
+                        config(ctx, call.arg(0), &["retries"], findings);
                     }
                     ["test", "slow"] => findings.report(c.span.start as usize, None),
                     [base, ..]

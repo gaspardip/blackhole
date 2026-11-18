@@ -61,9 +61,7 @@ fn hono(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
                     return true;
                 }
                 Expression::CallExpression(c) => {
-                    if let Some(m) = super::double_mutations::invoked(ctx, c)
-                        .callee
-                        .get_member_expr()
+                    if let Some(m) = super::values::invoked(ctx, c).callee.get_member_expr()
                         && matches!(
                             super::values::MemberKeys::Resolve(ctx).read(m),
                             Some(
@@ -171,7 +169,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(call) = node.kind() else {
             continue;
         };
-        let invocation = super::double_mutations::invoked(ctx, call);
+        let invocation = super::values::invoked(ctx, call);
         if super::double_mutations::framework_call(ctx, &invocation)
             || (test_code
                 && (super::bindings::mutation(ctx, &invocation)

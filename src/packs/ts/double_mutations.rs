@@ -1,11 +1,11 @@
 use super::{
     native_properties::protected,
-    values::{MemberKeys, declaration, key, literal, path, resolve},
+    values::{MemberKeys, key, literal, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::ast::{
     AstKind,
-    ast::{AssignmentTarget, BindingPattern, Expression, MemberExpression},
+    ast::{AssignmentTarget, Expression, MemberExpression},
 };
 
 fn native(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<String> {
@@ -52,7 +52,7 @@ pub(super) enum Mutation {
     Delete,
 }
 
-pub(super) use super::values::{Invocation, invoked};
+use super::values::Invocation;
 impl Invocation<'_> {
     pub(super) fn mutation(&self) -> Option<Mutation> {
         match native_name(self.path.as_deref()?).as_str() {
@@ -88,21 +88,6 @@ pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     }
 }
 
-fn method<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<&'a str> {
-    if let Some(m) = callee.get_member_expr() {
-        return MemberKeys::Resolve(ctx).read(m);
-    }
-    let Expression::Identifier(id) = callee else {
-        return None;
-    };
-    let AstKind::VariableDeclarator(v) = declaration(ctx, id)? else {
-        return None;
-    };
-    let BindingPattern::ObjectPattern(pattern) = &v.id else {
-        return None;
-    };
-    super::values::destructured(ctx, pattern, |b| b.name == id.name)
-}
 fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     if call.args.len() != 2 {
         return false;
@@ -118,7 +103,7 @@ fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
 }
 
 pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
-    if method(ctx, call.callee).is_some_and(|s| {
+    if super::values::receiver(ctx, call.callee).is_some_and(|(_, s)| {
         matches!(
             s,
             "mockImplementation"

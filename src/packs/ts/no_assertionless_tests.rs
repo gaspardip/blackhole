@@ -1,4 +1,4 @@
-use super::test_context::{chain_property, is_test, root};
+use super::test_context::{chain_property, is_test};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
@@ -33,7 +33,7 @@ fn same(ctx: &TsCtx<'_>, a: &Expression<'_>, b: &Expression<'_>) -> bool {
         _ => false,
     }
 }
-fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>) -> bool {
+fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>, base: &str) -> bool {
     let first = call.arguments.first().and_then(|a| a.as_expression());
     if call.callee.is_specific_id("assert") {
         return first.is_some_and(literal);
@@ -41,7 +41,7 @@ fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>) -> bool {
     let Some(m) = call.callee.get_member_expr() else {
         return false;
     };
-    if root(&call.callee) == Some("assert") {
+    if base == "assert" {
         return first
             .zip(call.arguments.get(1).and_then(|a| a.as_expression()))
             .is_some_and(|(a, b)| same(ctx, a, b));
@@ -106,7 +106,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             let bare_literal = parts == ["expect"]
                 && inv.arg(0).is_some_and(literal)
                 && !matches!(super::values::outer(ctx,n.id()),Some(kind) if kind.as_member_expression_kind().is_some());
-            let found = bare_literal || tautology(ctx, c);
+            let found = bare_literal || tautology(ctx, c, base);
             *assertions.entry(c.span.start).or_default() |= found;
         }
         if !is_test(base)

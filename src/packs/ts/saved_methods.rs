@@ -1,7 +1,7 @@
 use super::values::symbol;
 use super::{
-    double_mutations::{invoked, writes},
-    values::{MemberKeys, declaration, path, resolve},
+    double_mutations::writes,
+    values::{MemberKeys, declaration, invoked, path, resolve},
 };
 use crate::engine::{Findings, TsCtx};
 use oxc::{

@@ -34,6 +34,13 @@ fn body_skip(e: &Expression<'_>) -> Option<usize> {
         _ => None,
     }
 }
+fn skip_option(ctx: &TsCtx<'_>, arg: &Expression<'_>) -> Option<usize> {
+    let options = super::values::properties(ctx, arg)?;
+    options.named.into_iter().find_map(|(key,property)|{
+        let enabled=matches!(super::values::resolve(ctx,&property.value),Expression::BooleanLiteral(value) if value.value);
+        (matches!(key,"skip"|"todo") && enabled).then_some(property.key.span().start as usize)
+    })
+}
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut locations = BTreeSet::new();
     let nodes = ctx.semantic.nodes();
@@ -52,11 +59,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         .unwrap_or(call.callee.span().start as usize),
                 )
             } else {
-                call.arg(1).and_then(|e|super::values::properties(ctx,e)).and_then(|opts| {
-                    opts.named.into_iter().find_map(|(key,p)|{
-                        (matches!(key,"skip"|"todo") && matches!(super::values::resolve(ctx,&p.value),Expression::BooleanLiteral(b) if b.value)).then_some(p.key.span().start as usize)
-                    })
-                })
+                call.arg(1).and_then(|arg| skip_option(ctx, arg))
             }
         } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe") {
             Some(call.callee.span().start as usize)
