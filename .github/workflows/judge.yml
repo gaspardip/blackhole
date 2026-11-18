@@ -2,7 +2,7 @@ name: judge
 
 on:
   pull_request_target:
-    # edited covers a change of base branch, which changes the judge and the policy it reads.
+    # edited covers a change of base branch, which changes the policy the judge reads.
     types: [opened, reopened, synchronize, edited]
 
 permissions:
@@ -18,6 +18,7 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
       - name: judge
         run: |
@@ -25,8 +26,12 @@ jobs:
           git init -q repo
           cd repo
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          # The judge is built from the base branch. The head arrives as git objects and is never checked out or run.
-          git fetch -q origin "${GITHUB_SHA}" "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+          # A private repository refuses a fetch without the token. It goes in by environment, so it reaches neither the process list nor a config file.
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          # The judge is built from the default branch and reads the policy of the branch the pull request targets. The head arrives as git objects and is never checked out or run.
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git fetch -q origin "${GITHUB_SHA}" "+refs/heads/${BASE_REF}:refs/remotes/origin/base" "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
           git checkout -q "${GITHUB_SHA}"
           cargo build --locked --release --quiet
           raw="${RUNNER_TEMP}/reviews.json"
@@ -62,4 +67,4 @@ jobs:
             set --
             echo "judge: ${listed} of ${total} commits listed, so approvals are ignored"
           fi
-          target/release/blackhole ci --base "${GITHUB_SHA}" --head "${HEAD_SHA}" "$@"
+          target/release/blackhole ci --base refs/remotes/origin/base --head "${HEAD_SHA}" "$@"

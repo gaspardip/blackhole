@@ -1,0 +1,15 @@
+name: review
+
+# A review changes the verdict, but this file comes from the pull request. So it only marks the moment, and rejudge does the work.
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  mark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: "true"
