@@ -46,10 +46,44 @@ fn locate(cwd: &Path, what: &str) -> io::Result<PathBuf> {
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.
 pub(crate) fn lock() -> io::Result<fs::File> {
-    let dir = locate(&env::current_dir()?, "--absolute-git-dir")?;
-    let file = fs::File::create(dir.join("blackhole.lock"))?;
+    let path = locate(&env::current_dir()?, "--absolute-git-dir")?.join("blackhole.lock");
+    // Nothing is written through the handle, so a link swapped in after this look loses no data.
+    if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
+        return Err(io::Error::other(format!(
+            "{} must be a regular file",
+            path.display()
+        )));
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
     file.lock()?;
     Ok(file)
+}
+
+// A file can go away between the listing and the read, and then it has nothing to check.
+// A link to a file is read under the link's name, or a link could hide what kind of file it is.
+pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let found = fs::metadata(path).and_then(|meta| {
+        if meta.is_file() {
+            fs::read(path).map(Some)
+        } else {
+            Ok(None)
+        }
+    });
+    match found {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
@@ -67,20 +101,6 @@ pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
             io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
         })?;
         let file = root.join(name);
-        // A link to a file is read under the link's name, or a link could hide what kind of file it is.
-        match fs::metadata(&file) {
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => continue,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
         let mut include = paths.is_empty();
         for (path, hit) in paths.iter().zip(&mut matched) {
             if file.starts_with(path) {
