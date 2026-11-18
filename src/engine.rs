@@ -168,6 +168,70 @@ fn source_type(path: &str) -> Option<SourceType> {
     Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
 }
 
+type Hit = (usize, &'static str, Option<String>);
+
+fn collect(
+    rules: &[Rule],
+    path: &str,
+    text: &str,
+    parsed: Option<&Result<TsCtx<'_>, (usize, String)>>,
+) -> Vec<Hit> {
+    let ts = parsed.and_then(|parsed| parsed.as_ref().ok());
+    let ctx = FileCtx {
+        path,
+        text,
+        comments: ts.map(|ts| ts.comments),
+    };
+    let mut hits = Vec::new();
+    for rule in rules {
+        let mut findings = Findings::default();
+        match rule.run {
+            Run::File(check) => check(&ctx, &mut findings),
+            Run::Ts(check) => {
+                if let Some(ts) = ts {
+                    check(ts, &mut findings);
+                }
+            }
+            Run::ParseError => {
+                if let Some(Err((at, message))) = parsed {
+                    findings.report(*at, Some(message));
+                }
+            }
+        }
+        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+    }
+    hits
+}
+
+fn parsed_hits(rules: &[Rule], path: &str, text: &str, kind: SourceType) -> Vec<Hit> {
+    // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
+    const STACK_BYTES: usize = 768 * 1024 * 1024;
+    let judged = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn_scoped(scope, || {
+                let arena = Allocator::default();
+                collect(rules, path, text, Some(&parse(&arena, path, text, kind)))
+            })
+            .map(std::thread::ScopedJoinHandle::join)
+    });
+    match judged {
+        Ok(Ok(hits)) => hits,
+        Ok(Err(_)) => collect(
+            rules,
+            path,
+            text,
+            Some(&Err((0, "Parser panicked".to_owned()))),
+        ),
+        Err(e) => collect(
+            rules,
+            path,
+            text,
+            Some(&Err((0, format!("Cannot start parser thread: {e}")))),
+        ),
+    }
+}
+
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -175,41 +239,16 @@ pub fn run<'a>(
     let mut result = Vec::new();
     for (path, bytes) in files {
         let (text, nul) = decode(bytes);
-        let arena = Allocator::default();
-        // A parser that panics has not read the file, which is a finding like any other parse failure.
-        let parsed = source_type(path).map(|kind| {
-            if let Some(at) = nul {
-                return Err((at, "NUL in source text".to_owned()));
-            }
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                parse(&arena, path, &text, kind)
-            }))
-            .unwrap_or_else(|_| Err((0, "Parser panicked".to_owned())))
-        });
-        let ts = parsed.as_ref().and_then(|parsed| parsed.as_ref().ok());
-        let ctx = FileCtx {
-            path,
-            text: &text,
-            comments: ts.map(|ts| ts.comments),
+        let mut hits = match (source_type(path), nul) {
+            (Some(_), Some(at)) => collect(
+                rules,
+                path,
+                &text,
+                Some(&Err((at, "NUL in source text".to_owned()))),
+            ),
+            (Some(kind), None) => parsed_hits(rules, path, &text, kind),
+            (None, _) => collect(rules, path, &text, None),
         };
-        let mut hits = Vec::new();
-        for rule in rules {
-            let mut findings = Findings::default();
-            match rule.run {
-                Run::File(check) => check(&ctx, &mut findings),
-                Run::Ts(check) => {
-                    if let Some(ts) = ts {
-                        check(ts, &mut findings);
-                    }
-                }
-                Run::ParseError => {
-                    if let Some(Err((at, message))) = &parsed {
-                        findings.report(*at, Some(message));
-                    }
-                }
-            }
-            hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
-        }
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {

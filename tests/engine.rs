@@ -7,6 +7,26 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
+    for (open, close) in [("(", ")"), ("[", "]")] {
+        let judge = |depth| {
+            let text = format!(
+                "// ordinary comment\nconst x = {}0{};",
+                open.repeat(depth),
+                close.repeat(depth)
+            );
+            run(registry(), [("depth.ts", text.as_bytes())])
+                .into_iter()
+                .map(|f| (f.rule, f.line, f.col))
+                .collect::<Vec<_>>()
+        };
+        let expected = judge(3);
+        assert_eq!(expected, [("ts/no-comments", 1, 1)]);
+        assert_eq!(judge(100_000), expected);
+    }
+}
+
+#[test]
 fn exported_alias_chain_is_judged_in_linear_time() {
     use std::{
         fmt::Write as _,
