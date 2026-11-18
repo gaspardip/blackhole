@@ -49,7 +49,7 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
-fn all_declarations_must_describe_an_empty_interface() {
+fn only_type_contributors_determine_interface_emptiness() {
     let rule = registry()
         .iter()
         .find(|r| r.id == "ts/no-unsafe-dictionary-type")
@@ -67,7 +67,13 @@ fn all_declarations_must_describe_an_empty_interface() {
     for (other, empty) in [
         ("class Model { id = 0; }", false),
         ("declare class Model { id: number; }", false),
-        ("namespace Model { export const id = 0; }", false),
+        ("namespace Model { export const id = 0; }", true),
+        ("const Model = 1;", true),
+        ("let Model = 1;", true),
+        ("var Model = 1;", true),
+        ("declare const Model: number;", true),
+        ("function Model() {}", true),
+        ("import type { Model } from './other';", false),
         ("interface Model extends Base {}", false),
         ("interface Model { id: number }", false),
         ("interface Model {}", true),

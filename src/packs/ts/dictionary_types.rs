@@ -324,10 +324,20 @@ impl Environments {
                 return Plan::Done(Class::None);
             };
             match ctx.semantic.nodes().kind(id) {
-                AstKind::TSInterfaceDeclaration(_) if g.query == Query::Value
-                    && scopes.symbol_declarations(sym).all(|id| budget.take(1) &&
-                        matches!(ctx.semantic.nodes().kind(id), AstKind::TSInterfaceDeclaration(i)
-                            if i.extends.is_empty() && empty(&i.body.body, budget))) =>
+                AstKind::TSInterfaceDeclaration(_)
+                    if g.query == Query::Value
+                        && scopes.symbol_declarations(sym).all(|id| {
+                            budget.take(1)
+                                && match ctx.semantic.nodes().kind(id) {
+                                    AstKind::VariableDeclarator(_)
+                                    | AstKind::Function(_)
+                                    | AstKind::TSNamespaceDeclaration(_) => true,
+                                    AstKind::TSInterfaceDeclaration(i) => {
+                                        i.extends.is_empty() && empty(&i.body.body, budget)
+                                    }
+                                    _ => false,
+                                }
+                        }) =>
                 {
                     return Plan::Done(Class::Broad);
                 }
