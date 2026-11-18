@@ -39,5 +39,5 @@ Only `blackhole ledger` writes it. Allowances can only shrink.
 Only the root `blackhole.toml` sets repository-relative `exclude` globs.
 File an overage with `blackhole object <rule> <path> <reason>`. Objections last through day 30 and accept one renewal with `--renew`.
 `blackhole ci --base <sha> --head <sha>` judges behind, protected, objections, ledger and findings from commit objects.
-The `judge` workflow runs it on every pull request with a binary built from the base branch. A change to `.github/`, `.blackhole/` or `blackhole.toml` needs an approving review from someone other than the author.
+The `judge` workflow runs it on every pull request with a binary built from the base branch. A change to `.github/`, `.blackhole/` or `blackhole.toml` needs an approving review from someone who opened or wrote none of it.
 Add an evasion case with base/ and head/ trees, an expect file listing every red gate in sorted order or green, and optional approvals.json. Use .keep for an empty tree.

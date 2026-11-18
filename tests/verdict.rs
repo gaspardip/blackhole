@@ -15,7 +15,7 @@ fn last_substantive_review() {
         ("peer", "APPROVED", "base", false),
     ] {
         let first = if login == "author" { "AUTHOR" } else { "peer" };
-        let data = serde_json::json!({"author":"author","reviews":[{"login":first,"state":"APPROVED","commit":"head","permission":"write"},{"login":login,"state":state,"commit":head,"permission":"write"}]});
+        let data = serde_json::json!({"authors":["author"],"reviews":[{"login":first,"state":"APPROVED","commit":"head","permission":"write"},{"login":login,"state":state,"commit":head,"permission":"write"}]});
         let reviews: Approvals = serde_json::from_value(data).unwrap();
         assert_eq!(reviews.approved("head"), approved);
     }
@@ -153,8 +153,9 @@ fn objection_transitions_and_ancestry() {
 #[test]
 fn rejects_approval_typos() {
     for json in [
-        r#"{"author":"a","reviews":[],"typo":1}"#,
-        r#"{"author":"a","reviews":[{"login":"b","state":"APPROVED","commit":"head","permission":"write","typo":0}]}"#,
+        r#"{"authors":["a"],"reviews":[],"typo":1}"#,
+        r#"{"author":"a","reviews":[]}"#,
+        r#"{"authors":["a"],"reviews":[{"login":"b","state":"APPROVED","commit":"head","permission":"write","typo":0}]}"#,
     ] {
         assert!(serde_json::from_str::<Approvals>(json).is_err());
     }

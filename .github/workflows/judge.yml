@@ -2,7 +2,8 @@ name: judge
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    # edited covers a change of base branch, which changes the judge and the policy it reads.
+    types: [opened, reopened, synchronize, edited]
 
 permissions:
   contents: read
@@ -39,9 +40,12 @@ jobs:
               jq --arg login "${login}" --arg level "${level}" '. + {($login): $level}' "${permissions}" > "${permissions}.next"
               mv "${permissions}.next" "${permissions}"
             done
+          commits="${RUNNER_TEMP}/commits.json"
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" > "${commits}"
           approvals="${RUNNER_TEMP}/approvals.json"
-          jq --arg author "${PR_AUTHOR}" --slurpfile levels "${permissions}" '{
-            author: $author,
+          # Whoever wrote or committed a commit cannot be the one who approves it.
+          jq --arg author "${PR_AUTHOR}" --slurpfile levels "${permissions}" --slurpfile commits "${commits}" '{
+            authors: ([$author] + [$commits[0][][] | .author.login, .committer.login | select(. != null)] | unique),
             reviews: [.[][] | (.user.login // "") as $login | {
               login: $login,
               state: .state,

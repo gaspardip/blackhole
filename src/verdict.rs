@@ -13,7 +13,7 @@ use std::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Approvals {
-    author: String,
+    authors: Vec<String>,
     reviews: Vec<Review>,
 }
 #[derive(Deserialize)]
@@ -29,7 +29,11 @@ impl Approvals {
     pub fn approved(&self, head: &str) -> bool {
         let mut last = BTreeMap::new();
         for r in &self.reviews {
-            if !r.login.eq_ignore_ascii_case(&self.author) && r.state != "COMMENTED" {
+            let wrote = self
+                .authors
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&r.login));
+            if !wrote && r.state != "COMMENTED" {
                 last.insert(r.login.to_ascii_lowercase(), r);
             }
         }
@@ -111,7 +115,7 @@ fn protected(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<()> {
         v.gates.insert("protected");
         writeln!(
             v.lines,
-            "protected: {path}: needs an approving review from a person with write access who is not the author"
+            "protected: {path}: needs an approving review from a person with write access who wrote none of its commits"
         )?;
     }
     Ok(())
