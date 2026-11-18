@@ -99,15 +99,12 @@ impl<T: Copy> ConstBindings<T> {
             if let ControlFlow::Break(end) = binding(id, kind) {
                 break end;
             }
-            let AstKind::VariableDeclarator(var) = kind else {
+            let Some(init) = super::direct_binding(kind).and_then(|b| b.initializer) else {
                 break None;
             };
             if !self.immutable(ctx, sym, id) {
                 break None;
             }
-            let Some(init) = &var.init else {
-                break None;
-            };
             expr = init;
         };
         for key in path {

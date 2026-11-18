@@ -385,6 +385,13 @@ fn guard_evidence_uses_only_an_identifiers_own_annotation() {
         let src = format!("{guard}\n{body}");
         run(std::slice::from_ref(rule), [("case.ts", src.as_bytes())])
     };
+    let patterns = [
+        "declare const input: object;\nconst { value } = input as { value: unknown };\nguard(value);",
+        "type Foo = { id: number };\ndeclare const src: { a: Foo };\nlet { a }: { a: Foo } = src;\na = { id: 1 };",
+    ];
+    for body in patterns {
+        assert!(check(body).is_empty(), "{body}");
+    }
     for parameter in [
         "...[value]: [unknown]",
         "[value]: [unknown]",
@@ -406,7 +413,10 @@ fn guard_evidence_uses_only_an_identifiers_own_annotation() {
         "[...value]: unknown[]",
     ] {
         assert!(
-            check(&format!("const {binding} = source; guard(value);")).is_empty(),
+            check(&format!(
+                "declare const source: object; const {binding} = source; guard(value);"
+            ))
+            .is_empty(),
             "{binding}"
         );
     }

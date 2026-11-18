@@ -1,9 +1,8 @@
 use super::{
     dictionary_types::{Class, Resolution},
     function_types::{
-        binding_annotation,
         bindings::{ConstBindings, declaration},
-        contains_unknown,
+        contains_unknown, direct_binding,
         expressions::{assertion, known_value, parent},
         predicate_subject,
     },
@@ -13,8 +12,8 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            AssignmentTarget, BindingPattern, CallExpression, Expression, FormalParameters,
-            IdentifierReference, TSType, TSTypeAnnotation,
+            AssignmentTarget, CallExpression, Expression, FormalParameters, IdentifierReference,
+            TSType, TSTypeAnnotation,
         },
     },
     span::GetSpan,
@@ -116,9 +115,7 @@ fn guard_argument<'a>(
             }
         },
         |_, kind| {
-            let annotation = binding_annotation(kind)
-                .filter(|(pattern, _)| matches!(pattern, BindingPattern::BindingIdentifier(_)))
-                .map(|(_, a)| a);
+            let annotation = direct_binding(kind).and_then(|b| b.annotation);
             annotation.map_or(Continue(()), |a| {
                 Break(
                     resolution
@@ -139,8 +136,9 @@ fn typed_flow<'a>(
     let nodes = ctx.semantic.nodes();
     let (expr, a) = match kind {
         AstKind::ArrowFunctionExpression(n) => (n.get_expression()?, n.return_type.as_deref()?),
-        AstKind::VariableDeclarator(n) if matches!(n.id, BindingPattern::BindingIdentifier(_)) => {
-            (n.init.as_ref()?, n.type_annotation.as_deref()?)
+        AstKind::VariableDeclarator(_) => {
+            let binding = direct_binding(kind)?;
+            (binding.initializer?, binding.annotation?)
         }
         AstKind::PropertyDefinition(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
         AstKind::AccessorProperty(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
@@ -155,10 +153,12 @@ fn typed_flow<'a>(
             let AssignmentTarget::AssignmentTargetIdentifier(i) = &n.left else {
                 return None;
             };
-            let AstKind::VariableDeclarator(v) = nodes.kind(declaration(ctx, i)?) else {
+            let kind = nodes.kind(declaration(ctx, i)?);
+            if !matches!(kind, AstKind::VariableDeclarator(_)) {
                 return None;
-            };
-            (&n.right, v.type_annotation.as_deref()?)
+            }
+            let binding = direct_binding(kind)?;
+            (&n.right, binding.annotation?)
         }
         kind => {
             let pair = assertion(kind)?;

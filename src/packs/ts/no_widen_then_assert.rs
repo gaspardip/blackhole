@@ -6,9 +6,7 @@ use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
-        ast::{
-            BindingPattern, Expression, TSSignature, TSType, TSTypeName, TSTypeOperatorOperator,
-        },
+        ast::{Expression, TSSignature, TSType, TSTypeName, TSTypeOperatorOperator},
     },
     span::GetSpan,
     syntax::node::NodeId,
@@ -172,9 +170,7 @@ fn evidence<'a>(
             if boundary(ctx, id) != owner {
                 return Break(None);
             }
-            let annotation = super::function_types::binding_annotation(kind)
-                .filter(|(pattern, _)| matches!(pattern, BindingPattern::BindingIdentifier(_)))
-                .map(|(_, a)| a);
+            let annotation = super::function_types::direct_binding(kind).and_then(|b| b.annotation);
             match annotation {
                 Some(a) => Break(
                     broad(ctx, &a.type_annotation)
@@ -231,21 +227,22 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             continue;
         };
         let owner = boundary(ctx, binding);
-        if !matches!(v.id, BindingPattern::BindingIdentifier(_))
-            || !bindings.immutable(ctx, symbol, binding)
+        if !bindings.immutable(ctx, symbol, binding)
             || node.span().start <= v.span.end
             || boundary(ctx, id) != owner
         {
             continue;
         }
-        let Some(init) = v.init.as_ref() else {
+        let Some(direct) = super::function_types::direct_binding(nodes.kind(binding)) else {
+            continue;
+        };
+        let Some(init) = direct.initializer else {
             continue;
         };
         let asserted = assertion(nodes.kind(init.without_parentheses().node_id()))
             .and_then(|(e, t)| Some((e, broad(ctx, t)?)));
-        let Some(kind) = v
-            .type_annotation
-            .as_ref()
+        let Some(kind) = direct
+            .annotation
             .and_then(|a| broad(ctx, &a.type_annotation))
             .or_else(|| asserted.map(|(_, k)| k))
         else {
@@ -253,7 +250,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         if let Some(original) =
             evidence(ctx, asserted.map_or(init, |(e, _)| e), owner, &mut bindings)
-            && !matches!(original,Evidence::Annotated(t) if v.type_annotation.as_ref().is_some_and(|a|a.type_annotation.node_id()==t.node_id()))
+            && !matches!(original,Evidence::Annotated(t) if direct.annotation.is_some_and(|a|a.type_annotation.node_id()==t.node_id()))
             && narrower(ctx, kind, original, target)
         {
             findings.report(node.span().start as usize, None);

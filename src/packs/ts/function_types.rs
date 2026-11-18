@@ -2,7 +2,7 @@ pub(super) mod bindings;
 pub(super) mod expressions;
 use oxc::ast::{
     AstKind,
-    ast::{BindingPattern, TSType, TSTypeAnnotation, TSTypePredicateName},
+    ast::{BindingPattern, Expression, TSType, TSTypeAnnotation, TSTypePredicateName},
 };
 pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
     match ty.without_parenthesized() {
@@ -10,6 +10,24 @@ pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
         TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
         _ => false,
     }
+}
+
+pub(super) struct DirectBinding<'a> {
+    pub annotation: Option<&'a TSTypeAnnotation<'a>>,
+    pub initializer: Option<&'a Expression<'a>>,
+}
+
+pub(super) fn direct_binding(kind: AstKind<'_>) -> Option<DirectBinding<'_>> {
+    let (pattern, annotation, initializer) = match kind {
+        AstKind::VariableDeclarator(v) => (&v.id, v.type_annotation.as_deref(), v.init.as_ref()),
+        AstKind::FormalParameter(p) => (&p.pattern, p.type_annotation.as_deref(), None),
+        AstKind::FormalParameterRest(p) => (&p.rest.argument, p.type_annotation.as_deref(), None),
+        _ => return None,
+    };
+    matches!(pattern, BindingPattern::BindingIdentifier(_)).then_some(DirectBinding {
+        annotation,
+        initializer,
+    })
 }
 
 pub(super) fn binding_annotation(
