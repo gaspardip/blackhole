@@ -7,6 +7,23 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn default_export_identifier_cannot_carry_docs() {
+    let hits = run(
+        registry(),
+        [(
+            "a.ts",
+            b"const x = 42;\nexport default /** arbitrary */ x;".as_slice(),
+        )],
+    );
+    assert_eq!(
+        hits.iter()
+            .map(|f| (f.rule, f.line, f.col))
+            .collect::<Vec<_>>(),
+        [("ts/no-comments", 2, 16)]
+    );
+}
+
+#[test]
 fn coordinates_and_sort_order() {
     let rules = ["b", "a"].map(|id| Rule {
         id,

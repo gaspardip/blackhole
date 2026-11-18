@@ -294,7 +294,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 || matches!(
                     ctx.semantic.nodes().parent_kind(*id),
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
-                )
+                ) && !matches!(n.kind(), AstKind::IdentifierReference(_))
         })
         .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
