@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -304,6 +305,127 @@ class Push(Repo):
         self.commit("chore: start")
         line = f"(delete) {'0' * 40} refs/heads/old {'1' * 40}\n"
         self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
+
+
+class Event(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.commit("chore: start")
+
+    def event(self, name: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        path = self.dir / "event.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        env = {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
+        return run(["event"], self.dir, env=env)
+
+    def pull_request(
+        self,
+        title: str = "fix: sync",
+        association: str = "OWNER",
+        head_repo: str | None = "o/r",
+        head: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        pull = {
+            "title": title,
+            "body": None,
+            "author_association": association,
+            "head": {
+                "ref": "fix/sync",
+                "sha": head or self.base,
+                "repo": {"full_name": head_repo} if head_repo else None,
+            },
+            "base": {"sha": self.base},
+        }
+        payload = {"repository": {"full_name": "o/r"}, "pull_request": pull}
+        return self.event("pull_request_target", payload)
+
+    def test_clean_pull_request_passes(self) -> None:
+        self.assertEqual(self.pull_request().returncode, 0)
+
+    def test_pull_request_title_is_caught_without_printing_it(self) -> None:
+        done = self.pull_request(title="Quokka fix")
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_pull_request_commits_are_caught(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        self.assertEqual(self.pull_request(head=head).returncode, 1)
+
+    def test_a_strangers_pull_request_gives_no_signal(self) -> None:
+        for association in ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR"]:
+            with self.subTest(association=association):
+                done = self.pull_request(title="Quokka?", association=association)
+                self.assertEqual(done.returncode, 0)
+
+    def test_a_head_outside_the_repository_gives_no_signal(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        for head_repo in ["stranger/r", None]:
+            with self.subTest(head_repo=head_repo):
+                done = self.pull_request(title="Quokka", head_repo=head_repo, head=head)
+                self.assertEqual(done.returncode, 0)
+
+    def test_issue_text_is_caught_for_a_trusted_author_only(self) -> None:
+        for association, expected in [("OWNER", 1), ("COLLABORATOR", 1), ("NONE", 0)]:
+            with self.subTest(association=association):
+                issue = {"title": "bug", "body": "seen at Quokka", "author_association": association}
+                self.assertEqual(self.event("issues", {"issue": issue}).returncode, expected)
+
+    def test_comment_is_scanned_without_the_issue_it_is_on(self) -> None:
+        issue = {"title": "Quokka?", "body": "", "author_association": "NONE"}
+
+        def comment(body: str, association: str) -> int:
+            said = {"body": body, "author_association": association}
+            return self.event("issue_comment", {"issue": issue, "comment": said}).returncode
+
+        self.assertEqual(comment("thanks", "OWNER"), 0)
+        self.assertEqual(comment("yes, Quokka", "OWNER"), 1)
+        self.assertEqual(comment("is it Quokka?", "NONE"), 0)
+
+    def test_release_text_is_caught(self) -> None:
+        release = {"name": "v1", "tag_name": "v1", "body": "thanks Quokka"}
+        self.assertEqual(self.event("release", {"release": release}).returncode, 1)
+
+    def test_pushed_commits_and_ref_are_caught(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        clean = {"ref": "refs/heads/main", "before": self.base, "after": self.base}
+        self.assertEqual(self.event("push", clean).returncode, 0)
+        self.assertEqual(self.event("push", clean | {"after": head}).returncode, 1)
+        self.assertEqual(self.event("push", clean | {"ref": "refs/heads/quokka"}).returncode, 1)
+
+    def test_pushed_annotated_tag_message_is_caught(self) -> None:
+        git(self.dir, "tag", "-a", "v1", "-m", "release for Quokka")
+        tag = git(self.dir, "rev-parse", "refs/tags/v1")
+        payload = {"ref": "refs/tags/v1", "before": "0" * 40, "after": tag}
+        self.assertEqual(self.event("push", payload).returncode, 1)
+
+    def test_ref_deletion_passes(self) -> None:
+        payload = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
+        self.assertEqual(self.event("push", payload).returncode, 0)
+
+    def test_an_event_without_a_scan_fails_closed(self) -> None:
+        self.assertEqual(self.event("workflow_dispatch", {}).returncode, 2)
+
+    def test_an_unexpected_payload_fails_closed(self) -> None:
+        self.assertEqual(self.event("issues", {}).returncode, 2)
+        self.assertEqual(self.event("issues", {"issue": "Quokka"}).returncode, 2)
+        self.assertEqual(run(["event"], self.dir).returncode, 2)
+
+
+class Errors(Repo):
+    def test_a_git_failure_does_not_echo_its_input(self) -> None:
+        self.commit("chore: start")
+        done = run(["range", "0" * 40, "quokka-missing"], self.dir)
+        self.assertEqual(done.returncode, 2)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_a_staged_submodule_name_is_caught_when_git_hides_submodules(self) -> None:
+        head = self.commit("chore: start")
+        git(self.dir, "config", "diff.ignoreSubmodules", "all")
+        git(self.dir, "update-index", "--add", "--cacheinfo", f"160000,{head},quokka-mod")
+        self.assertEqual(run(["staged"], self.dir).returncode, 1)
 
 
 if __name__ == "__main__":

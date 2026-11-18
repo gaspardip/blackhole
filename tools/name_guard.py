@@ -8,6 +8,7 @@ Exit status: 0 clean, 1 a name was found, 2 the guard could not run.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -15,13 +16,15 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
 ZERO = re.compile(r"^0+$")
 GITLINK = "160000"
-RAW = ("--raw", "-z", "--no-renames", "--no-abbrev")
-USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text"
+RAW = ("--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
+WRITERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event"
 
 
 class CannotRun(Exception):
@@ -55,7 +58,8 @@ def load_patterns() -> list[re.Pattern[str]]:
 def git(*args: str) -> bytes:
     done = subprocess.run(["git", *args], capture_output=True, check=False)
     if done.returncode != 0:
-        raise CannotRun(f"git {args[0]} failed: {done.stderr.decode('utf-8', 'replace').strip()}")
+        # git's own message would repeat the arguments, which can hold a rejected name.
+        raise CannotRun(f"git {args[0]} failed with status {done.returncode}")
     return done.stdout
 
 
@@ -67,6 +71,18 @@ def decode(data: bytes) -> str:
 def known(sha: str) -> bool:
     probe = ["git", "cat-file", "-e", f"{sha}^{{commit}}"]
     return subprocess.run(probe, capture_output=True, check=False).returncode == 0
+
+
+def by_writer(item: dict[str, Any]) -> bool:
+    return item["author_association"] in WRITERS
+
+
+def load_event() -> tuple[str, dict[str, Any]]:
+    name = os.environ.get("GITHUB_EVENT_NAME")
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not name or not path:
+        raise CannotRun("no event: GITHUB_EVENT_NAME and GITHUB_EVENT_PATH are not set")
+    return name, json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -129,6 +145,10 @@ class Guard:
         # shortcut: one git process per blob; switch to `cat-file --batch` when the hook gets slow.
         self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
 
+    def texts(self, **labelled: str | None) -> None:
+        for label, text in labelled.items():
+            self.scan(label.replace("_", " "), text or "")
+
     def env_text(self) -> None:
         for key in sorted(os.environ):
             if key.startswith("GUARD_TEXT_"):
@@ -165,6 +185,47 @@ class Guard:
         else:
             self.commits(head, base)
 
+    def tag(self, ref: str, sha: str) -> None:
+        if git("cat-file", "-t", sha).strip() == b"tag":
+            self.scan(f"tag {ref}", decode(git("cat-file", "tag", sha)))
+
+    def event(self, name: str, payload: dict[str, Any]) -> None:
+        """Scans a GitHub event, and only what someone with write access wrote or pushed.
+
+        A public pass or fail on a stranger's text would tell them whether a guessed name is banned.
+        """
+        match name:
+            case "push":
+                ref, after = payload["ref"], payload["after"]
+                self.name("ref", ref)
+                if not ZERO.match(after):
+                    self.tag(ref, after)
+                    self.range(payload["before"], f"{after}^{{commit}}")
+            case "pull_request_target":
+                pull = payload["pull_request"]
+                head = pull["head"]
+                # A head in another repository can be pushed to by people who cannot write here.
+                local = (head["repo"] or {}).get("full_name") == payload["repository"]["full_name"]
+                if by_writer(pull) and local:
+                    self.texts(pull_request_title=pull["title"], pull_request_body=pull["body"])
+                    self.name("ref", head["ref"])
+                    self.range(pull["base"]["sha"], head["sha"])
+            case "issues":
+                issue = payload["issue"]
+                if by_writer(issue):
+                    self.texts(issue_title=issue["title"], issue_body=issue["body"])
+            case "issue_comment":
+                # The issue a comment sits on can be a stranger's, so only the comment is scanned.
+                comment = payload["comment"]
+                if by_writer(comment):
+                    self.texts(comment=comment["body"])
+            case "release":
+                release = payload["release"]
+                self.texts(release_name=release["name"], release_body=release["body"])
+                self.name("ref", release["tag_name"])
+            case _:
+                raise CannotRun("no scan is defined for this event")
+
     def push(self, lines: str) -> None:
         for line in lines.splitlines():
             local_ref, local_sha, remote_ref, remote_sha = line.split()
@@ -172,8 +233,7 @@ class Guard:
             if ZERO.match(local_sha):
                 continue
             self.name("ref", local_ref)
-            if git("cat-file", "-t", local_sha).strip() == b"tag":
-                self.scan(f"tag {remote_ref}", decode(git("cat-file", "tag", local_sha)))
+            self.tag(remote_ref, local_sha)
             if ZERO.match(remote_sha) or not known(remote_sha):
                 self.commits(f"{local_sha}^{{commit}}", "--remotes")
             else:
@@ -195,6 +255,11 @@ def run(argv: list[str]) -> int:
             guard.tree()
         case ["text"]:
             pass
+        case ["event"]:
+            try:
+                guard.event(*load_event())
+            except (KeyError, TypeError, AttributeError, ValueError) as error:
+                raise CannotRun("the event payload is not what GitHub documents") from error
         case _:
             raise CannotRun(USAGE)
     guard.env_text()
