@@ -1,5 +1,5 @@
 use super::{
-    dictionary_types::{informative, unsafe_dictionary},
+    dictionary_types::Resolution,
     function_types::bindings::{symbol, type_declaration},
 };
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
@@ -44,19 +44,20 @@ fn inside_constraint(parent: AstKind<'_>, span: oxc::span::Span) -> bool {
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let resolution = Resolution::default();
     let nodes = ctx.semantic.nodes();
     let mut dictionaries = std::collections::HashSet::new();
     for (id, node) in nodes.iter_enumerated() {
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
             if !matches!(nodes.parent_kind(id), AstKind::TSTypeLiteral(_))
-                && !informative(ctx, &n.type_annotation.type_annotation)
+                && !resolution.informative(ctx, &n.type_annotation.type_annotation)
             {
                 findings.report(n.span.start as usize, None);
             }
             continue;
         }
-        if !unsafe_dictionary(ctx, kind) {
+        if !resolution.unsafe_dictionary(ctx, kind) {
             continue;
         }
         dictionaries.insert(id);

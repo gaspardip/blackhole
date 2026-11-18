@@ -1,4 +1,4 @@
-use super::{dictionary_types::unknown_return, function_types::returns};
+use super::{dictionary_types::Resolution, function_types::returns};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
@@ -11,9 +11,10 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let resolution = Resolution::default();
     for n in ctx.semantic.nodes().iter() {
         if let Some(a) = returns(n.kind())
-            && unknown_return(ctx, &a.type_annotation)
+            && resolution.unknown_return(ctx, &a.type_annotation)
         {
             findings.report(
                 super::function_types::unparen(&a.type_annotation)

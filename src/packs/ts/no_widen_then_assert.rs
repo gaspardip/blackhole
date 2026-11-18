@@ -13,10 +13,7 @@ use oxc::{
     span::GetSpan,
     syntax::node::NodeId,
 };
-use std::{
-    collections::HashSet,
-    ops::ControlFlow::{Break, Continue},
-};
+use std::ops::ControlFlow::{Break, Continue};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-widen-then-assert",
@@ -166,13 +163,12 @@ fn evidence<'a>(
     ctx: &'a TsCtx<'a>,
     expr: &'a Expression<'a>,
     owner: Option<NodeId>,
-    binding: NodeId,
-    bindings: &mut ConstBindings,
+    bindings: &mut ConstBindings<Evidence<'a>>,
 ) -> Option<Evidence<'a>> {
     bindings.walk(
         ctx,
         expr,
-        HashSet::from([binding]),
+        owner,
         |expr| {
             let value = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
@@ -196,6 +192,11 @@ fn evidence<'a>(
                 }
                 AstKind::FormalParameter(p)
                     if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
+                {
+                    p.type_annotation.as_deref()
+                }
+                AstKind::FormalParameterRest(p)
+                    if matches!(p.rest.argument, BindingPattern::BindingIdentifier(_)) =>
                 {
                     p.type_annotation.as_deref()
                 }
@@ -249,7 +250,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some(symbol) = symbol(ctx, ident) else {
             continue;
         };
-        let binding = ctx.semantic.scoping().symbol_declaration(symbol);
+        let Some(binding) = super::function_types::bindings::value_declarations(ctx, symbol).next()
+        else {
+            continue;
+        };
         let AstKind::VariableDeclarator(v) = nodes.kind(binding) else {
             continue;
         };
@@ -274,15 +278,98 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         else {
             continue;
         };
-        if let Some(original) = evidence(
-            ctx,
-            asserted.map_or(init, |(e, _)| e),
-            owner,
-            binding,
-            &mut bindings,
-        ) && narrower(ctx, kind, original, target)
+        if let Some(original) =
+            evidence(ctx, asserted.map_or(init, |(e, _)| e), owner, &mut bindings)
+            && !matches!(original,Evidence::Annotated(t) if v.type_annotation.as_ref().is_some_and(|a|a.type_annotation.node_id()==t.node_id()))
+            && narrower(ctx, kind, original, target)
         {
             findings.report(node.span().start as usize, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{broad_key, broad_record, narrow_record, object};
+    use crate::{
+        engine::{Family, Findings, Rule, Run, TsCtx, run},
+        packs::ts::function_types::contains_unknown,
+    };
+    use oxc::{
+        allocator::{Allocator, ArenaVec},
+        ast::{
+            ast::{TSType, TSTypeName, TSTypeParameterInstantiation},
+            builder::AstBuilder,
+        },
+        span::SPAN,
+    };
+
+    fn inspect(ctx: &TsCtx<'_>, findings: &mut Findings) {
+        let arena = Allocator::default();
+        let b = AstBuilder::new(&arena);
+        let mut input = TSType::new_ts_unknown_keyword(SPAN, &b);
+        let mut key = TSType::new_ts_string_keyword(SPAN, &b);
+        let mut shape = TSType::new_ts_object_keyword(SPAN, &b);
+        let wrap = |name, arg| {
+            TSType::new_ts_type_reference(
+                SPAN,
+                TSTypeName::new_identifier_reference(SPAN, name, &b),
+                Some(TSTypeParameterInstantiation::boxed(
+                    SPAN,
+                    ArenaVec::from_array_in([arg], &b),
+                    &b,
+                )),
+                &b,
+            )
+        };
+        let mut record = TSType::new_ts_type_reference(
+            SPAN,
+            TSTypeName::new_identifier_reference(SPAN, "Record", &b),
+            Some(TSTypeParameterInstantiation::boxed(
+                SPAN,
+                ArenaVec::from_array_in(
+                    [
+                        TSType::new_ts_string_keyword(SPAN, &b),
+                        TSType::new_ts_unknown_keyword(SPAN, &b),
+                    ],
+                    &b,
+                ),
+                &b,
+            )),
+            &b,
+        );
+        for _ in 0..10_000 {
+            input = TSType::new_ts_parenthesized_type(
+                SPAN,
+                TSType::new_ts_union_type(SPAN, ArenaVec::from_array_in([input], &b), &b),
+                &b,
+            );
+            key = TSType::new_ts_union_type(SPAN, ArenaVec::from_array_in([key], &b), &b);
+            shape =
+                TSType::new_ts_intersection_type(SPAN, ArenaVec::from_array_in([shape], &b), &b);
+            record = wrap("Readonly", record);
+        }
+        assert!(contains_unknown(&input));
+        assert!(broad_key(ctx, &key));
+        assert!(object(&shape));
+        assert!(broad_record(ctx, &record));
+        assert!(!narrow_record(ctx, &record));
+        findings.report(0, Some("completed"));
+    }
+
+    #[test]
+    fn deeply_nested_type_nodes_are_walked_without_the_parser() {
+        let rule = Rule {
+            id: "test/depth",
+            family: Family::Types,
+            provenance: "test",
+            fix: "test",
+            run: Run::Ts(inspect),
+        };
+        let hits = run(&[rule], [("depth.ts", b"".as_slice())]);
+        assert_eq!(
+            hits.iter().map(|h| h.note.as_deref()).collect::<Vec<_>>(),
+            [Some("completed")]
+        );
     }
 }

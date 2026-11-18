@@ -84,6 +84,52 @@ fn an_attribute_too_long_to_read_is_reported() {
 }
 
 #[test]
+fn shared_generic_types_keep_their_argument_and_query_results_separate() {
+    let source = b"type Wrapped<T> = { item: T };\ntype Identity<T> = T;\ntype User = Wrapped<string>;\ntype Input = Identity<unknown>;\ntype Count = Identity<number>;\ndeclare function fetch(): Promise<Input>;\ndeclare function count(): Promise<Count>;\n";
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let hits = run(registry(), [("contracts.ts", source.as_slice())]);
+        send.send(
+            hits.into_iter()
+                .map(|h| (h.rule, h.line, h.col))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    });
+    let hits = receive
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(
+        hits,
+        [
+            ("ts/no-unknown-type-aliases", 4, 6),
+            ("ts/no-unknown-returns", 6, 27)
+        ]
+    );
+}
+
+#[test]
+fn a_deep_const_chain_keeps_its_original_type_evidence() {
+    use std::fmt::Write;
+    let mut src = String::from("const item0 = {};\n");
+    for i in 1..=10_000 {
+        writeln!(src, "const item{i} = item{};", i - 1).unwrap();
+    }
+    src.push_str("const widened: unknown = item10000;\nconst user = widened as User;\n");
+    let hits = run(registry(), [("values.ts", src.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.rule, h.line, h.col))
+            .collect::<Vec<_>>(),
+        [
+            ("ts/no-known-value-widening", 10_002, 26),
+            ("ts/no-widen-then-assert", 10_003, 14)
+        ]
+    );
+}
+
+#[test]
 fn parsed_kinds_share_the_decoded_source() {
     for ext in ["TS", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"] {
         let path = format!("file.{ext}");

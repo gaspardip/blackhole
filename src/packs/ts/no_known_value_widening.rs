@@ -1,5 +1,5 @@
 use super::{
-    dictionary_types::{Class, informative, target},
+    dictionary_types::{Class, Resolution},
     function_types::{
         bindings::{ConstBindings, declaration},
         contains_unknown,
@@ -18,10 +18,7 @@ use oxc::{
     },
     span::GetSpan,
 };
-use std::{
-    collections::HashSet,
-    ops::ControlFlow::{self, Break, Continue},
-};
+use std::ops::ControlFlow::{self, Break, Continue};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-known-value-widening",
@@ -43,9 +40,8 @@ fn signature(kind: AstKind<'_>) -> Option<Signature<'_>> {
 fn local_function<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Signature<'a>> {
     let mut callee = expr.get_inner_expression();
     if let Expression::Identifier(id) = callee {
-        let scoping = ctx.semantic.scoping();
         let symbol = super::function_types::bindings::symbol(ctx, id)?;
-        let mut declarations = scoping.symbol_declarations(symbol);
+        let mut declarations = super::function_types::bindings::value_declarations(ctx, symbol);
         let declaration = declarations.next()?;
         if declarations.next().is_some() {
             return None;
@@ -76,17 +72,16 @@ fn value_or_binding<'a>(
     }
 }
 
-fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings, expr: &'a Expression<'a>) -> bool {
+fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings<()>, expr: &'a Expression<'a>) -> bool {
     bindings
-        .walk(ctx, expr, HashSet::new(), value_or_binding, |_, _| {
-            Continue(())
-        })
+        .walk(ctx, expr, None, value_or_binding, |_, _| Continue(()))
         .is_some()
 }
 
 fn guard_argument<'a>(
+    resolution: &Resolution,
     ctx: &TsCtx<'a>,
-    bindings: &mut ConstBindings,
+    bindings: &mut ConstBindings<()>,
     call: &'a CallExpression<'a>,
 ) -> Option<&'a Expression<'a>> {
     let (params, ret) = local_function(ctx, &call.callee)?;
@@ -103,11 +98,11 @@ fn guard_argument<'a>(
     bindings.walk(
         ctx,
         arg,
-        HashSet::new(),
+        None,
         |mut expr| loop {
             expr = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(expr.node_id())) {
-                return Break(informative(ctx, ty).then_some(()));
+                return Break(resolution.informative(ctx, ty).then_some(()));
             }
             match expr {
                 Expression::TSNonNullExpression(n) => expr = &n.expression,
@@ -116,7 +111,7 @@ fn guard_argument<'a>(
                     return Break(
                         local_function(ctx, &n.callee)
                             .and_then(|(_, r)| r)
-                            .is_some_and(|r| informative(ctx, &r.type_annotation))
+                            .is_some_and(|r| resolution.informative(ctx, &r.type_annotation))
                             .then_some(()),
                     );
                 }
@@ -135,7 +130,11 @@ fn guard_argument<'a>(
                 _ => None,
             };
             annotation.map_or(Continue(()), |a| {
-                Break(informative(ctx, &a.type_annotation).then_some(()))
+                Break(
+                    resolution
+                        .informative(ctx, &a.type_annotation)
+                        .then_some(()),
+                )
             })
         },
     )?;
@@ -183,12 +182,13 @@ fn typed_flow<'a>(
 }
 
 fn loses_evidence<'a>(
+    resolution: &Resolution,
     ctx: &TsCtx<'a>,
-    bindings: &mut ConstBindings,
+    bindings: &mut ConstBindings<()>,
     expr: &'a Expression<'a>,
     ty: &'a TSType<'a>,
 ) -> bool {
-    match target(ctx, ty) {
+    match resolution.target(ctx, ty) {
         Class::None => false,
         Class::Dictionary if matches!(expr.get_inner_expression(), Expression::ObjectExpression(n) if n.properties.is_empty()) => {
             false
@@ -198,12 +198,16 @@ fn loses_evidence<'a>(
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let resolution = Resolution::default();
     let mut bindings = ConstBindings::default();
+    let mut guard_bindings = ConstBindings::default();
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         let expression = match node.kind() {
-            AstKind::CallExpression(call) => guard_argument(ctx, &mut bindings, call),
+            AstKind::CallExpression(call) => {
+                guard_argument(&resolution, ctx, &mut guard_bindings, call)
+            }
             kind => typed_flow(ctx, id, kind)
-                .filter(|(expr, ty)| loses_evidence(ctx, &mut bindings, expr, ty))
+                .filter(|(expr, ty)| loses_evidence(&resolution, ctx, &mut bindings, expr, ty))
                 .map(|(expr, _)| expr),
         };
         if let Some(expr) = expression {

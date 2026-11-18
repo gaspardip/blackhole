@@ -1,4 +1,4 @@
-use super::{dictionary_types::object_input, function_types::parameter};
+use super::{dictionary_types::Resolution, function_types::parameter};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
@@ -11,9 +11,10 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let resolution = Resolution::default();
     for node in ctx.semantic.nodes().iter() {
         if let Some((_, ty)) = parameter(node.kind())
-            && object_input(ctx, ty)
+            && resolution.object_input(ctx, ty)
         {
             findings.report(ty.span().start as usize, None);
         }
