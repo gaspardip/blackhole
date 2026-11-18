@@ -65,8 +65,6 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
             return true;
         }
         match e {
-            Expression::AwaitExpression(a) => pending.push(&a.argument),
-            Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
             Expression::CallExpression(c) => {
                 if let Some(m) = invoked(ctx, c).callee.get_member_expr()
                     && matches!(
@@ -84,7 +82,7 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
                     pending.push(m.object());
                 }
             }
-            _ => (),
+            _ => pending.extend(super::values::alternatives(e)),
         }
     }
     false
@@ -130,12 +128,6 @@ pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expressio
             return true;
         }
         match e {
-            Expression::LogicalExpression(l) => {
-                pending.extend([(&l.left, field), (&l.right, field)]);
-            }
-            Expression::ConditionalExpression(c) => {
-                pending.extend([(&c.consequent, field), (&c.alternate, field)]);
-            }
             Expression::ObjectExpression(o) => {
                 for p in &o.properties {
                     match p {
@@ -152,7 +144,7 @@ pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expressio
                     }
                 }
             }
-            _ => (),
+            _ => pending.extend(super::values::alternatives(e).map(|branch| (branch, field))),
         }
     }
     false

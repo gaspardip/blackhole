@@ -118,11 +118,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                 ArrowFunctionBody::FunctionBody(_) => returns(ctx, f.node_id.get(), &mut pending),
                 body => pending.extend(body.as_expression()),
             },
-            Expression::SequenceExpression(s) => pending.extend(s.expressions.last()),
-            Expression::AwaitExpression(a) => pending.push(&a.argument),
-            Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
-            Expression::LogicalExpression(l) => pending.extend([&l.left, &l.right]),
-            _ => (),
+            _ => pending.extend(super::values::alternatives(expr)),
         }
     }
     false
@@ -138,12 +134,14 @@ pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> boo
             let mut pending = vec![&property.value];
             let mut seen = HashSet::new();
             while let Some(expr) = pending.pop() {
-                let Expression::ObjectExpression(obj) = resolve(ctx, expr) else {
-                    continue;
-                };
-                if !seen.insert(obj.span.start) {
+                let expr = resolve(ctx, expr);
+                if !seen.insert(expr.span()) {
                     continue;
                 }
+                let Expression::ObjectExpression(obj) = expr else {
+                    pending.extend(super::values::alternatives(expr));
+                    continue;
+                };
                 for p in &obj.properties {
                     match p {
                         ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),

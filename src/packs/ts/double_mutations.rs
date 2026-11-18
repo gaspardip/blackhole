@@ -78,10 +78,7 @@ fn defines(ctx: &TsCtx<'_>, initial: &Expression<'_>, owner: &str) -> bool {
                     }
                 }
             }
-            Expression::LogicalExpression(l) => pending.extend([&l.left, &l.right]),
-            Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
-            Expression::SequenceExpression(s) => pending.extend(s.expressions.last()),
-            _ => (),
+            _ => pending.extend(super::values::alternatives(expr)),
         }
     }
     false

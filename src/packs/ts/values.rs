@@ -89,6 +89,19 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
     }
 }
 
+pub(super) fn alternatives<'a>(
+    expr: &'a Expression<'a>,
+) -> impl Iterator<Item = &'a Expression<'a>> {
+    let branches = match expr.get_inner_expression() {
+        Expression::AwaitExpression(a) => [Some(&a.argument), None],
+        Expression::ConditionalExpression(c) => [Some(&c.consequent), Some(&c.alternate)],
+        Expression::LogicalExpression(l) => [Some(&l.left), Some(&l.right)],
+        Expression::SequenceExpression(s) => [s.expressions.last(), None],
+        _ => [None, None],
+    };
+    branches.into_iter().flatten()
+}
+
 pub(super) fn resolves_to_global(ctx: &TsCtx<'_>, expr: &Expression<'_>, name: &str) -> bool {
     let Expression::Identifier(id) = resolve(ctx, expr) else {
         return false;

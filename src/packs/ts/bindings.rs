@@ -45,10 +45,7 @@ pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bo
                     });
                 }
             }
-            Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
-            Expression::LogicalExpression(l) => pending.extend([&l.left, &l.right]),
-            Expression::SequenceExpression(s) => pending.extend(s.expressions.last()),
-            _ => (),
+            _ => pending.extend(super::values::alternatives(e)),
         }
     }
     false

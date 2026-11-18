@@ -207,9 +207,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             }
             continue;
         }
-        if let Expression::ConditionalExpression(c) = e {
-            next.extend([&c.consequent, &c.alternate]);
-        }
+        next.extend(super::values::alternatives(e));
         if let Expression::CallExpression(c) = e {
             let callee = resolve(ctx, &c.callee);
             let body = match callee {
