@@ -7,6 +7,31 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn literal_nuls_are_parse_errors_across_encodings() {
+    let text = "\u{feff}// 🌑\nconst \0x = 1;";
+    let encodings = [
+        text.as_bytes()[3..].to_vec(),
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        text.chars()
+            .flat_map(|c| u32::from(c).to_le_bytes())
+            .collect(),
+        text.chars()
+            .flat_map(|c| u32::from(c).to_be_bytes())
+            .collect(),
+    ];
+    for bytes in encodings {
+        let hits = run(registry(), [("a.js", bytes.as_slice())]);
+        assert_eq!(
+            hits.iter()
+                .map(|f| (f.rule, f.line, f.col))
+                .collect::<Vec<_>>(),
+            [("core/unparseable", 2, 7)]
+        );
+    }
+}
+
+#[test]
 fn license_lines_use_ecmascript_line_terminators() {
     for end in ["\n", "\r\n", "\r", "\u{2028}", "\u{2029}"] {
         let text = format!("/* text{end} * @license MIT{end} */ const x = 1;");

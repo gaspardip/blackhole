@@ -78,7 +78,7 @@ pub fn registry() -> &'static [Rule] {
 }
 
 // A UTF-32LE mark starts with the UTF-16LE mark.
-fn decode(bytes: &[u8]) -> String {
+fn decode(bytes: &[u8]) -> (String, Option<usize>) {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let units: Vec<_> = bytes[2..].as_chunks().0.iter().copied().map(unit).collect();
         String::from_utf16_lossy(&units)
@@ -100,8 +100,11 @@ fn decode(bytes: &[u8]) -> String {
         [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     };
-    text.retain(|c| c != '\0');
-    text
+    let nul = text.find('\0');
+    if nul.is_some() {
+        text.retain(|c| c != '\0');
+    }
+    (text, nul)
 }
 
 pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
@@ -165,10 +168,13 @@ pub fn run<'a>(
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let text = decode(bytes);
+        let (text, nul) = decode(bytes);
         let arena = Allocator::default();
         // A parser that panics has not read the file, which is a finding like any other parse failure.
         let parsed = source_type(path).map(|kind| {
+            if let Some(at) = nul {
+                return Err((at, "NUL in source text".to_owned()));
+            }
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 parse(&arena, path, &text, kind)
             }))
