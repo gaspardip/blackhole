@@ -91,6 +91,17 @@ fn a_directive_too_long_to_read_is_reported() {
             "a.c",
             format!("#pragma GCC /*{pad}*/ diagnostic ignored \"-Wunused\"\n"),
         ),
+        (
+            "long.c",
+            format!(
+                "#pragma GCC/*{}*/diagnostic ignored \"-Wunused-variable\"",
+                "x".repeat(4097)
+            ),
+        ),
+        (
+            "long.sh",
+            format!("# shellcheck shell=bash{}disable=SC2086", " ".repeat(4096)),
+        ),
         ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
     ] {
         let found = run(registry(), [(path, text.as_bytes())]);
