@@ -23,9 +23,12 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn check(dir: &Path, args: &[&str], code: i32) -> Output {
+    run(dir, &[&["check"], args].concat(), code)
+}
+
+fn run(dir: &Path, args: &[&str], code: i32) -> Output {
     let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
         .current_dir(dir)
-        .arg("check")
         .args(args)
         .output()
         .unwrap();
@@ -158,14 +161,7 @@ fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
 }
 
 fn regenerate(dir: &Path, code: i32) -> Vec<u8> {
-    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(dir)
-        .arg("ledger")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(code), "{out:?}");
-    assert_eq!(out.stderr, b"");
-    out.stdout
+    run(dir, &["ledger"], code).stdout
 }
 
 #[test]
@@ -189,7 +185,11 @@ fn stale_and_deleted_entries_shrink() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     fs::write(root.join("b.py"), "").unwrap();
     baseline(root, &[("a.py", 2), ("gone.py", 1)]);
-    assert_eq!(check(root,&[],1).stdout,format!("a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\ngone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n").as_bytes());
+    let stale = format!(
+        "a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\n\
+         gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n"
+    );
+    assert_eq!(check(root, &[], 1).stdout, stale.as_bytes());
     assert_eq!(check(root, &["b.py"], 0).stdout, b"");
     assert_eq!(regenerate(root, 0), b"");
     assert_eq!(

@@ -1,8 +1,7 @@
 use blackhole_check::{
     engine::registry,
-    ledger::{Counts, exact, growth, parse, write},
+    ledger::{Counts, excess, growth, parse, write},
 };
-use std::collections::BTreeSet;
 
 const HEADER: &str = "blackhole-ledger 1\n";
 const RULE: &str = "core/no-suppression";
@@ -94,19 +93,9 @@ fn exact_counts() {
         };
         let allowed = rows(base);
         let actual_counts = rows(actual);
-        let diff = exact(&allowed, &actual_counts, None);
-        assert_eq!(!diff.over.is_empty(), over);
-        assert_eq!(!diff.stale.is_empty(), stale);
+        assert_eq!(!excess(&actual_counts, &allowed).is_empty(), over);
+        assert_eq!(!excess(&allowed, &actual_counts).is_empty(), stale);
     }
-    assert!(
-        exact(
-            &entries(&[("a", 1)]),
-            &Counts::new(),
-            Some(&BTreeSet::from(["b"]))
-        )
-        .stale
-        .is_empty()
-    );
 }
 
 #[test]
