@@ -5,15 +5,12 @@ use crate::{
 use oxc::{
     ast::{
         AstKind,
-        ast::{
-            Comment, ExportDefaultDeclarationKind, IdentifierReference, ModuleExportName,
-            TSAccessibility, TSTypeName,
-        },
+        ast::{Comment, Expression, ModuleExportName, TSAccessibility, TSTypeName},
     },
     span::GetSpan,
-    syntax::node::NodeId,
+    syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-comments",
@@ -27,20 +24,26 @@ fn word_end(rest: &str) -> bool {
     !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn js_whitespace(c: char) -> bool {
+    oxc::syntax::identifier::is_white_space(c) || is_line_terminator(c)
+}
+
 fn directive(raw: &str) -> bool {
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
-        .lines()
+        .split(is_line_terminator)
         .map(|line| {
-            line.trim_start().strip_prefix('*').map_or(line, |rest| {
-                rest.strip_prefix(char::is_whitespace).unwrap_or(rest)
-            })
+            line.trim_start_matches(js_whitespace)
+                .strip_prefix('*')
+                .map_or(line, |rest| {
+                    rest.strip_prefix(js_whitespace).unwrap_or(rest)
+                })
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let value = value.trim();
-    let first = value.split_whitespace().next().unwrap_or("");
+    let value = value.trim_matches(js_whitespace);
+    let (first, argument) = value.split_once(js_whitespace).unwrap_or((value, ""));
     matches!(
         first,
         "eslint-enable"
@@ -79,18 +82,19 @@ fn directive(raw: &str) -> bool {
         || (matches!(
             first,
             "@jsx" | "@jsxFrag" | "@jsxImportSource" | "@jsxRuntime"
-        ) && value.split_whitespace().nth(1).is_some())
+        ) && !argument.is_empty())
         || value.strip_prefix('/').is_some_and(|v| {
-            matches!(
-                v.split_whitespace().next(),
-                Some("<reference" | "<amd-module" | "<amd-dependency")
-            ) && v.trim_start().contains(char::is_whitespace)
+            v.trim_start_matches(js_whitespace)
+                .split_once(js_whitespace)
+                .is_some_and(|(tag, _)| {
+                    matches!(tag, "<reference" | "<amd-module" | "<amd-dependency")
+                })
         })
         || value.strip_prefix('#').is_some_and(|v| {
-            v.trim_start().starts_with("sourceURL=")
-                || v.trim_start().starts_with("sourceMappingURL=")
+            let v = v.trim_start_matches(js_whitespace);
+            v.starts_with("sourceURL=") || v.starts_with("sourceMappingURL=")
         })
-        || value.lines().any(|v| {
+        || value.split('\n').any(|v| {
             v.starts_with("SPDX-License-Identifier:")
                 || v.strip_prefix("@license").is_some_and(word_end)
         })
@@ -112,21 +116,6 @@ fn hidden(kind: AstKind<'_>) -> bool {
     ) || key.is_private_identifier()
 }
 
-fn exposed(ctx: &TsCtx<'_>, id: NodeId, declarations: &HashSet<NodeId>) -> bool {
-    let nodes = ctx.semantic.nodes();
-    for ancestor in std::iter::once(id).chain(nodes.ancestor_ids(id)) {
-        if declarations.contains(&ancestor) {
-            return true;
-        }
-        if hidden(nodes.kind(ancestor))
-            || matches!(nodes.parent_kind(ancestor), AstKind::ArrowFunctionExpression(n) if n.body.node_id() == ancestor)
-        {
-            return false;
-        }
-    }
-    false
-}
-
 fn member(kind: AstKind<'_>) -> bool {
     matches!(
         kind,
@@ -144,25 +133,6 @@ fn member(kind: AstKind<'_>) -> bool {
     )
 }
 
-fn local_export(
-    ctx: &TsCtx<'_>,
-    ident: &IdentifierReference<'_>,
-    declarations: &mut HashSet<NodeId>,
-) {
-    let scoping = ctx.semantic.scoping();
-    let nodes = ctx.semantic.nodes();
-    if let Some(symbol) = scoping.get_root_binding(ident.name) {
-        for id in scoping.symbol_declarations(symbol) {
-            if let Some(top) = std::iter::once(id)
-                .chain(nodes.ancestor_ids(id))
-                .find(|n| matches!(nodes.parent_kind(*n), AstKind::Program(_)))
-            {
-                declarations.insert(top);
-            }
-        }
-    }
-}
-
 fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     let nodes = ctx.semantic.nodes();
     let ambient = ctx.program.source_type.is_typescript_definition()
@@ -172,6 +142,8 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             .iter()
             .any(oxc::ast::ast::Statement::is_module_declaration);
     let mut declarations = HashSet::new();
+    let scoping = ctx.semantic.scoping();
+    let mut bindings = HashSet::new();
     for (id, node) in nodes
         .iter_enumerated()
         .filter(|(id, _)| matches!(nodes.parent_kind(*id), AstKind::Program(_)))
@@ -181,13 +153,17 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             AstKind::ExportNamedDeclaration(n) => {
                 for spec in &n.specifiers {
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
-                        local_export(ctx, r, &mut declarations);
+                        bindings.extend(scoping.get_root_binding(r.name));
                     }
                 }
             }
             AstKind::ExportDefaultDeclaration(n) => {
-                if let ExportDefaultDeclarationKind::Identifier(r) = &n.declaration {
-                    local_export(ctx, r, &mut declarations);
+                if let Some(Expression::Identifier(r)) = n
+                    .declaration
+                    .as_expression()
+                    .map(Expression::without_parentheses)
+                {
+                    bindings.extend(scoping.get_root_binding(r.name));
                 }
             }
             _ => {}
@@ -206,39 +182,121 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             declarations.insert(id);
         }
     }
-    loop {
-        let size = declarations.len();
-        for (id, node) in nodes.iter_enumerated() {
-            if let AstKind::TSTypeReference(r) = node.kind()
-                && let TSTypeName::IdentifierReference(name) = &r.type_name
-                && exposed(ctx, id, &declarations)
-                && let Some(symbol) = name
-                    .reference_id
-                    .get()
-                    .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
-            {
-                declarations.extend(ctx.semantic.scoping().symbol_declarations(symbol).filter(
-                    |id| {
-                        matches!(
-                            nodes.kind(*id),
-                            AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
-                        )
-                    },
-                ));
-            }
-        }
-        if size == declarations.len() {
-            return declarations;
+    if bindings.is_empty() {
+        return declarations;
+    }
+    // Semantic nodes are in preorder, so a node inherits its parent's top-level statement.
+    let mut tops: Vec<NodeId> = Vec::with_capacity(nodes.len());
+    for (id, _) in nodes.iter_enumerated() {
+        let parent = nodes.parent_id(id);
+        let top = match nodes.kind(parent) {
+            AstKind::Program(_) => id,
+            _ => tops[parent.index()],
+        };
+        tops.push(top);
+    }
+    for symbol in bindings {
+        for id in scoping.symbol_declarations(symbol) {
+            declarations.insert(tops[id.index()]);
         }
     }
+    declarations
+}
+
+struct Exposure {
+    owners: Vec<Option<NodeId>>,
+    public: HashSet<NodeId>,
+}
+
+impl Exposure {
+    fn can_document(&self, id: NodeId, kind: AstKind<'_>) -> bool {
+        self.public.contains(&id)
+            || member(kind)
+                && self
+                    .owners
+                    .get(id.index())
+                    .copied()
+                    .flatten()
+                    .is_some_and(|owner| self.public.contains(&owner))
+    }
+}
+
+fn type_declaration(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
+    )
+}
+
+fn exposure(ctx: &TsCtx<'_>) -> Exposure {
+    let nodes = ctx.semantic.nodes();
+    let mut public = public_declarations(ctx);
+    if public.is_empty() {
+        return Exposure {
+            owners: Vec::new(),
+            public,
+        };
+    }
+    let mut owners = vec![None; nodes.len()];
+    let mut references: HashMap<NodeId, HashSet<_>> = HashMap::new();
+    let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
+    for (id, node) in nodes.iter_enumerated() {
+        let kind = node.kind();
+        let parent = nodes.parent_id(id);
+        let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
+        let owner = if public.contains(&id) || type_declaration(kind) {
+            if let Some(parent_owner) = inherited {
+                edges.entry(parent_owner).or_default().push(id);
+            }
+            id
+        } else if let Some(owner) = inherited {
+            owner
+        } else {
+            continue;
+        };
+        owners[id.index()] = Some(owner);
+        if let AstKind::TSTypeReference(r) = kind
+            && let TSTypeName::IdentifierReference(name) = &r.type_name
+            && let Some(symbol) = name
+                .reference_id
+                .get()
+                .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
+        {
+            references.entry(owner).or_default().insert(symbol);
+        }
+    }
+    let mut expanded = HashSet::new();
+    let mut pending: Vec<_> = public.iter().copied().collect();
+    while let Some(owner) = pending.pop() {
+        for symbol in references
+            .remove(&owner)
+            .into_iter()
+            .flatten()
+            .filter(|s| expanded.insert(*s))
+        {
+            pending.extend(
+                ctx.semantic
+                    .scoping()
+                    .symbol_declarations(symbol)
+                    .filter(|id| type_declaration(nodes.kind(*id)) && public.insert(*id)),
+            );
+        }
+        if let Some(targets) = edges.remove(&owner) {
+            pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
+        }
+    }
+    Exposure { owners, public }
 }
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
     let end = ctx.comments.partition_point(|c| c.span.end <= start);
     for c in ctx.comments[..end].iter().rev() {
+        // From the back, so code in between ends the scan before a long gap is read again.
         if !ctx.text[c.span.end as usize..start as usize]
-            .trim()
-            .is_empty()
+            .chars()
+            .rev()
+            .all(js_whitespace)
         {
             return None;
         }
@@ -260,9 +318,9 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
 fn warning(comment: &Comment, raw: &str) -> bool {
     comment.is_line()
         && raw
-            .trim_start()
+            .trim_start_matches(js_whitespace)
             .strip_prefix("WARNING:")
-            .is_some_and(|v| !v.trim().is_empty())
+            .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
@@ -278,26 +336,42 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         })
         .map(|c| c.span.start)
         .collect();
-    let declarations = public_declarations(ctx);
+    let exposure = exposure(ctx);
     let documented: HashSet<_> = ctx
         .semantic
         .nodes()
         .iter_enumerated()
-        .filter(|(id, n)| {
-            declarations.contains(id)
-                || (member(n.kind()) && exposed(ctx, *id, &declarations))
+        .filter_map(|(id, n)| {
+            let parent = ctx.semantic.nodes().parent_kind(id);
+            let start = if let AstKind::ExportDefaultDeclaration(export) = parent
+                && let Some(expr) = export.declaration.as_expression()
+            {
+                // ESTree elides parentheses but keeps TypeScript assertions as expression nodes.
+                let inner = expr.without_parentheses();
+                if matches!(inner, Expression::Identifier(_)) {
+                    return None;
+                }
+                inner.span().start
+            } else if exposure.can_document(id, n.kind())
                 || matches!(
-                    ctx.semantic.nodes().parent_kind(*id),
+                    parent,
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
                 )
+            {
+                n.span().start
+            } else {
+                return None;
+            };
+            doc_before(ctx, start, &directives)
         })
-        .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
     for c in ctx.comments {
-        if !directives.contains(&c.span.start)
-            && !documented.contains(&c.span.start)
-            && !warning(c, c.content_span().source_text(ctx.text))
-        {
+        if directives.contains(&c.span.start) {
+            continue;
+        }
+        let allowed = documented.contains(&c.span.start)
+            || warning(c, c.content_span().source_text(ctx.text));
+        if !allowed || suppressed_comment(c.span.source_text(ctx.text)) {
             findings.report(c.span.start as usize, None);
         }
     }

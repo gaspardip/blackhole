@@ -8,12 +8,17 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::File(check),
 };
 
+const JS_KINDS: &[&str] = &[
+    "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "astro",
+];
+// Coverage tools and legacy ESLint read these directives from raw source lines.
+const RAW_JS_PATTERNS: &[&str] = &["c8 ignore", "v8 ignore", "node:coverage", "/*~eslint-env"];
+
 // Patterns are lowercase. A tilde permits a gap, a space requires one, and a star is the rest of the line.
 const PATTERNS: &[(&[&str], &[&str])] = &[
+    (JS_KINDS, RAW_JS_PATTERNS),
     (
-        &[
-            "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "astro",
-        ],
+        JS_KINDS,
         &[
             "eslint-disable",
             "/*~eslint ",
@@ -28,13 +33,9 @@ const PATTERNS: &[(&[&str], &[&str])] = &[
             "$flowfixme",
             "$flowexpectederror",
             "istanbul ignore",
-            "c8 ignore",
-            "v8 ignore",
-            "node:coverage",
             "/*~exported ",
             "/*~global ",
             "/*~globals ",
-            "/*~eslint-env",
         ],
     ),
     (
@@ -653,11 +654,29 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     }
     let patterns: Vec<_> = listed(kind).collect();
     if let Some(comments) = ctx.comments {
+        let mut previous = 0;
         for comment in comments {
             let span = comment.span;
             let start = span.start as usize;
+            scan_patterns(
+                &text[previous..start],
+                RAW_JS_PATTERNS,
+                kind,
+                previous,
+                &[],
+                hits,
+            );
             scan_patterns(span.source_text(&text), &patterns, kind, start, &[], hits);
+            previous = span.end as usize;
         }
+        scan_patterns(
+            &text[previous..],
+            RAW_JS_PATTERNS,
+            kind,
+            previous,
+            &[],
+            hits,
+        );
     } else {
         scan_patterns(&text, &patterns, kind, 0, &origin, hits);
     }
