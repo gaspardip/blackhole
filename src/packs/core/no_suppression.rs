@@ -66,7 +66,6 @@ const PATTERNS: &[(&[&str], &[&str])] = &[
     (
         &["go"],
         &[
-            "//~nolint",
             "//~lint:ignore",
             "//~lint:file-ignore",
             "#~nosec",
@@ -177,8 +176,6 @@ const ATTRIBUTES: &[&[&str]] = &[
     // Warn lowers a lint that the manifest denies; levels belong in the manifest.
     &["warn", "("],
     &["coverage", "(", "off"],
-    &["tarpaulin", "::", "skip"],
-    &["cfg", "(", "not", "(", "tarpaulin"],
 ];
 
 // The codecs that read ASCII text as it is written.
@@ -201,57 +198,102 @@ fn reach(text: &str) -> &str {
     &text[..text.floor_char_boundary(4096)]
 }
 
-// A C compiler joins a line ending in a backslash to the next one, and reads a comment as a space, before it reads a pragma.
-fn skip(mut text: &str, gaps: bool) -> &str {
+// The text ran out, or ran past the window, before it could be read.
+struct End;
+
+// A C compiler joins a line ending in a backslash to the next one before it reads anything else, a comment delimiter included.
+fn splices(mut text: &str) -> &str {
+    while let Some(rest) = text
+        .strip_prefix('\\')
+        .or_else(|| text.strip_prefix("??/"))
+        // GCC and Clang drop these between the backslash and the line break.
+        .map(|line| line.trim_start_matches([' ', '\t', '\u{b}', '\u{c}', '\0']))
+        .and_then(|line| {
+            // Clang reads a line feed and a carriage return, in either order, as one line break.
+            line.strip_prefix("\r\n")
+                .or_else(|| line.strip_prefix("\n\r"))
+                .or_else(|| line.strip_prefix(['\r', '\n']))
+        })
+    {
+        text = rest;
+    }
+    text
+}
+
+fn pair(text: &str, first: char, second: char) -> Option<&str> {
+    splices(text.strip_prefix(first)?).strip_prefix(second)
+}
+
+// A C compiler reads a comment as a space before it reads a pragma.
+fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     loop {
-        let mut rest = ["\\\n", "\\\r\n", "??/\n", "??/\r\n"]
-            .iter()
-            .find_map(|splice| text.strip_prefix(splice))
-            .unwrap_or(text);
+        let mut rest = splices(text);
         if gaps {
             // The tools read a byte order mark as whitespace too.
             rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-            if let Some(inner) = rest.strip_prefix("/*")
-                && let Some(end) = reach(inner).find("*/")
-            {
-                rest = &inner[end + 2..];
+            if let Some(inner) = pair(rest, '/', '*') {
+                let window = reach(inner);
+                let close = window.match_indices('*').find_map(|(at, _)| {
+                    let after = pair(&window[at..], '*', '/')?;
+                    Some((&window[at..window.len() - after.len()], after))
+                });
+                match close {
+                    // Not every compiler reads a trigraph, or a line feed and a carriage return as one line break. One that does not reads on to a later end, so the text after this one has two readings.
+                    Some((closer, _)) if closer.contains("??/") || closer.contains("\n\r") => {
+                        return Err(End);
+                    }
+                    Some((_, after)) => rest = &inner[window.len() - after.len()..],
+                    // A comment that closes past the window could hide the rest of a directive.
+                    None if window.len() < inner.len() => return Err(End),
+                    None => {}
+                }
             }
         }
         if rest.len() == text.len() {
-            return text;
+            return Ok(text);
         }
         text = rest;
     }
 }
 
-fn matches(text: &str, pattern: &str) -> bool {
+fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
     let mut rest = text;
     let mut tokens = pattern.chars();
     while let Some(token) = tokens.next() {
         if token == '*' {
-            let line = reach(rest).split('\n').next().unwrap_or(rest);
-            return line
-                .char_indices()
-                .any(|(at, _)| matches(&rest[at..], tokens.as_str()));
+            let window = reach(rest);
+            let line = window.split('\n').next().unwrap_or(window);
+            for (at, _) in line.char_indices() {
+                if matches(&rest[at..], tokens.as_str(), kind)? {
+                    return Ok(true);
+                }
+            }
+            // A line that runs past the window could hold the rest of a directive.
+            return if line.len() < rest.len() && line.len() == window.len() {
+                Err(End)
+            } else {
+                Ok(false)
+            };
         }
         let gaps = matches!(token, '~' | ' ');
-        let after = skip(rest, gaps);
+        if matches!(kind, "java" | "cs") {
+            // A name ends where its letters do, so these fall away around every token; a byte order mark before a gap is the gap.
+            rest = rest.trim_start_matches(|c| ignorable(c, kind) && !(gaps && c == '\u{feff}'));
+        }
+        let after = skip(rest, gaps)?;
         if token == ' ' && after.len() == rest.len() {
-            return false;
+            return Ok(false);
         }
         rest = after;
         if !gaps {
             let Some(after) = rest.strip_prefix(token) else {
-                return false;
+                return Ok(false);
             };
             rest = after;
         }
     }
-    true
+    Ok(true)
 }
-
-// The text ran out before the attribute could be read.
-struct End;
 
 // Whitespace and comments may sit between any two tokens of an attribute.
 fn trivia(mut text: &str) -> Result<&str, End> {
@@ -311,39 +353,53 @@ fn rust(text: &str, hits: &mut Findings) {
     for (start, _) in text.match_indices('#') {
         let rest = &text[start + 1..];
         let window = reach(rest);
-        if attribute(start, window, hits).is_err() && window.len() < rest.len() {
-            hits.report(start, Some("attribute too long to read"));
+        let cut = window.len() < rest.len();
+        let opened = trivia(window)
+            .and_then(|after| tokens(after.strip_prefix('!').unwrap_or(after), &["["]));
+        let unread = match opened {
+            Ok(None) => false,
+            Ok(Some(body)) => attribute(start, window, body, hits).is_err(),
+            // Text that ends before an attribute opens holds none.
+            Err(End) => cut,
+        };
+        if unread {
+            // An attribute that opened and cannot be read to its end may hold anything.
+            let note = if cut {
+                "directive too long to read"
+            } else {
+                "unreadable attribute"
+            };
+            hits.report(start, Some(note));
         }
     }
 }
 
-fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End> {
-    let after = trivia(window)?;
-    let Some(body) = tokens(after.strip_prefix('!').unwrap_or(after), &["["])? else {
-        return Ok(());
-    };
-    if suppresses(body)? {
-        hits.report(start, None);
-    } else if let Some(arguments) = tokens(body, &["cfg_attr", "("])? {
-        conditional(start + 1, window, arguments, hits)?;
-    }
-    Ok(())
+fn word(text: &str) -> &str {
+    text.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
-// `window` starts at byte `base` of the file and `arguments` is its tail after the opening parenthesis.
-fn conditional(base: usize, window: &str, arguments: &str, hits: &mut Findings) -> Result<(), End> {
+fn attribute(start: usize, window: &str, body: &str, hits: &mut Findings) -> Result<(), End> {
+    let conditional = tokens(body, &["cfg_attr", "("])?.is_some();
+    let mut positions = Vec::new();
+    if suppresses(body)? {
+        positions.push(start);
+    }
     let mut depth = 1;
-    let mut rest = arguments;
+    let mut rest = body;
     while depth > 0 {
         rest = trivia(rest)?;
         let mut chars = rest.chars();
         match chars.next() {
-            Some('(') => depth += 1,
-            Some(')') => depth -= 1,
-            Some(',') => {
+            Some(c) if !c.is_ascii() => {
+                hits.report(start, Some("unreadable attribute"));
+                return Ok(());
+            }
+            Some('[') => depth += 1,
+            Some(']') => depth -= 1,
+            Some(',') if conditional => {
                 let item = trivia(chars.as_str())?;
                 if suppresses(item)? {
-                    hits.report(base + window.len() - item.len(), None);
+                    positions.push(start + 1 + window.len() - item.len());
                 }
             }
             Some('\'') => {
@@ -360,28 +416,44 @@ fn conditional(base: usize, window: &str, arguments: &str, hits: &mut Findings) 
                 }
             }
             Some('"') => {
-                let before = &window[..window.len() - rest.len()];
-                let prefix = before.trim_end_matches('#');
-                let word = prefix.trim_end_matches(|c: char| c == '_' || c.is_alphanumeric());
-                if matches!(&prefix[word.len()..], "r" | "br" | "cr") {
-                    let close = format!("\"{}", &before[prefix.len()..]);
-                    let inside = chars.as_str();
-                    chars = inside[inside.find(&close).ok_or(End)? + close.len()..].chars();
-                } else {
-                    loop {
-                        match chars.next().ok_or(End)? {
-                            '\\' => {
-                                chars.next();
-                            }
-                            '"' => break,
-                            _ => {}
+                loop {
+                    match chars.next().ok_or(End)? {
+                        '\\' => {
+                            chars.next();
                         }
+                        '"' => break,
+                        _ => {}
                     }
+                }
+                // A suffix belongs to the literal, or its letters would read as the prefix of the next one.
+                chars = word(chars.as_str()).chars();
+            }
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                let tail = word(rest);
+                let name = &rest[..rest.len() - tail.len()];
+                let quoted = tail.trim_start_matches('#');
+                let hashes = &tail[..tail.len() - quoted.len()];
+                if let Some(inside) = quoted.strip_prefix('"')
+                    && matches!(name, "r" | "br" | "cr")
+                {
+                    let close = format!("\"{hashes}");
+                    let end = inside.find(&close).ok_or(End)? + close.len();
+                    chars = word(&inside[end..]).chars();
+                } else {
+                    if matches!(name, "tarpaulin" | "tarpaulin_include")
+                        && !positions.contains(&start)
+                    {
+                        positions.push(start);
+                    }
+                    chars = tail.chars();
                 }
             }
             _ => {}
         }
         rest = chars.as_str();
+    }
+    for position in positions {
+        hits.report(position, None);
     }
     Ok(())
 }
@@ -408,8 +480,37 @@ fn encoding(text: &str, hits: &mut Findings) {
     }
 }
 
+// golangci-lint drops every leading slash and space of a comment before it looks for the directive.
+fn nolint(text: &str, hits: &mut Findings) {
+    for (start, _) in text.match_indices("//") {
+        // A longer run of slashes opens one comment.
+        if text[..start].ends_with('/') {
+            continue;
+        }
+        let rest = &text[start..];
+        let window = reach(rest);
+        let comment = window.trim_start_matches(|c: char| c == '/' || c.is_whitespace());
+        if comment.starts_with("nolint") {
+            hits.report(start, None);
+        } else if window.len() < rest.len() && "nolint".starts_with(comment) {
+            // The window ended before the word did.
+            hits.report(start, Some("directive too long to read"));
+        }
+    }
+}
+
+// Java and C# drop these from a name: Unicode General_Category=Cf, and for Java some ISO controls as well.
+fn ignorable(c: char, kind: &str) -> bool {
+    matches!(u32::from(c), 0xad | 0x600..=0x605 | 0x61c | 0x6dd | 0x70f | 0x890..=0x891 |
+        0x8e2 | 0x180e | 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 |
+        0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd |
+        0x13430..=0x1343f | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a |
+        0xe0001 | 0xe0020..=0xe007f)
+        || kind == "java" && matches!(u32::from(c), 0..=8 | 14..=27 | 127..=159)
+}
+
 // The character a Java or C# Unicode escape stands for, and the escape's length.
-fn escape(text: &str) -> Option<(char, usize)> {
+fn escape_unit(text: &str) -> Option<(u32, usize)> {
     let tail = text.strip_prefix('\\')?;
     let (digits, width) = match tail.strip_prefix('U') {
         Some(long) => (long, 8),
@@ -419,8 +520,21 @@ fn escape(text: &str) -> Option<(char, usize)> {
     if !code.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let ch = char::from_u32(u32::from_str_radix(code, 16).ok()?)?;
+    let ch = u32::from_str_radix(code, 16).ok()?;
     Some((ch, text.len() - digits.len() + width))
+}
+
+fn escape(text: &str) -> Option<(char, usize)> {
+    let (first, len) = escape_unit(text)?;
+    if let Some(ch) = char::from_u32(first) {
+        return Some((ch, len));
+    }
+    let (second, next) = escape_unit(&text[len..])?;
+    if !(0xd800..=0xdbff).contains(&first) || !(0xdc00..=0xdfff).contains(&second) {
+        return None;
+    }
+    let scalar = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+    Some((char::from_u32(scalar)?, len + next))
 }
 
 // Java and C# read an escape as the character itself before they read an annotation.
@@ -443,25 +557,46 @@ fn unescape(text: &str) -> (String, Vec<usize>) {
     (out, origin)
 }
 
-fn script_kind(text: &str) -> Option<&'static str> {
-    let line = text
-        .lines()
-        .next()?
-        .strip_prefix("#!")?
-        .to_ascii_lowercase();
-    // Any word may be the interpreter: env takes options, assignments and a quoted command before it.
-    line.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
-        .find_map(|word| {
-            let name = word.rsplit('/').next()?;
-            match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
-                "sh" | "bash" | "dash" | "ksh" => Some("sh"),
-                "python" | "pypy" => Some("py"),
-                "node" | "nodejs" | "deno" | "bun" | "ts-node" | "tsx" => Some("js"),
-                "ruby" => Some("rb"),
-                "php" => Some("php"),
-                _ => None,
+fn interpreter(word: &str) -> Option<&'static str> {
+    let name = word.rsplit('/').next()?.to_ascii_lowercase();
+    match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
+        "sh" | "bash" | "dash" | "ksh" => Some("sh"),
+        "python" | "pypy" => Some("py"),
+        "node" | "nodejs" | "deno" | "bun" | "ts-node" | "tsx" => Some("js"),
+        "ruby" => Some("rb"),
+        "php" => Some("php"),
+        _ => None,
+    }
+}
+
+fn script_kinds(text: &str) -> Vec<&'static str> {
+    let Some(line) = text.lines().next().and_then(|line| line.strip_prefix("#!")) else {
+        return Vec::new();
+    };
+    let words = line
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
+        .filter(|word| !word.is_empty());
+    let mut args = words.clone();
+    let env_options = args.next().and_then(|path| path.rsplit('/').next()) == Some("env")
+        && args.any(|word| word.starts_with('-'));
+    if !env_options {
+        return words.clone().find_map(interpreter).into_iter().collect();
+    }
+    let mut kinds = Vec::new();
+    for word in words {
+        for piece in word.split('=') {
+            // The command follows -S, and short options can be bundled in front of S, so the text after each S is a candidate too.
+            let bundled = piece.match_indices('S').map(|(at, _)| &piece[at + 1..]);
+            for candidate in piece.split("-S").chain(bundled) {
+                if let Some(kind) = interpreter(candidate)
+                    && !kinds.contains(&kind)
+                {
+                    kinds.push(kind);
+                }
             }
-        })
+        }
+    }
+    kinds
 }
 
 fn listed(kind: &str) -> impl Iterator<Item = &'static str> {
@@ -488,9 +623,17 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
                         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
                 })
                 .map(|_| "dockerfile")
-        })
-        .or_else(|| script_kind(ctx.text));
-    let Some(kind) = kind else { return };
+        });
+    if let Some(kind) = kind {
+        check_kind(kind, ctx, hits);
+    } else {
+        for kind in script_kinds(ctx.text) {
+            check_kind(kind, ctx, hits);
+        }
+    }
+}
+
+fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     if kind == "rs" {
         // Rust attributes are case-sensitive, and so is the prefix of a raw string.
         rust(ctx.text, hits);
@@ -505,46 +648,56 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
     if matches!(kind, "py" | "pyi") {
         encoding(&text, hits);
     }
+    if kind == "go" {
+        nolint(&text, hits);
+    }
     let patterns: Vec<_> = listed(kind).collect();
     if let Some(comments) = ctx.comments {
         for comment in comments {
             let span = comment.span;
-            scan_patterns(
-                span.source_text(&text),
-                &patterns,
-                span.start as usize,
-                &[],
-                hits,
-            );
+            let start = span.start as usize;
+            scan_patterns(span.source_text(&text), &patterns, kind, start, &[], hits);
         }
     } else {
-        scan_patterns(&text, &patterns, 0, &origin, hits);
+        scan_patterns(&text, &patterns, kind, 0, &origin, hits);
     }
 }
 
 pub(crate) fn suppressed_comment(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
     let patterns: Vec<_> = listed("ts").collect();
-    pattern_offsets(&text, &patterns).next().is_some()
+    // A directive too long to read counts, so such a comment never passes as documentation.
+    pattern_hits(&text, &patterns, "ts").next().is_some()
 }
 
-fn pattern_offsets<'a>(text: &'a str, patterns: &'a [&str]) -> impl Iterator<Item = usize> + 'a {
+// Each offset where a directive starts, with a note when it could not be read to its end.
+fn pattern_hits<'a>(
+    text: &'a str,
+    patterns: &'a [&str],
+    kind: &'a str,
+) -> impl Iterator<Item = (usize, Option<&'static str>)> + 'a {
     text.char_indices().filter_map(move |(offset, first)| {
-        patterns
-            .iter()
-            .any(|p| p.starts_with(first) && matches(&text[offset..], p))
-            .then_some(offset)
+        let mut unread = None;
+        for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
+            match matches(&text[offset..], pattern, kind) {
+                Ok(true) => return Some((offset, None)),
+                Ok(false) => {}
+                Err(End) => unread = Some("directive too long to read"),
+            }
+        }
+        unread.map(|note| (offset, Some(note)))
     })
 }
 
 fn scan_patterns(
     text: &str,
     patterns: &[&str],
+    kind: &str,
     start: usize,
     origin: &[usize],
     hits: &mut Findings,
 ) {
-    for offset in pattern_offsets(text, patterns) {
-        hits.report(origin.get(offset).copied().unwrap_or(start + offset), None);
+    for (offset, note) in pattern_hits(text, patterns, kind) {
+        hits.report(origin.get(offset).copied().unwrap_or(start + offset), note);
     }
 }

@@ -105,7 +105,10 @@ fn git_variables_cannot_point_at_another_repository() {
     let root = dir.path();
     let other = repo();
     fs::write(root.join("bad.py"), "#noqa").unwrap();
+    let excludes = other.path().join("excludes");
+    fs::write(&excludes, "bad.py\n").unwrap();
     for (name, value) in [
+        ("GIT_COMMON_DIR", other.path().join(".git")),
         ("GIT_DIR", other.path().join(".git")),
         ("GIT_WORK_TREE", other.path().to_owned()),
         ("GIT_INDEX_FILE", other.path().join("index")),
@@ -113,6 +116,9 @@ fn git_variables_cannot_point_at_another_repository() {
         let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
             .current_dir(root)
             .env(name, value)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.excludesFile")
+            .env("GIT_CONFIG_VALUE_0", &excludes)
             .arg("check")
             .output()
             .unwrap();
@@ -215,6 +221,40 @@ fn stale_and_deleted_entries_shrink() {
 }
 
 #[test]
+fn a_selection_keeps_the_rows_of_files_that_are_gone() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/clean.py"), "").unwrap();
+    fs::create_dir(root.join("empty")).unwrap();
+    fs::write(root.join("other.py"), "").unwrap();
+    baseline(
+        root,
+        &[
+            ("empty/gone.py", 1),
+            ("gone.py", 1),
+            ("gone/deep/file.py", 1),
+            ("sub/gone.py", 1),
+            ("subway/gone.py", 1),
+        ],
+    );
+    let stale = format!("sub/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["sub"], 1).stdout, stale.as_bytes());
+    assert_eq!(check(&root.join("sub"), &["."], 1).stdout, stale.as_bytes());
+    assert_eq!(check(root, &["other.py"], 0).stdout, b"");
+    let stale = format!("empty/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["empty"], 1).stdout, stale.as_bytes());
+    let stale =
+        format!("gone/deep/file.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    for path in ["gone", "gone/deep/file.py"] {
+        assert_eq!(check(root, &[path], 1).stdout, stale.as_bytes(), "{path}");
+    }
+    for path in ["nowhere", "nowhere/deep.py", "gone/../other.py", ".."] {
+        check(root, &[path], 2);
+    }
+}
+
+#[test]
 fn absent_baseline() {
     let dir = repo();
     let root = dir.path();
@@ -248,8 +288,8 @@ fn over_blocks_the_shrink() {
 #[test]
 fn regeneration_waits_for_the_lock() {
     let other = repo();
-    // A caller's git variables must not move the lock away from the ledger it guards.
-    for separate in [false, true] {
+    // Neither the caller's git variables nor a second repository on the same tree may move the lock away from the ledger it guards.
+    for case in ["plain", "variables", "nested"] {
         let dir = repo();
         let root = dir.path();
         fs::write(root.join("a.py"), "#noqa").unwrap();
@@ -258,14 +298,23 @@ fn regeneration_waits_for_the_lock() {
         lock.lock().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_blackhole"));
         command.current_dir(root).arg("ledger");
-        if separate {
+        if case == "variables" {
             command
                 .env("GIT_DIR", other.path().join(".git"))
                 .env("GIT_WORK_TREE", root);
         }
+        if case == "nested" {
+            git(root, &["init", "-q", "nested"]);
+            let nested = root.join("nested");
+            git(
+                &nested,
+                &["config", "core.worktree", root.to_str().unwrap()],
+            );
+            command.current_dir(nested);
+        }
         let mut child = command.spawn().unwrap();
         thread::sleep(Duration::from_millis(500));
-        assert!(child.try_wait().unwrap().is_none(), "{separate}");
+        assert!(child.try_wait().unwrap().is_none(), "{case}");
         assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
         lock.unlock().unwrap();
         assert!(child.wait().unwrap().success());
@@ -274,6 +323,35 @@ fn regeneration_waits_for_the_lock() {
             format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
         );
     }
+}
+
+#[test]
+fn the_root_is_found_once() {
+    let dir = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("a.py"), "#noqa").unwrap();
+    baseline(root, &[("sub/a.py", 2)]);
+    let inner = baseline(&sub, &[("a.py", 2)]);
+    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(&sub)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    // A repository that appears under the tree while the writer waits must not become its root.
+    git(&sub, &["init", "-q"]);
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read(sub.join(".blackhole/ledger")).unwrap(), inner);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
 }
 
 #[cfg(unix)]
@@ -287,9 +365,14 @@ fn a_linked_lock_is_refused() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     let before = baseline(root, &[("a.py", 2)]);
     std::os::unix::fs::symlink(&victim, root.join(".git/blackhole.lock")).unwrap();
-    run(root, &["ledger"], 2);
+    regenerate(root, 2);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+    let absent = other.path().join("absent");
+    fs::remove_file(root.join(".git/blackhole.lock")).unwrap();
+    std::os::unix::fs::symlink(&absent, root.join(".git/blackhole.lock")).unwrap();
+    regenerate(root, 2);
+    assert!(!absent.try_exists().unwrap());
 }
 
 #[test]
@@ -421,6 +504,20 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
 }
 
 #[test]
+fn ci_is_behind_when_head_lacks_base() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    fs::write(root.join("b.py"), "pass").unwrap();
+    commit(root);
+    assert_eq!(
+        run(root, &["ci", "--base", "HEAD", "--head", "HEAD~"], 1).stdout,
+        b"head does not contain base; update the branch\nblackhole ci: red (behind)\n"
+    );
+}
+
+#[test]
 fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     let dir = repo();
     let root = dir.path();
@@ -452,6 +549,24 @@ fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains(&format!("objection: {RULE} b.py:")));
     assert!(stdout.ends_with("blackhole ci: red (findings, objections, protected)\n"));
+}
+
+#[test]
+fn ci_reads_attributes_from_the_base_commit() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "x = 1  # noqa\ny = 2\nz = 3\n").unwrap();
+    baseline(root, &[("a.py", 1)]);
+    commit(root);
+    fs::remove_file(root.join("a.py")).unwrap();
+    fs::write(root.join("b.py"), "x = 1  # noqa\r\ny = 2\r\nz = 3\r\n").unwrap();
+    baseline(root, &[("b.py", 1)]);
+    commit(root);
+    let ci = ["ci", "--base", "HEAD~", "--head", "HEAD"];
+    run(root, &ci, 0);
+    // Git compares a file line by line, and so sees this rename, only while its attributes call it text.
+    fs::write(root.join(".gitattributes"), "*.py -diff\n").unwrap();
+    run(root, &ci, 0);
 }
 
 #[cfg(unix)]

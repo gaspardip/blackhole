@@ -78,7 +78,7 @@ fn an_attribute_too_long_to_read_is_reported() {
     let found = run(registry(), [("a.rs", text.as_bytes())]);
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].line, found[0].col), (1, 1));
-    assert_eq!(found[0].note.as_deref(), Some("attribute too long to read"));
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
     let short = format!("{}[/*{}*/allow(dead_code)]", '#', "y".repeat(50));
     assert_eq!(run(registry(), [("a.rs", short.as_bytes())])[0].note, None);
 }
@@ -143,4 +143,151 @@ fn jsx_is_read_in_every_javascript_kind() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn a_directive_too_long_to_read_is_reported() {
+    let pad = "y".repeat(5000);
+    for (path, text) in [
+        (
+            "a.c",
+            format!("#pragma GCC /*{pad}*/ diagnostic ignored \"-Wunused\"\n"),
+        ),
+        (
+            "long.sh",
+            format!("# shellcheck shell=bash{}disable=SC2086", " ".repeat(4096)),
+        ),
+        ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
+        ("a.go", format!("//{}nolint\n", " ".repeat(4096))),
+        ("cut.go", format!("//{}nolint\n", " ".repeat(4091))),
+        ("a.ts", format!("/** {pad} */\nexport const a = 1;\n")),
+    ] {
+        let found = run(registry(), [(path, text.as_bytes())]);
+        assert_eq!(found.len(), 1, "{path}");
+        assert_eq!(
+            found[0].note.as_deref(),
+            Some("directive too long to read"),
+            "{path}"
+        );
+    }
+    // A comment that never closes before the end of the file hides nothing.
+    assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
+}
+
+#[test]
+fn utf32_directives_have_character_coordinates() {
+    for encode in [u32::to_be_bytes, u32::to_le_bytes] {
+        let text = "\u{feff}//\n🌑é#pragma warning disable CS0001";
+        let bytes: Vec<_> = text.chars().flat_map(|c| encode(u32::from(c))).collect();
+        let found = run(registry(), [("example.cs", bytes.as_slice())]);
+        assert_eq!(
+            found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
+            [(2, 3)]
+        );
+    }
+}
+
+#[test]
+fn c_splices_inside_directive_tokens() {
+    for splice in [
+        "\\\r",
+        "\\ \n",
+        "??/\t\r\n",
+        "\\\u{c}\n",
+        "\\\u{b}\n",
+        "\\\0\n",
+        "\\\n\r",
+    ] {
+        for text in [
+            format!("#pragma GCC diagnostic ign{splice}ored \"-Wunused-variable\""),
+            format!("#pragma GCC /* note *{splice}/ diagnostic ignored \"-Wunused-variable\""),
+            format!("#pragma GCC /{splice}* note */ diagnostic ignored \"-Wunused-variable\""),
+        ] {
+            assert_eq!(
+                run(registry(), [("x.c", text.as_bytes())]).len(),
+                1,
+                "{text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_comment_only_some_compilers_close_is_reported() {
+    for closer in ["*??/\n/", "*\\\n\r/"] {
+        let text =
+            format!("#pragma GCC /* x {closer} y */ diagnostic ignored \"-Wunused-variable\"");
+        let found = run(registry(), [("x.c", text.as_bytes())]);
+        assert_eq!(found.len(), 1, "{closer:?}");
+        assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
+    }
+}
+
+#[test]
+fn an_attribute_that_never_closes_is_reported() {
+    let text = format!("{}[doc = \"open\nfn f() {{}}\n", '#');
+    let found = run(registry(), [("a.rs", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].line, found[0].col), (1, 1));
+    assert_eq!(found[0].note.as_deref(), Some("unreadable attribute"));
+}
+
+#[test]
+fn window_cut_inside_attribute_token() {
+    let text = format!("{}[{}allow(dead_code)]", '#', " ".repeat(4091));
+    let found = run(registry(), [("x.rs", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
+}
+
+#[test]
+fn env_options_can_name_multiple_interpreters() {
+    let scripts = [
+        "-Spython3",
+        "--split-string=python3",
+        "-S -u /bin/bash python3",
+        "-iSpython3",
+        "-S /opt/bin/python3-S -I",
+    ]
+    .map(|options| format!("#!/usr/bin/env {options}\n# noqa\n"));
+    let lines = scripts.map(|text| {
+        run(registry(), [("script", text.as_bytes())])
+            .into_iter()
+            .map(|f| f.line)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(lines, [(); 5].map(|()| vec![2]));
+    // An interpreter's own name can hold the letter that ends the options.
+    for options in ["-S BASH -e", "-iSBASH"] {
+        let text = format!("#!/usr/bin/env {options}\n# shellcheck disable=SC2086\n");
+        let found = run(registry(), [("script", text.as_bytes())]);
+        assert_eq!(found.len(), 1, "{options}");
+    }
+}
+
+#[test]
+fn long_c_pragma_comment_is_reported() {
+    let text = format!(
+        "#pragma GCC/*{}*/diagnostic ignored \"-Wunused-variable\"",
+        "x".repeat(4097)
+    );
+    let found = run(registry(), [("long.c", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
+}
+
+#[test]
+fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
+    let found = run(
+        registry(),
+        [(
+            "a.cs",
+            "#pragma\u{feff}warning disable CS0168\n[Suppress\u{feff}Message(\"x\", \"y\")]\n#pragma\u{200b} warning\u{200b}\u{feff}\u{200b}disable CS0168\n#nullable\u{ad} disable\n"
+                .as_bytes(),
+        )],
+    );
+    assert_eq!(
+        found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
+        [(1, 1), (2, 2), (3, 1), (4, 1)]
+    );
 }

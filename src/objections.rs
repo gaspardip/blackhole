@@ -28,45 +28,36 @@ impl Date {
             - 1
     }
 
+    /// The date that many days after 1970-01-01.
+    #[must_use]
+    pub fn from_unix_days(days: u32) -> Option<Self> {
+        let first = |year, month| Self {
+            year,
+            month,
+            day: 1,
+        };
+        let target = first(1970, 1).day_number() + i64::from(days);
+        // No year is shorter than 365 days, so the date cannot fall after this one.
+        let latest = 1970 + i32::try_from(days / 365).ok()?;
+        let start = (1970..=latest)
+            .rev()
+            .flat_map(|year| (1..=12).rev().map(move |month| first(year, month)))
+            .find(|start| start.day_number() <= target)?;
+        Some(Self {
+            day: u32::try_from(target - start.day_number() + 1).ok()?,
+            ..start
+        })
+    }
+
     pub(crate) fn today() -> io::Result<Self> {
-        let days = SystemTime::now()
+        let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
-            .as_secs()
-            / 86400;
-        let epoch = Self {
-            year: 1970,
-            month: 1,
-            day: 1,
-        }
-        .day_number();
-        let target = epoch + i64::try_from(days).map_err(io::Error::other)?;
-        let mut year = 1970 + i32::try_from(days / 365).map_err(io::Error::other)?;
-        while (Self {
-            year,
-            month: 1,
-            day: 1,
-        })
-        .day_number()
-            > target
-        {
-            year -= 1;
-        }
-        for month in (1..=12).rev() {
-            let first = Self {
-                year,
-                month,
-                day: 1,
-            };
-            if first.day_number() <= target {
-                return Ok(Self {
-                    day: u32::try_from(target - first.day_number() + 1)
-                        .map_err(io::Error::other)?,
-                    ..first
-                });
-            }
-        }
-        Err(io::Error::other("invalid system date"))
+            .as_secs();
+        u32::try_from(seconds / 86400)
+            .ok()
+            .and_then(Self::from_unix_days)
+            .ok_or_else(|| io::Error::other("invalid system date"))
     }
 }
 
@@ -121,6 +112,17 @@ impl Objection {
     pub fn live(&self, today: Date) -> bool {
         (0..=30).contains(&(today.day_number() - self.renewal.unwrap_or(self.filed).day_number()))
     }
+
+    // The one spelling of a row, whoever writes it.
+    pub(crate) fn line(&self, key: &Key) -> String {
+        let renewal = self
+            .renewal
+            .map_or_else(|| "-".to_owned(), |date| date.to_string());
+        format!(
+            "{}\t{}\t{}\t{}\t{renewal}\t{}\n",
+            key.0, key.1, self.extra, self.filed, self.reason
+        )
+    }
 }
 
 pub type Rows = BTreeMap<Key, Objection>;
@@ -170,10 +172,7 @@ pub fn parse(bytes: &[u8], today: Date) -> io::Result<Rows> {
         if ledger::invalid_path(path) || !engine::can_allow(engine::registry(), rule) {
             return Err(err("invalid rule or path"));
         }
-        let extra = count.parse().map_err(|_| err("invalid count"))?;
-        if count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(err("invalid count"));
-        }
+        let extra = ledger::count_of(count).ok_or_else(|| err("invalid count"))?;
         let filed = filed.parse().map_err(|_| err("invalid filed date"))?;
         let renewal = (renewal != "-")
             .then(|| renewal.parse())

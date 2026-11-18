@@ -1,5 +1,5 @@
 {
-  "author": "author",
+  "authors": ["author"],
   "reviews": [
     {
       "login": "AUTHOR",

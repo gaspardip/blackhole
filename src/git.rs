@@ -1,6 +1,7 @@
-use crate::verdict::Change;
+use crate::verdict::{Change, Kind};
 use std::{
     collections::BTreeMap,
+    env,
     io::{self, BufRead, BufReader, Read, Write},
     process::{Child, ChildStdout, Command, Output, Stdio},
 };
@@ -8,13 +9,10 @@ use std::{
 // The caller's git variables must not point at another repository or index, and a replace ref must not swap an object.
 pub(crate) fn command() -> Command {
     let mut command = Command::new("git");
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-    ] {
-        command.env_remove(name);
+    for (name, _) in env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(name);
+        }
     }
     command.arg("--no-replace-objects");
     command
@@ -36,20 +34,17 @@ pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
         Err(failure(&out))
     }
 }
-fn run(args: &[&str]) -> io::Result<Vec<u8>> {
-    output(command().args(args))
+fn run(args: &[&str]) -> io::Result<String> {
+    String::from_utf8(output(command().args(args))?).map_err(io::Error::other)
 }
 pub(crate) fn commit(rev: &str) -> io::Result<String> {
-    let bytes = run(&[
+    let name = run(&[
         "rev-parse",
         "--verify",
         "--end-of-options",
         &format!("{rev}^{{commit}}"),
     ])?;
-    Ok(std::str::from_utf8(&bytes)
-        .map_err(io::Error::other)?
-        .trim_end()
-        .into())
+    Ok(name.trim_end().into())
 }
 pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
     let out = command()
@@ -71,11 +66,8 @@ pub(crate) struct Tree(BTreeMap<String, Entry>);
 impl Tree {
     pub(crate) fn load(sha: &str) -> io::Result<Self> {
         let mut entries = BTreeMap::new();
-        let bytes = run(&["ls-tree", "--full-tree", "-r", "-t", "-z", sha])?;
-        for line in std::str::from_utf8(&bytes)
-            .map_err(io::Error::other)?
-            .split_terminator('\0')
-        {
+        let listing = run(&["ls-tree", "--full-tree", "-r", "-t", "-z", sha])?;
+        for line in listing.split_terminator('\0') {
             let (header, path) = line
                 .split_once('\t')
                 .ok_or_else(|| io::Error::other("invalid git tree"))?;
@@ -149,6 +141,8 @@ impl Tree {
 
 pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
     let raw = run(&[
+        // A rename is scored by the attributes of its files, and the working tree's are not part of either commit.
+        &format!("--attr-source={base}"),
         "diff",
         "--no-ext-diff",
         "--no-textconv",
@@ -159,9 +153,7 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
         head,
         "--",
     ])?;
-    let mut fields = std::str::from_utf8(&raw)
-        .map_err(io::Error::other)?
-        .split_terminator('\0');
+    let mut fields = raw.split_terminator('\0');
     let mut changes = Vec::new();
     while let Some(status) = fields.next() {
         let mut path = || {
@@ -170,8 +162,17 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
                 .map(str::to_owned)
                 .ok_or_else(|| io::Error::other("incomplete git diff"))
         };
-        let old = status.starts_with('R').then(&mut path).transpose()?;
-        changes.push(Change { old, path: path()? });
+        let kind = match status.as_bytes().first() {
+            Some(b'A') => Kind::Added,
+            Some(b'D') => Kind::Deleted,
+            Some(b'M' | b'T') => Kind::Edited,
+            Some(b'R') => Kind::Moved(path()?),
+            _ => return Err(io::Error::other("unexpected git diff status")),
+        };
+        changes.push(Change {
+            kind,
+            path: path()?,
+        });
     }
     Ok(changes)
 }
@@ -221,7 +222,6 @@ impl Batch {
         Ok(bytes)
     }
     pub(crate) fn finish(mut self) -> io::Result<()> {
-        drop(self.child.stdin.take());
         if self.child.wait()?.success() {
             Ok(())
         } else {
@@ -231,7 +231,6 @@ impl Batch {
 }
 impl Drop for Batch {
     fn drop(&mut self) {
-        drop(self.child.stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
