@@ -63,3 +63,24 @@ pub(super) fn single<'a>(
 pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
+
+pub(super) fn chain_property(e: &Expression<'_>, wanted: impl Fn(&str) -> bool) -> Option<usize> {
+    let mut current = e;
+    loop {
+        current = current.get_inner_expression();
+        if let Some(m) = current.as_member_expression() {
+            if let Some((span, key)) = m.static_property_info()
+                && key.as_str().is_some_and(&wanted)
+            {
+                return Some(span.start as usize);
+            }
+            current = m.object();
+            continue;
+        }
+        match current {
+            Expression::CallExpression(c) => current = &c.callee,
+            Expression::TaggedTemplateExpression(t) => current = &t.tag,
+            _ => return None,
+        }
+    }
+}
