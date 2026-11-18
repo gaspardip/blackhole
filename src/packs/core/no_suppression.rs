@@ -232,6 +232,12 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
 }
 
 fn matches(text: &str, pattern: &str) -> Result<bool, End> {
+    if pattern == "//~nolint" {
+        return Ok(text.strip_prefix("//").is_some_and(|tail| {
+            tail.trim_start_matches(|c: char| c == '/' || c.is_whitespace())
+                .starts_with("nolint")
+        }));
+    }
     let mut rest = text;
     let mut tokens = pattern.chars();
     while let Some(token) = tokens.next() {
