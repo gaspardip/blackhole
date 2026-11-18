@@ -7,9 +7,11 @@ pub mod ledger;
 pub mod objections;
 mod packs {
     pub(crate) mod ts {
+        pub(crate) mod dictionary_types;
         pub(crate) mod no_chained_type_assertions;
         pub(crate) mod no_comments;
         pub(crate) mod no_explicit_any;
+        pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_widen_then_assert;
     }

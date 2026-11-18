@@ -135,7 +135,7 @@ fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
     })
 }
 
-fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<NodeId> {
+pub(super) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<NodeId> {
     let scopes = ctx.semantic.scoping();
     let symbol = scopes
         .get_reference(ident.reference_id.get()?)
@@ -143,7 +143,7 @@ fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<NodeI
     Some(scopes.symbol_declaration(symbol))
 }
 
-fn immutable(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>, id: NodeId) -> bool {
+pub(super) fn immutable(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>, id: NodeId) -> bool {
     let scopes = ctx.semantic.scoping();
     matches!(ctx.semantic.nodes().parent_kind(id),AstKind::VariableDeclaration(v) if v.kind == VariableDeclarationKind::Const)
         && ident
