@@ -24,14 +24,7 @@ use oxc::{
 };
 use std::collections::HashSet;
 
-pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
-    match ty {
-        TSType::TSUnknownKeyword(_) => true,
-        TSType::TSParenthesizedType(n) => contains_unknown(&n.type_annotation),
-        TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
-        _ => false,
-    }
-}
+use super::function_types::contains_unknown;
 
 type Signature<'a> = (&'a FormalParameters<'a>, Option<&'a TSTypeAnnotation<'a>>);
 fn signature(kind: AstKind<'_>) -> Option<Signature<'_>> {
