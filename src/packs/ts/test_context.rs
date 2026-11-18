@@ -185,7 +185,7 @@ impl<'a> Invocation<'a> {
         self.args
             .iter()
             .flatten()
-            .find_map(|arg| match arg.get_inner_expression() {
+            .find_map(|arg| match super::values::unwrapped(arg) {
                 Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
                 Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
                 _ => None,

@@ -97,9 +97,7 @@ pub(super) fn initializer<'a>(
     }
 }
 
-pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
-    let mut seen = HashSet::new();
-    let mut aliases = Vec::new();
+pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     loop {
         expr = expr.get_inner_expression();
         if let Expression::ChainExpression(chain) = expr
@@ -114,6 +112,15 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
             expr = last;
             continue;
         }
+        return expr;
+    }
+}
+
+pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    let mut seen = HashSet::new();
+    let mut aliases = Vec::new();
+    loop {
+        expr = unwrapped(expr);
         let Expression::Identifier(id) = expr else {
             break;
         };

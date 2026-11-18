@@ -1,8 +1,16 @@
 use blackhole_check::engine::{registry, run};
 
+const TEST_FILE: &str = "case.test.ts";
+const WRAPPERS: &[(&str, &str)] = &[
+    ("paren", "(VALUE)"),
+    ("comma", "(0,VALUE)"),
+    ("as", "((VALUE) as any)"),
+    ("satisfies", "((VALUE) satisfies any)"),
+    ("nonnull", "(VALUE)!"),
+];
+
 struct Row {
     rule: &'static str,
-    file: &'static str,
     path: &'static str,
     args: &'static str,
     module: &'static str,
@@ -26,15 +34,34 @@ fn cases(row: &Row) -> Vec<(String, String)> {
             ),
         ));
     };
-    for (label, callee) in [
-        ("dot", p.to_owned()),
-        ("paren", format!("({p})")),
-        ("comma", format!("(0,{p})")),
-        ("as", format!("({p} as any)")),
-        ("satisfies", format!("({p} satisfies any)")),
-        ("nonnull", format!("({p})!")),
-    ] {
+    add("dot", String::new(), format!("{p}({a})"));
+    for &(label, wrapper) in WRAPPERS {
+        let callee = wrapper.replace("VALUE", p);
         add(label, String::new(), format!("{callee}({a})"));
+        if let Some((owner, key)) = p.rsplit_once('.') {
+            let object = wrapper.replace("VALUE", owner);
+            let key_expr = wrapper.replace("VALUE", &format!("'{key}'"));
+            add(
+                &format!("{label} object"),
+                String::new(),
+                format!("{object}.{key}({a})"),
+            );
+            add(
+                &format!("{label} key"),
+                String::new(),
+                format!("{owner}[{key_expr}]({a})"),
+            );
+        }
+        for (slot, value) in [("options", row.options), ("callback", row.callback)] {
+            if !value.is_empty() {
+                let args = a.replace(value, &wrapper.replace("VALUE", value));
+                add(
+                    &format!("{label} {slot}"),
+                    String::new(),
+                    format!("{p}({args})"),
+                );
+            }
+        }
     }
     add("optional call", String::new(), format!("{p}?.({a})"));
     add("whole call", String::new(), format!("({p}({a}))"));
@@ -55,14 +82,9 @@ fn cases(row: &Row) -> Vec<(String, String)> {
     if let Some((o, k)) = p.rsplit_once('.') {
         for (label, callee) in [
             ("bracket", format!("{o}[\"{k}\"]")),
-            ("wrapped key", format!("{o}[(\"{k}\")]")),
             ("template", format!("{o}[\u{60}{k}\u{60}]")),
             ("nonnull within chain", format!("({o}?.{k}!)")),
             ("optional member", format!("{o}?.{k}")),
-            ("wrapped object", format!("({o}).{k}")),
-            ("as object", format!("({o} as any).{k}")),
-            ("satisfies object", format!("({o} satisfies any).{k}")),
-            ("nonnull object", format!("{o}!.{k}")),
         ] {
             add(label, String::new(), format!("{callee}({a})"));
         }
@@ -85,7 +107,12 @@ fn cases(row: &Row) -> Vec<(String, String)> {
         );
     }
     if row.prelude.is_empty() {
-        for root in ["window", "globalThis"] {
+        add(
+            "global alias",
+            "const g=globalThis;".into(),
+            format!("g.{p}({a})"),
+        );
+        for root in ["window", "globalThis", "self"] {
             add(root, String::new(), format!("{root}.{p}({a})"));
         }
     }
@@ -136,31 +163,19 @@ fn arguments_and_imports(row: &Row, add: &mut impl FnMut(&str, String, String)) 
             );
         }
     }
-    if !row.callback.is_empty() {
-        add(
-            "wrapped callback",
-            String::new(),
-            format!(
-                "{p}({})",
-                a.replace(row.callback, &format!("({})", row.callback))
-            ),
-        );
-    }
 }
 const ROWS: &[Row] = &[
     Row {
-        file: "case.test.ts",
         rule: "no-test-doubles",
         path: "Object.assign",
         args: "window,{fetch:fake}",
         module: "",
         prelude: "",
         context: "CALL",
-        options: "",
+        options: "{fetch:fake}",
         callback: "",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-test-doubles",
         path: "vi.mock",
         args: "'client'",
@@ -171,7 +186,6 @@ const ROWS: &[Row] = &[
         callback: "",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-flake-masking",
         path: "vi.setConfig",
         args: "{retry:2}",
@@ -182,7 +196,6 @@ const ROWS: &[Row] = &[
         callback: "",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-skipped-tests",
         path: "test.skip",
         args: "'x',f",
@@ -193,7 +206,6 @@ const ROWS: &[Row] = &[
         callback: "f",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-fixed-sleep",
         path: "scheduler.wait",
         args: "1",
@@ -204,7 +216,6 @@ const ROWS: &[Row] = &[
         callback: "",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-unsignaled-poll",
         path: "vi.waitFor",
         args: "()=>expect(calls).toHaveLength(1)",
@@ -215,7 +226,6 @@ const ROWS: &[Row] = &[
         callback: "()=>expect(calls).toHaveLength(1)",
     },
     Row {
-        file: "case.test.ts",
         rule: "no-assertionless-tests",
         path: "test",
         args: "'x',()=>{}",
@@ -226,7 +236,6 @@ const ROWS: &[Row] = &[
         callback: "()=>{}",
     },
     Row {
-        file: "case.test.ts",
         rule: "strict-msw",
         path: "server.listen",
         args: "",
@@ -245,7 +254,6 @@ const ROWS: &[Row] = &[
         prelude: "",
         options: "",
         callback: "()=>calls.length",
-        file: "case.test.ts",
     },
     Row {
         rule: "no-fixed-sleep",
@@ -256,7 +264,6 @@ const ROWS: &[Row] = &[
         prelude: "",
         options: "",
         callback: "",
-        file: "case.test.ts",
     },
     Row {
         rule: "no-flake-masking",
@@ -267,7 +274,6 @@ const ROWS: &[Row] = &[
         prelude: "",
         options: "",
         callback: "",
-        file: "case.test.ts",
     },
     Row {
         rule: "no-flake-masking",
@@ -278,7 +284,6 @@ const ROWS: &[Row] = &[
         prelude: "",
         options: "{retries:2}",
         callback: "",
-        file: "case.test.ts",
     },
     Row {
         rule: "no-flake-masking",
@@ -289,7 +294,6 @@ const ROWS: &[Row] = &[
         prelude: "",
         options: "{retry:2}",
         callback: "f",
-        file: "case.test.ts",
     },
     Row {
         rule: "strict-msw",
@@ -300,9 +304,55 @@ const ROWS: &[Row] = &[
         prelude: "import {setupWorker} from 'msw/browser';const worker=setupWorker();",
         options: "{onUnhandledRequest:'bypass'}",
         callback: "",
-        file: "case.test.ts",
+    },
+    Row {
+        rule: "no-fixed-sleep",
+        path: "setTimeout",
+        args: "r,100",
+        module: "",
+        prelude: "",
+        context: "test('x',async()=>{await new Promise(r=>CALL);assert(ok())})",
+        options: "",
+        callback: "r",
+    },
+    Row {
+        rule: "no-skipped-tests",
+        path: "test",
+        args: "'x',{skip:true},fn",
+        module: "node:test",
+        prelude: "",
+        context: "CALL",
+        options: "{skip:true}",
+        callback: "fn",
+    },
+    Row {
+        rule: "strict-msw",
+        path: "(m?.setupServer()!).listen",
+        args: "",
+        module: "",
+        prelude: "import * as m from 'msw/node';",
+        context: "CALL",
+        options: "",
+        callback: "",
     },
 ];
+
+const ENV_ROWS: &[(&str, &str)] = &[("import.meta.env", "MODE"), ("process.env", "NODE_ENV")];
+
+fn environment_cases(owner: &str, key: &str) -> Vec<String> {
+    let mut cases = vec![format!("const env={owner}; env.{key} === 'test';")];
+    for &(_, wrapper) in WRAPPERS {
+        let object = wrapper.replace("VALUE", owner);
+        let member = wrapper.replace("VALUE", &format!("'{key}'"));
+        let read = wrapper.replace("VALUE", &format!("{owner}.{key}"));
+        cases.extend([
+            format!("{object}.{key} === 'test'"),
+            format!("{owner}[{member}] === 'test'"),
+            format!("{read} === 'test'"),
+        ]);
+    }
+    cases
+}
 
 #[test]
 fn spellings() {
@@ -311,7 +361,7 @@ fn spellings() {
     for row in ROWS {
         for (label, source) in cases(row) {
             count += 1;
-            if !run(registry(), [(row.file, source.as_bytes())])
+            if !run(registry(), [(TEST_FILE, source.as_bytes())])
                 .iter()
                 .any(|h| h.rule.strip_prefix("ts/") == Some(row.rule))
             {
@@ -319,14 +369,18 @@ fn spellings() {
             }
         }
     }
-    let chained = "import * as m from 'msw/node'; (m?.setupServer()!).listen()";
-    assert!(
-        run(registry(), [("chain.test.ts", chained.as_bytes())])
-            .iter()
-            .any(|h| h.rule == "ts/strict-msw"),
-        "{chained}"
-    );
-    eprintln!("{} call spellings", count + 1);
+    for &(owner, key) in ENV_ROWS {
+        for source in environment_cases(owner, key) {
+            count += 1;
+            if !run(registry(), [("src/env.ts", source.as_bytes())])
+                .iter()
+                .any(|h| h.rule == "ts/no-test-aware-code")
+            {
+                missing.push(source);
+            }
+        }
+    }
+    eprintln!("{} rows, {count} spellings", ROWS.len() + ENV_ROWS.len());
     assert!(
         missing.is_empty(),
         "{} of {count} missing:\n{}",
