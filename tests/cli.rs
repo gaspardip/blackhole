@@ -406,7 +406,13 @@ fn a_broken_entry_on_the_way_is_not_a_directory_that_is_gone() {
 #[test]
 fn a_path_of_many_missing_directories_is_an_error() {
     let dir = repo();
-    check(dir.path(), &[&format!("{}f.py", "x/".repeat(60_000))], 2);
+    let root = dir.path();
+    check(root, &[&format!("{}f.py", "x/".repeat(60_000))], 2);
+    // A name too long to look at is not a directory that is gone, even with a row under it.
+    let long = format!("gone/{}f.py", "x/".repeat(60_000));
+    baseline(root, &[(&long, 1)]);
+    fs::write(root.join("gone"), "").unwrap();
+    check(root, &[&long], 2);
 }
 
 #[test]
