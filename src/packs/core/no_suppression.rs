@@ -8,26 +8,17 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::File(check),
 };
 
-// Patterns are lowercase. A tilde permits a gap, a space requires one, and a star is the rest of the line.
 const JS_KINDS: &[&str] = &[
     "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "astro",
 ];
-#[derive(Clone, Copy, PartialEq)]
-enum Scope {
-    Comments,
-    Raw,
-}
+// Coverage tools and legacy ESLint read these directives from raw source lines.
+const RAW_JS_PATTERNS: &[&str] = &["c8 ignore", "v8 ignore", "node:coverage", "/*~eslint-env"];
 
-type PatternGroup = (&'static [&'static str], Scope, &'static [&'static str]);
-const PATTERNS: &[PatternGroup] = &[
+// Patterns are lowercase. A tilde permits a gap, a space requires one, and a star is the rest of the line.
+const PATTERNS: &[(&[&str], &[&str])] = &[
+    (JS_KINDS, RAW_JS_PATTERNS),
     (
         JS_KINDS,
-        Scope::Raw,
-        &["c8 ignore", "v8 ignore", "node:coverage", "/*~eslint-env"],
-    ),
-    (
-        JS_KINDS,
-        Scope::Comments,
         &[
             "eslint-disable",
             "/*~eslint ",
@@ -49,7 +40,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["py", "pyi"],
-        Scope::Raw,
         &[
             "#~noqa",
             "#~type~:~ignore",
@@ -76,7 +66,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["go"],
-        Scope::Raw,
         &[
             "//~lint:ignore",
             "//~lint:file-ignore",
@@ -87,7 +76,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["rb", "rake", "gemspec"],
-        Scope::Raw,
         &[
             "rubocop~:~disable",
             "rubocop~:~todo",
@@ -98,7 +86,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["java", "kt", "kts"],
-        Scope::Raw,
         &[
             "suppresswarnings",
             "suppress~(",
@@ -113,7 +100,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["cs"],
-        Scope::Raw,
         &[
             "#~pragma warning disable",
             "suppressmessage",
@@ -124,7 +110,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "m", "mm"],
-        Scope::Raw,
         &[
             "nolint",
             "gcc diagnostic ignored",
@@ -142,10 +127,9 @@ const PATTERNS: &[PatternGroup] = &[
             "gcovr_excl",
         ],
     ),
-    (&["swift"], Scope::Raw, &["swiftlint:disable"]),
+    (&["swift"], &["swiftlint:disable"]),
     (
         &["php"],
-        Scope::Raw,
         &[
             "@phpstan-ignore",
             "phpcs:ignore",
@@ -156,19 +140,13 @@ const PATTERNS: &[PatternGroup] = &[
             "suppresswarnings",
         ],
     ),
-    (
-        &["sh", "bash", "dash", "ksh"],
-        Scope::Raw,
-        &["shellcheck *disable~="],
-    ),
+    (&["sh", "bash", "dash", "ksh"], &["shellcheck *disable~="]),
     (
         &["css", "scss", "less", "vue", "svelte", "astro"],
-        Scope::Raw,
         &["stylelint-disable"],
     ),
     (
         &["yaml", "yml"],
-        Scope::Raw,
         &[
             "yamllint disable",
             "#~noqa",
@@ -178,7 +156,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["dockerfile"],
-        Scope::Raw,
         &[
             "hadolint ignore~=",
             "hadolint global ignore~=",
@@ -187,7 +164,6 @@ const PATTERNS: &[PatternGroup] = &[
     ),
     (
         &["md", "mdx"],
-        Scope::Raw,
         &[
             "<!--~markdownlint-disable",
             "<!--~markdownlint-configure-file",
@@ -624,14 +600,11 @@ fn script_kinds(text: &str) -> Vec<&'static str> {
     kinds
 }
 
-fn groups(kind: &str) -> impl Iterator<Item = &'static PatternGroup> {
+fn listed(kind: &str) -> impl Iterator<Item = &'static str> {
     PATTERNS
         .iter()
-        .filter(move |(kinds, _, _)| kinds.contains(&kind))
-}
-
-fn listed(kind: &str) -> impl Iterator<Item = &'static str> {
-    groups(kind).flat_map(|(_, _, patterns)| patterns.iter().copied())
+        .filter(move |(kinds, _)| kinds.contains(&kind))
+        .flat_map(|(_, patterns)| patterns.iter().copied())
 }
 
 fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
@@ -681,19 +654,29 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     }
     let patterns: Vec<_> = listed(kind).collect();
     if let Some(comments) = ctx.comments {
-        let raw: Vec<_> = groups(kind)
-            .filter(|(_, scope, _)| *scope == Scope::Raw)
-            .flat_map(|(_, _, p)| p.iter().copied())
-            .collect();
         let mut previous = 0;
         for comment in comments {
             let span = comment.span;
             let start = span.start as usize;
-            scan_patterns(&text[previous..start], &raw, kind, previous, &[], hits);
+            scan_patterns(
+                &text[previous..start],
+                RAW_JS_PATTERNS,
+                kind,
+                previous,
+                &[],
+                hits,
+            );
             scan_patterns(span.source_text(&text), &patterns, kind, start, &[], hits);
             previous = span.end as usize;
         }
-        scan_patterns(&text[previous..], &raw, kind, previous, &[], hits);
+        scan_patterns(
+            &text[previous..],
+            RAW_JS_PATTERNS,
+            kind,
+            previous,
+            &[],
+            hits,
+        );
     } else {
         scan_patterns(&text, &patterns, kind, 0, &origin, hits);
     }
