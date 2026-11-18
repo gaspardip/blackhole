@@ -658,6 +658,26 @@ fn shared_union_members_fit_the_budget_with_and_without_a_cycle() {
 }
 
 #[test]
+fn generic_forwarders_reuse_the_target_with_distinct_arguments() {
+    use std::fmt::Write as _;
+    let mut src = String::from("type G0<T> = { [key: string]: T };\n");
+    for i in 1..4000 {
+        writeln!(src, "type G{i}<T> = G{}<T>;", i - 1).unwrap();
+    }
+    for i in 0..4000 {
+        writeln!(src, "type V{i} = G3999<{{ v{i}: string }}>;").unwrap();
+    }
+    src.push_str("type Last = G3999<unknown>;");
+    let hits = timed_alias_findings(&src, 3);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        locations(&hits),
+        [("ts/no-unsafe-dictionary-type", 8001, 13)]
+    );
+    assert!(hits[0].note.is_none());
+}
+
+#[test]
 fn forward_union_members_settle_before_the_union() {
     use std::fmt::Write as _;
     let members = (0..4000)

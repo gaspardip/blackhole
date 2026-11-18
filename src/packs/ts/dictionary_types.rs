@@ -64,11 +64,15 @@ struct Binding {
 struct Environments {
     frames: Vec<Binding>,
     ids: HashMap<Binding, usize>,
+    forwarded: HashMap<NodeId, Option<NodeId>>,
     places: Vec<(usize, NodeId)>,
     place_ids: HashMap<(usize, NodeId), usize>,
 }
 impl Environments {
     fn enter(&mut self, place: usize, alias: NodeId, budget: &mut Budget) -> Option<usize> {
+        if let Some(&inner) = self.place_ids.get(&(place, alias)) {
+            return Some(inner);
+        }
         let mut parent = place;
         while parent != 0 {
             if !budget.take(1) {
@@ -339,6 +343,68 @@ impl Environments {
         }
     }
 
+    fn forwarding_target(ctx: &TsCtx<'_>, id: NodeId, budget: &mut Budget) -> Option<NodeId> {
+        let nodes = ctx.semantic.nodes();
+        let alias = nodes.kind(id).as_ts_type_alias_declaration()?;
+        let params = &alias.type_parameters.as_ref()?.params;
+        let TSType::TSTypeReference(r) = budget.unparen(&alias.type_annotation)? else {
+            return None;
+        };
+        let TSTypeName::IdentifierReference(name) = &r.type_name else {
+            return None;
+        };
+        let args = &r.type_arguments.as_ref()?.params;
+        if params.len() != args.len() || !budget.take(args.len()) {
+            return None;
+        }
+        for (param, arg) in params.iter().zip(args) {
+            let TSType::TSTypeReference(arg) = arg else {
+                return None;
+            };
+            let TSTypeName::IdentifierReference(name) = &arg.type_name else {
+                return None;
+            };
+            if param.default.is_some()
+                || arg.type_arguments.is_some()
+                || symbol(ctx, name) != param.name.symbol_id.get()
+            {
+                return None;
+            }
+        }
+        let target = type_declarations(ctx, symbol(ctx, name)?).next()?;
+        let dest = nodes.kind(target).as_ts_type_alias_declaration()?;
+        let target_params = &dest.type_parameters.as_ref()?.params;
+        (target_params.len() == args.len() && target_params.iter().all(|p| p.default.is_none()))
+            .then_some(target)
+    }
+
+    fn forwarded(
+        &mut self,
+        ctx: &TsCtx<'_>,
+        mut id: NodeId,
+        budget: &mut Budget,
+    ) -> Option<NodeId> {
+        let mut path = Vec::new();
+        let end = loop {
+            if let Some(&cached) = self.forwarded.get(&id) {
+                break cached;
+            }
+            if !budget.take(1) {
+                return None;
+            }
+            let Some(next) = Self::forwarding_target(ctx, id, budget) else {
+                break Some(id);
+            };
+            self.forwarded.insert(id, None);
+            path.push(id);
+            id = next;
+        };
+        for hop in path {
+            self.forwarded.insert(hop, end);
+        }
+        end
+    }
+
     fn reference(
         &mut self,
         ctx: &TsCtx<'_>,
@@ -363,7 +429,10 @@ impl Environments {
             if g.query == Query::Value && scopes.symbol_flags(sym).is_interface() {
                 return Plan::child(Combine::First, Self::interface_goal(ctx, sym));
             }
-            let Some(id) = type_declarations(ctx, sym).next() else {
+            let Some(id) = type_declarations(ctx, sym)
+                .next()
+                .and_then(|id| self.forwarded(ctx, id, budget))
+            else {
                 return Plan::Done(Class::None);
             };
             match ctx.semantic.nodes().kind(id) {
