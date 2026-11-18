@@ -1,4 +1,9 @@
 use super::values::MemberKeys;
+use super::values::{Invocation, call_expr, invoked, path, resolve};
+use crate::engine::TsCtx;
+use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
+use oxc::span::GetSpan;
+
 pub(super) fn test_file(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
@@ -15,15 +20,8 @@ pub(super) fn test_file(path: &str) -> bool {
     })
 }
 
-use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
-
 pub(super) fn is_test(name: &str) -> bool {
     matches!(name, "it" | "test" | "specify")
-}
-pub(super) fn static_method<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
-    e.get_member_expr()
-        .and_then(|m| MemberKeys(ctx).read(m))
-        .is_some_and(|key| names.contains(&key))
 }
 fn single_statement<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Statement<'a>> {
     if !body.directives.is_empty() {
@@ -67,45 +65,23 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
-pub(super) fn chain_property<'a>(
-    ctx: &TsCtx<'a>,
-    e: &'a Expression<'a>,
-    wanted: impl Fn(&str) -> bool,
-) -> Option<usize> {
-    let mut current = e;
-    loop {
-        current = resolve(ctx, current);
-        if let Some(m) = current.get_member_expr() {
-            if MemberKeys(ctx).read(m).is_some_and(&wanted) {
-                return Some(super::values::member_span(ctx, m).start as usize);
-            }
-            current = m.object();
-            continue;
-        }
-        if let Some(c) = call_expr(current) {
-            current = &c.callee;
-            continue;
-        }
-        match current {
-            Expression::TaggedTemplateExpression(t) => current = &t.tag,
-            _ => return None,
-        }
-    }
-}
-
-use super::values::{Invocation, call_expr, invoked, path, resolve};
-use crate::engine::TsCtx;
-use oxc::span::GetSpan;
-
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Runner<'a> {
     prefix: [&'a str; 3],
     length: usize,
+    module_default_test: bool,
     pub(super) last: Option<&'a str>,
     pub(super) skipped: bool,
+    pub(super) skip_at: Option<usize>,
+    pub(super) todo: bool,
 }
 impl<'a> Runner<'a> {
     fn push(&mut self, name: &'a str) {
+        let name = if std::mem::take(&mut self.module_default_test) && name == "default" {
+            "test"
+        } else {
+            name
+        };
         if let Some(slot) = self.prefix.get_mut(self.length) {
             *slot = name;
         }
@@ -142,17 +118,22 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
         if !seen.insert(span) {
             return Runner::default();
         }
+        if let Some(m) = e.get_member_expr()
+            && let Some(key) = MemberKeys(ctx).read(m)
+        {
+            let at = super::values::member_span(ctx, m).start as usize;
+            steps.push((span, Some((key, at))));
+            e = m.object();
+            continue;
+        }
         if let Some(parts) = path(ctx, e) {
             let mut result = Runner::default();
             let names = match parts.as_slice() {
-                ["node:test", "default", rest @ ..] => {
-                    result.push("test");
+                ["node:test" | "@playwright/test", rest @ ..] => {
+                    result.module_default_test = true;
                     rest
                 }
-                [
-                    "vitest" | "@jest/globals" | "node:test" | "@playwright/test",
-                    rest @ ..,
-                ] => rest,
+                ["vitest" | "@jest/globals", rest @ ..] => rest,
                 other => other,
             };
             for name in names {
@@ -160,13 +141,6 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             }
             ctx.resolution.runners.borrow_mut().insert(span, result);
             break result;
-        }
-        if let Some(m) = e.get_member_expr()
-            && let Some(key) = MemberKeys(ctx).read(m)
-        {
-            steps.push((span, Some(key)));
-            e = m.object();
-            continue;
         }
         if let Some(c) = call_expr(e) {
             steps.push((span, None));
@@ -182,7 +156,11 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
     };
     let mut cache = ctx.resolution.runners.borrow_mut();
     for (span, key) in steps.into_iter().rev() {
-        if let Some(key) = key {
+        if let Some((key, at)) = key {
+            if super::no_skipped_tests::modifier(key) {
+                result.skip_at = Some(at);
+            }
+            result.todo |= key == "todo";
             result.push(key);
         }
         cache.insert(span, result);

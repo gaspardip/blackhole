@@ -16,12 +16,12 @@ fn inspect<'a>(
     expr: Option<&'a Expression<'a>>,
     keys: &[&str],
     findings: &mut Findings,
-) {
+) -> bool {
     let Some(expr) = expr else {
-        return;
+        return false;
     };
     let Some(opts) = super::values::properties(ctx, expr) else {
-        return;
+        return false;
     };
     for (k, p) in opts.named {
         if keys.contains(&k) {
@@ -31,24 +31,15 @@ fn inspect<'a>(
     if opts.unknown {
         findings.report(expr.get_inner_expression().span().start as usize, None);
     }
+    true
 }
-fn config<'a>(
-    ctx: &TsCtx<'a>,
-    arg: Option<&'a Expression<'a>>,
-    keys: &[&str],
-    findings: &mut Findings,
-) {
-    if let Some(arg) = arg {
-        if matches!(
-            super::values::resolve(ctx, arg),
-            Expression::ObjectExpression(_)
-        ) {
-            inspect(ctx, Some(arg), keys, findings);
-        } else {
-            findings.report(arg.span().start as usize, None);
-        }
-    }
-}
+const CONFIG_OPTIONS: &[(&[&str], &[&str])] = &[
+    (
+        &["vi", "setConfig"],
+        &["retry", "testTimeout", "hookTimeout"],
+    ),
+    (&["test", "describe", "configure"], &["retries"]),
+];
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
@@ -58,16 +49,18 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             AstKind::CallExpression(c) => {
                 let call = super::values::invoked(ctx, c);
                 let p = runner(ctx, &call);
-                match p.short() {
-                    Some(["vi", "setConfig"]) => config(
-                        ctx,
-                        call.arg(0),
-                        &["retry", "testTimeout", "hookTimeout"],
-                        findings,
-                    ),
-                    Some(["test", "describe", "configure"]) => {
-                        config(ctx, call.arg(0), &["retries"], findings);
+                if let Some((_, keys)) = CONFIG_OPTIONS
+                    .iter()
+                    .find(|(path, _)| p.short() == Some(*path))
+                {
+                    if let Some(arg) = call.arg(0)
+                        && !inspect(ctx, Some(arg), keys, findings)
+                    {
+                        findings.report(arg.span().start as usize, None);
                     }
+                    continue;
+                }
+                match p.short() {
                     Some(["test", "slow"]) => findings.report(c.span.start as usize, None),
                     _ if p.test_or_suite()
                         && (super::values::call_expr(call.callee).is_some()
@@ -77,29 +70,18 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                             )) =>
                     {
                         let [second, third] = call.test_options();
-                        inspect(ctx, second, &["retry", "timeout"], findings);
-                        inspect(ctx, third, &["retry", "timeout"], findings);
+                        let second_object = inspect(ctx, second, &["retry", "timeout"], findings);
+                        let third_object = inspect(ctx, third, &["retry", "timeout"], findings);
                         if let Some(arg) = third
-                            && second.is_some_and(|e| super::values::properties(ctx, e).is_none())
+                            && second.is_some()
+                            && !second_object
                         {
                             let third = super::values::resolve(ctx, arg);
-                            if !matches!(
-                                third,
-                                Expression::ObjectExpression(_)
-                                    | Expression::ArrowFunctionExpression(_)
-                                    | Expression::FunctionExpression(_)
-                            ) {
+                            if !third_object && !third.is_function() {
                                 findings.report(arg.span().start as usize, None);
-                            } else if matches!(
-                                third,
-                                Expression::ArrowFunctionExpression(_)
-                                    | Expression::FunctionExpression(_)
-                            ) && let Some(e) = second
-                                && !matches!(
-                                    super::values::resolve(ctx, e),
-                                    Expression::ArrowFunctionExpression(_)
-                                        | Expression::FunctionExpression(_)
-                                )
+                            } else if third.is_function()
+                                && let Some(e) = second
+                                && !super::values::resolve(ctx, e).is_function()
                             {
                                 findings.report(e.span().start as usize, None);
                             }

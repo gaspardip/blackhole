@@ -97,7 +97,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if sleeps.is_empty() {
         return;
     }
-    if nodes.iter().any(|n|matches!(n.kind(),AstKind::CallExpression(c) if super::test_context::runner(ctx,&super::values::invoked(ctx,c))==["vi","useFakeTimers"])){return;}
+    if nodes.iter().any(|n| {
+        let AstKind::CallExpression(c) = n.kind() else {
+            return false;
+        };
+        super::test_context::runner(ctx, &super::values::invoked(ctx, c)) == ["vi", "useFakeTimers"]
+    }) {
+        return;
+    }
     for at in sleeps {
         findings.report(at, None);
     }

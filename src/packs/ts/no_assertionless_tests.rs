@@ -1,4 +1,3 @@
-use super::test_context::chain_property;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -102,13 +101,20 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             }
             let bare_literal = parts == ["expect"]
                 && inv.arg(0).is_some_and(literal)
-                && !matches!(super::values::outer(ctx,n.id()),Some(kind) if kind.as_member_expression_kind().is_some());
+                && super::values::outer(ctx, n.id())
+                    .and_then(|kind| kind.as_member_expression_kind())
+                    .is_none();
             let found = bare_literal || tautology(ctx, &inv, parts);
             *assertions.entry(c.span.start).or_default() |= found;
         }
         if !parts.test()
-            || chain_property(ctx, &c.callee, |s| s == "todo").is_some()
-            || super::test_context::static_method(ctx, &c.callee, &["each", "for", "extend"])
+            || parts.todo
+            || c.callee.get_member_expr().is_some_and(|m| {
+                matches!(
+                    super::values::MemberKeys(ctx).read(m),
+                    Some("each" | "for" | "extend")
+                )
+            })
         {
             continue;
         }

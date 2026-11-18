@@ -211,10 +211,21 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
         if !seen.insert(expr.span()) {
             return None;
         }
-        if let Some(member) = expr.get_member_expr() {
-            parts.push(MemberKeys(ctx).read(member)?);
-            expr = member.object();
+        if let Some((object, key)) = receiver(ctx, expr) {
+            parts.push(key);
+            expr = object;
             continue;
+        }
+        if let Some(call) = call_expr(expr) {
+            let id = call.callee.get_identifier_reference()?;
+            if id.name != "require" || !ctx.semantic.is_reference_to_global_variable(id) {
+                return None;
+            }
+            let [arg] = call.arguments.as_slice() else {
+                return None;
+            };
+            parts.push(literal(ctx, arg.as_expression()?)?);
+            break;
         }
         if matches!(expr, Expression::ImportMeta(_)) {
             parts.push("import.meta");
@@ -228,14 +239,6 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
                 parts.push(id.name.as_str());
             }
             break;
-        }
-        let decl = declaration(ctx, id)?;
-        if let AstKind::VariableDeclarator(v) = decl
-            && let BindingPattern::ObjectPattern(pattern) = &v.id
-        {
-            parts.push(destructured(ctx, pattern, |b| b.name == id.name)?);
-            expr = v.init.as_ref()?;
-            continue;
         }
         let (source, imported) = import_of(ctx, id)?;
         match imported {

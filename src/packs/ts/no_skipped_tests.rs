@@ -1,4 +1,4 @@
-use super::test_context::{chain_property, enclosing_runners, test_file};
+use super::test_context::{enclosing_runners, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -36,9 +36,10 @@ fn body_skip(e: &Expression<'_>) -> Option<usize> {
 }
 fn skip_option<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> Option<usize> {
     let options = super::values::properties(ctx, arg)?;
-    options.named.into_iter().find_map(|(key,property)|{
-        let enabled=matches!(super::values::resolve(ctx,&property.value),Expression::BooleanLiteral(value) if value.value);
-        (matches!(key,"skip"|"todo") && enabled).then_some(property.key.span().start as usize)
+    options.named.into_iter().find_map(|(key, property)| {
+        let value = super::values::resolve(ctx, &property.value);
+        let enabled = matches!(value, Expression::BooleanLiteral(value) if value.value);
+        (matches!(key, "skip" | "todo") && enabled).then_some(property.key.span().start as usize)
     })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
@@ -54,10 +55,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let base = path.first().copied().unwrap_or("");
         let position = if path.test_or_suite() {
             if path.skipped {
-                Some(
-                    chain_property(ctx, call.callee, modifier)
-                        .unwrap_or(call.callee.span().start as usize),
-                )
+                Some(path.skip_at.unwrap_or(call.callee.span().start as usize))
             } else {
                 call.test_options()[0].and_then(|arg| skip_option(ctx, arg))
             }

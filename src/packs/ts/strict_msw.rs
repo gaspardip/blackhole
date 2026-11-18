@@ -43,10 +43,7 @@ fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
         return false;
     };
     super::values::literal(ctx, &p.value) == Some("error")
-        || matches!(
-            super::values::resolve(ctx, &p.value),
-            Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_)
-        )
+        || super::values::resolve(ctx, &p.value).is_function()
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut factories = HashMap::<SymbolId, Factory>::new();
