@@ -1,0 +1,5 @@
+# yamllint disable
+# YAMLLINT disable-line
+- name: x  # noqa: yaml[line-length]
+# checkov:skip=CKV_1
+# zizmor: ignore[x]
