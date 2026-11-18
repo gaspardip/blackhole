@@ -49,6 +49,49 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn all_declarations_must_describe_an_empty_interface() {
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-unsafe-dictionary-type")
+        .unwrap();
+    for (decls, col) in [
+        ("interface Model {}\nenum Model { Id }", 6),
+        ("enum Model { Id }\ninterface Model {}", 11),
+    ] {
+        let source = format!("{decls}\ntype Dict = Record<string, Model>;");
+        assert_eq!(
+            locations(&run(registry(), [("merged.ts", source.as_bytes())])),
+            [("core/unparseable", 2, col)]
+        );
+    }
+    for (other, empty) in [
+        ("class Model { id = 0; }", false),
+        ("declare class Model { id: number; }", false),
+        ("namespace Model { export const id = 0; }", false),
+        ("interface Model extends Base {}", false),
+        ("interface Model { id: number }", false),
+        ("interface Model {}", true),
+    ] {
+        let declarations = ["interface Model {}", other];
+        for [first, second] in [declarations, [other, declarations[0]]] {
+            let source = format!("{first}\n{second}\ntype Dict = Record<string, Model>;");
+            let hits = run(registry(), [("merged.ts", source.as_bytes())]);
+            assert!(
+                hits.iter().all(|h| h.rule != "core/unparseable"),
+                "{source}"
+            );
+            let actual: Vec<_> = hits
+                .iter()
+                .filter(|f| f.rule == rule.id)
+                .map(|f| (f.line, f.col))
+                .collect();
+            let expected = if empty { vec![(3, 13)] } else { vec![] };
+            assert_eq!(actual, expected, "{source}");
+        }
+    }
+}
+
+#[test]
 fn guard_evidence_uses_only_an_identifiers_own_annotation() {
     let rule = registry()
         .iter()

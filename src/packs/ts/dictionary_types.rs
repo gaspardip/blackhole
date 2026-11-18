@@ -324,21 +324,10 @@ impl Environments {
                 return Plan::Done(Class::None);
             };
             match ctx.semantic.nodes().kind(id) {
-                AstKind::TSInterfaceDeclaration(i)
-                    if g.query == Query::Value
-                        && i.extends.is_empty()
-                        && empty(&i.body.body, budget)
-                        && scopes
-                            .symbol_declarations(sym)
-                            .take_while(|_| budget.take(1))
-                            .filter(|d| {
-                                matches!(
-                                    ctx.semantic.nodes().kind(*d),
-                                    AstKind::TSInterfaceDeclaration(_)
-                                )
-                            })
-                            .count()
-                            == 1 =>
+                AstKind::TSInterfaceDeclaration(_) if g.query == Query::Value
+                    && scopes.symbol_declarations(sym).all(|id| budget.take(1) &&
+                        matches!(ctx.semantic.nodes().kind(id), AstKind::TSInterfaceDeclaration(i)
+                            if i.extends.is_empty() && empty(&i.body.body, budget))) =>
                 {
                     return Plan::Done(Class::Broad);
                 }
