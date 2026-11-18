@@ -28,20 +28,18 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
 // Directories that are gone stay as written too, so the ledger rows under them can still be selected.
 fn resolve(path: &Path) -> io::Result<PathBuf> {
-    let mut dir = path;
-    let mut names = Vec::new();
-    loop {
-        let split = dir.parent().zip(dir.file_name());
-        if let Some((parent, name)) = split {
-            names.push(name);
-            dir = parent;
-        }
-        match fs::canonicalize(dir) {
-            Ok(found) => return Ok(names.iter().rev().fold(found, |path, name| path.join(name))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound && split.is_some() => {}
-            Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
-        }
+    existing(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
+
+fn existing(path: &Path) -> io::Result<PathBuf> {
+    let Some((parent, name)) = path.parent().zip(path.file_name()) else {
+        return fs::canonicalize(path);
+    };
+    match fs::canonicalize(parent) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => existing(parent),
+        found => found,
     }
+    .map(|dir| dir.join(name))
 }
 
 fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {

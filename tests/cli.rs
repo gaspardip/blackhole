@@ -354,13 +354,13 @@ fn a_linked_lock_is_refused() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     let before = baseline(root, &[("a.py", 2)]);
     std::os::unix::fs::symlink(&victim, root.join(".git/blackhole.lock")).unwrap();
-    run(root, &["ledger"], 2);
+    regenerate(root, 2);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
     let absent = other.path().join("absent");
     fs::remove_file(root.join(".git/blackhole.lock")).unwrap();
     std::os::unix::fs::symlink(&absent, root.join(".git/blackhole.lock")).unwrap();
-    run(root, &["ledger"], 2);
+    regenerate(root, 2);
     assert!(!absent.try_exists().unwrap());
 }
 
