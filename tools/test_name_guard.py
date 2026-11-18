@@ -176,6 +176,22 @@ class Staged(Repo):
         self.assertEqual(run(["staged"], self.dir).returncode, 0)
 
 
+class OddPaths(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        with open(os.path.join(os.fsencode(self.dir), b"caf\xe9.txt"), "wb") as odd:
+            odd.write(b"Quokka\n")
+
+    def test_staged_content_under_a_non_utf8_name_is_caught(self) -> None:
+        git(self.dir, "add", "-A")
+        self.assertEqual(run(["staged"], self.dir).returncode, 1)
+
+    def test_committed_content_under_a_non_utf8_name_is_caught(self) -> None:
+        head = self.commit("feat: add")
+        self.assertEqual(run(["range", "0" * 40, head], self.dir).returncode, 1)
+        self.assertEqual(run(["tree"], self.dir).returncode, 1)
+
+
 class Message(Repo):
     def test_commit_message_is_caught(self) -> None:
         self.write("msg", "fix: sync with zebra fish\n")

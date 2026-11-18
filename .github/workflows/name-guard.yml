@@ -16,6 +16,16 @@ permissions:
 
 jobs:
   name-guard:
+    # A public pass or fail on text a stranger wrote would let them confirm a guessed name,
+    # so the scan runs only on events from people who can already write to the repository.
+    if: >-
+      github.event_name == 'push' || github.event_name == 'release' ||
+      (github.event_name == 'pull_request_target' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
+      (github.event_name == 'issues' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issue_comment' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -29,8 +39,8 @@ jobs:
       GUARD_TEXT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
       GUARD_TEXT_PR_TITLE: ${{ github.event.pull_request.title }}
       GUARD_TEXT_PR_BODY: ${{ github.event.pull_request.body }}
-      GUARD_TEXT_ISSUE_TITLE: ${{ github.event.issue.title }}
-      GUARD_TEXT_ISSUE_BODY: ${{ github.event.issue.body }}
+      GUARD_TEXT_ISSUE_TITLE: ${{ github.event_name == 'issues' && github.event.issue.title || '' }}
+      GUARD_TEXT_ISSUE_BODY: ${{ github.event_name == 'issues' && github.event.issue.body || '' }}
       GUARD_TEXT_COMMENT: ${{ github.event.comment.body }}
       GUARD_TEXT_RELEASE_NAME: ${{ github.event.release.name }}
       GUARD_TEXT_RELEASE_TAG: ${{ github.event.release.tag_name }}

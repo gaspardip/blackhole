@@ -19,6 +19,8 @@ from pathlib import Path
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
 ZERO = re.compile(r"^0+$")
+GITLINK = "160000"
+RAW = ("--no-renames", "--no-abbrev")
 USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text"
 
 
@@ -67,8 +69,31 @@ def known(sha: str) -> bool:
     return subprocess.run(probe, capture_output=True, check=False).returncode == 0
 
 
-def names(data: bytes) -> list[str]:
-    return [decode(name) for name in data.split(b"\x00") if name]
+@dataclass(frozen=True)
+class Entry:
+    mode: str
+    blob: str
+    path: str
+
+
+def diff_entries(raw: bytes) -> list[Entry]:
+    """Parses `--raw -z --no-renames` output: `:old new oldid newid status NUL path NUL`."""
+    fields = raw.split(b"\x00")
+    entries = []
+    for meta, path in zip(fields[0::2], fields[1::2], strict=False):
+        _, mode, _, blob, _ = meta.decode().lstrip(":").split()
+        entries.append(Entry(mode, blob, decode(path)))
+    return entries
+
+
+def tree_entries(raw: bytes) -> list[Entry]:
+    """Parses `ls-tree -r -z` output: `mode type id TAB path NUL`."""
+    entries = []
+    for line in filter(None, raw.split(b"\x00")):
+        meta, path = line.split(b"\t", 1)
+        mode, _, blob = meta.decode().split()
+        entries.append(Entry(mode, blob, decode(path)))
+    return entries
 
 
 @dataclass
@@ -92,10 +117,11 @@ class Guard:
     def name(self, kind: str, value: str) -> None:
         self.scan(f"{kind} {value}", value)
 
-    def blob(self, spec: str, label: str) -> None:
-        done = subprocess.run(["git", "cat-file", "blob", spec], capture_output=True, check=False)
-        if done.returncode == 0:  # a deleted path or a submodule has no blob to read
-            self.scan(label, decode(done.stdout))
+    def entry(self, entry: Entry, origin: str = "") -> None:
+        self.name(f"{origin}file name", entry.path)
+        # Blobs are read by id, so a path git prints differently than we decode it cannot hide one.
+        if entry.mode != GITLINK and not ZERO.match(entry.blob):
+            self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
 
     def env_text(self) -> None:
         for key in sorted(os.environ):
@@ -105,10 +131,9 @@ class Guard:
     def commit(self, sha: str) -> None:
         short = sha[:9]
         self.scan(f"commit {short}", decode(git("cat-file", "commit", sha)))
-        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", "--name-only", "-z", sha)
-        for path in sorted(set(names(changed))):
-            self.name(f"file name in {short}:", path)
-            self.blob(f"{sha}:{path}", f"{short} {path}")
+        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", "--raw", "-z", *RAW, sha)
+        for entry in diff_entries(changed):
+            self.entry(entry, f"{short} ")
 
     def commits(self, head: str, *exclude: str) -> None:
         listed = git("rev-list", head, "--not", *exclude).decode().split()
@@ -120,15 +145,12 @@ class Guard:
             ["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, check=False
         )
         self.name("branch", decode(branch.stdout).strip())
-        staged = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT")
-        for path in names(staged):
-            self.name("file name", path)
-            self.blob(f":{path}", path)
+        for entry in diff_entries(git("diff", "--cached", "--raw", "-z", *RAW)):
+            self.entry(entry)
 
     def tree(self) -> None:
-        for path in names(git("ls-tree", "-r", "-z", "--name-only", "HEAD")):
-            self.name("file name", path)
-            self.blob(f"HEAD:{path}", path)
+        for entry in tree_entries(git("ls-tree", "-r", "-z", "HEAD")):
+            self.entry(entry)
 
     def range(self, base: str, head: str) -> None:
         # An all-zero or unknown base (new ref, force push) means every commit is new.
