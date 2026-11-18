@@ -11,7 +11,7 @@ use oxc::{
         },
     },
     span::GetSpan,
-    syntax::node::NodeId,
+    syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
 use std::collections::{HashMap, HashSet};
 
@@ -31,7 +31,7 @@ fn directive(raw: &str) -> bool {
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
-        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+        .split(is_line_terminator)
         .map(|line| {
             line.trim_start().strip_prefix('*').map_or(line, |rest| {
                 rest.strip_prefix(char::is_whitespace).unwrap_or(rest)
@@ -195,25 +195,47 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
 }
 
 struct Exposure {
-    owners: HashMap<NodeId, NodeId>,
+    owners: Vec<Option<NodeId>>,
     public: HashSet<NodeId>,
+}
+
+impl Exposure {
+    fn can_document(&self, id: NodeId, kind: AstKind<'_>) -> bool {
+        self.public.contains(&id)
+            || member(kind)
+                && self
+                    .owners
+                    .get(id.index())
+                    .copied()
+                    .flatten()
+                    .is_some_and(|owner| self.public.contains(&owner))
+    }
+}
+
+fn type_declaration(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
+    )
 }
 
 fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let nodes = ctx.semantic.nodes();
     let mut public = public_declarations(ctx);
-    let mut owners = HashMap::new();
+    if public.is_empty() {
+        return Exposure {
+            owners: Vec::new(),
+            public,
+        };
+    }
+    let mut owners = vec![None; nodes.len()];
     let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
     for (id, node) in nodes.iter_enumerated() {
         let kind = node.kind();
         let parent = nodes.parent_id(id);
-        let inherited = owners.get(&parent).copied().filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
-        let owner = if public.contains(&id)
-            || matches!(
-                kind,
-                AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
-            ) {
+        let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
+        let owner = if public.contains(&id) || type_declaration(kind) {
             if let Some(parent_owner) = inherited {
                 edges.entry(parent_owner).or_default().push(id);
             }
@@ -223,7 +245,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
         } else {
             continue;
         };
-        owners.insert(id, owner);
+        owners[id.index()] = Some(owner);
         if let AstKind::TSTypeReference(r) = kind
             && let TSTypeName::IdentifierReference(name) = &r.type_name
             && let Some(symbol) = name
@@ -235,12 +257,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
                 ctx.semantic
                     .scoping()
                     .symbol_declarations(symbol)
-                    .filter(|id| {
-                        matches!(
-                            nodes.kind(*id),
-                            AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
-                        )
-                    }),
+                    .filter(|id| type_declaration(nodes.kind(*id))),
             );
         }
     }
@@ -289,17 +306,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if ctx.comments.is_empty() {
         return;
     }
-    let suppressed: HashSet<_> = ctx
-        .comments
-        .iter()
-        .filter(|c| suppressed_comment(c.span.source_text(ctx.text)))
-        .map(|c| c.span.start)
-        .collect();
     let directives: HashSet<_> = ctx
         .comments
         .iter()
         .filter(|c| {
-            directive(c.content_span().source_text(ctx.text)) && !suppressed.contains(&c.span.start)
+            directive(c.content_span().source_text(ctx.text))
+                && !suppressed_comment(c.span.source_text(ctx.text))
         })
         .map(|c| c.span.start)
         .collect();
@@ -309,12 +321,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .nodes()
         .iter_enumerated()
         .filter(|(id, n)| {
-            exposure.public.contains(id)
-                || (member(n.kind())
-                    && exposure
-                        .owners
-                        .get(id)
-                        .is_some_and(|owner| exposure.public.contains(owner)))
+            exposure.can_document(*id, n.kind())
                 || matches!(
                     ctx.semantic.nodes().parent_kind(*id),
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
@@ -323,11 +330,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
     for c in ctx.comments {
-        if suppressed.contains(&c.span.start)
-            || !directives.contains(&c.span.start)
-                && !documented.contains(&c.span.start)
-                && !warning(c, c.content_span().source_text(ctx.text))
-        {
+        if directives.contains(&c.span.start) {
+            continue;
+        }
+        let allowed = documented.contains(&c.span.start)
+            || warning(c, c.content_span().source_text(ctx.text));
+        if !allowed || suppressed_comment(c.span.source_text(ctx.text)) {
             findings.report(c.span.start as usize, None);
         }
     }
