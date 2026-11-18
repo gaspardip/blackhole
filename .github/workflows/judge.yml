@@ -1,38 +1,33 @@
 name: judge
 
-# Every trigger reads this file from the default branch, so a pull request cannot change how it is judged.
+# The trigger reads this file from the default branch, so a pull request cannot change how it is judged.
 on:
   pull_request_target:
     # edited covers a change of base branch, which changes the policy the judge reads.
     types: [opened, reopened, synchronize, edited]
-  # A review changes the verdict. The review workflow only marks the moment, because its file comes from the pull request.
-  workflow_run:
-    workflows: [review]
-    types: [completed]
 
 permissions:
   contents: read
-  pull-requests: read
-  statuses: write
 
-# The newest run for a commit read the newest reviews, so it is the one that reports.
 concurrency:
-  group: judge-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+  group: judge-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   run:
+    # Whoever opens a pull request picks its target, so the check says whose policy it passed. Require the one named for the branch.
+    name: judge (${{ github.event.pull_request.base.ref }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: judge
         run: |
           set -eu
           # A rerun keeps this file as it was. So the work, and the judge it builds, come from the default branch as it is now.
-          gh api -X GET "repos/${GITHUB_REPOSITORY}/contents/.github/judge.sh" -f ref="${DEFAULT_BRANCH}" \
-            -H "Accept: application/vnd.github.raw" > "${RUNNER_TEMP}/judge.sh"
+          gh api -H "Accept: application/vnd.github.raw" "repos/${GITHUB_REPOSITORY}/contents/.github/judge.sh" > "${RUNNER_TEMP}/judge.sh"
           exec bash "${RUNNER_TEMP}/judge.sh"

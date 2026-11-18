@@ -125,7 +125,7 @@ fn protected(i: &Inputs<'_>, moved: &Counts, v: &mut Verdict) -> io::Result<()> 
         v.gates.insert("protected");
         writeln!(
             v.lines,
-            "protected: {path}: needs an approving review from a person with write access who wrote none of its commits"
+            "protected: {path}: a person has to approve this change"
         )?;
     }
     Ok(())
