@@ -17,6 +17,7 @@ pub(super) enum Class {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Query {
+    UnknownReturn,
     Target,
     AliasTarget,
     Key,
@@ -32,6 +33,10 @@ pub(super) fn target<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Class {
 }
 pub(super) fn informative<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::Value) == Class::None
+}
+
+pub(super) fn unknown_return<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
+    Resolution::default().classify(ctx, ty, Query::UnknownReturn) != Class::None
 }
 
 fn empty(members: &[TSSignature<'_>]) -> bool {
@@ -118,7 +123,13 @@ impl<'a> Resolution<'a> {
             };
         }
         match name.name.as_str() {
-            "Readonly" | "NonNullable" | "Partial" | "Required" if query != Query::Key => args
+            "Readonly" | "NonNullable" | "Partial" | "Required"
+                if matches!(query, Query::Target | Query::AliasTarget | Query::Value) =>
+            {
+                args.first()
+                    .map_or(Class::None, |v| self.classify(ctx, v, query))
+            }
+            "Promise" | "PromiseLike" if query == Query::UnknownReturn => args
                 .first()
                 .map_or(Class::None, |v| self.classify(ctx, v, query)),
             "Record"
@@ -139,7 +150,8 @@ impl<'a> Resolution<'a> {
             return self.reference(ctx, r, query);
         }
         match (ty, query) {
-            (
+            (TSType::TSUnknownKeyword(_), Query::UnknownReturn)
+            | (
                 TSType::TSUnknownKeyword(_) | TSType::TSObjectKeyword(_),
                 Query::Value | Query::Target | Query::AliasTarget,
             )
@@ -150,7 +162,7 @@ impl<'a> Resolution<'a> {
                 Query::Key,
             ) => Class::Broad,
             (TSType::TSAnyKeyword(_), Query::Value) => Class::Any,
-            (TSType::TSUnionType(n), Query::Value | Query::Key)
+            (TSType::TSUnionType(n), Query::Value | Query::Key | Query::UnknownReturn)
                 if n.types
                     .iter()
                     .any(|m| self.classify(ctx, m, query) != Class::None) =>

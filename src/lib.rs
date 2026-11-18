@@ -15,6 +15,7 @@ mod packs {
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_unknown_parameters;
+        pub(crate) mod no_unknown_returns;
         pub(crate) mod no_widen_then_assert;
     }
     pub(crate) mod core {

@@ -7,12 +7,26 @@ struct Case {
     reporting: &'static str,
 }
 
-const CASES: &[Case] = &[Case {
-    silent: "ts/no-widen-then-assert",
-    path: "valid-01.ts",
-    snippet: "const source = { id: 'first' }; const widened: unknown = source;",
-    reporting: "ts/no-known-value-widening",
-}];
+const CASES: &[Case] = &[
+    Case {
+        silent: "ts/no-widen-then-assert",
+        path: "valid-01.ts",
+        snippet: "const source = { id: 'first' }; const widened: unknown = source;",
+        reporting: "ts/no-known-value-widening",
+    },
+    Case {
+        silent: "ts/no-known-value-widening",
+        path: "valid-28.ts",
+        snippet: "function isString(value: unknown): value is string { return true; } declare function readInput(): unknown; isString(readInput());",
+        reporting: "ts/no-unknown-returns",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-09.ts",
+        snippet: "function cause(): { cause: unknown } { return { cause: input }; }",
+        reporting: "ts/no-known-value-widening",
+    },
+];
 
 #[test]
 fn upstream_accept_cases_with_other_findings() {
