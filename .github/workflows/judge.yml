@@ -1,0 +1,52 @@
+name: judge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  judge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: judge
+        run: |
+          set -eu
+          git init -q repo
+          cd repo
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          # The judge is built from the base branch. The head arrives as git objects and is never checked out or run.
+          git fetch -q origin "${GITHUB_SHA}" "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+          git checkout -q "${GITHUB_SHA}"
+          cargo build --locked --release --quiet
+          raw="${RUNNER_TEMP}/reviews.json"
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" > "${raw}"
+          permissions="${RUNNER_TEMP}/permissions.json"
+          echo '{}' > "${permissions}"
+          # Only an approval needs its reviewer's permission. A failed lookup counts as no access.
+          jq -r '[.[][] | select(.state == "APPROVED") | .user.login // empty] | unique | .[]' "${raw}" |
+            while IFS= read -r login; do
+              level="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${login}/permission" --jq .permission || echo none)"
+              jq --arg login "${login}" --arg level "${level}" '. + {($login): $level}' "${permissions}" > "${permissions}.next"
+              mv "${permissions}.next" "${permissions}"
+            done
+          approvals="${RUNNER_TEMP}/approvals.json"
+          jq --arg author "${PR_AUTHOR}" --slurpfile levels "${permissions}" '{
+            author: $author,
+            reviews: [.[][] | (.user.login // "") as $login | {
+              login: $login,
+              state: .state,
+              commit: (.commit_id // ""),
+              permission: ($levels[0][$login] // "none")
+            }]
+          }' "${raw}" > "${approvals}"
+          target/release/blackhole ci --base "${GITHUB_SHA}" --head "${HEAD_SHA}" --approvals "${approvals}"
