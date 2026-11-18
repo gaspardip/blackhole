@@ -53,4 +53,13 @@ jobs:
               permission: ($levels[0][$login] // "none")
             }]
           }' "${raw}" > "${approvals}"
-          target/release/blackhole ci --base "${GITHUB_SHA}" --head "${HEAD_SHA}" --approvals "${approvals}"
+          # The commit list stops at 250, and an author it leaves out could approve. Then no approval counts.
+          total="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .commits)"
+          listed="$(jq '[.[][]] | length' "${commits}")"
+          if [ "${listed}" = "${total}" ]; then
+            set -- --approvals "${approvals}"
+          else
+            set --
+            echo "judge: ${listed} of ${total} commits listed, so approvals are ignored"
+          fi
+          target/release/blackhole ci --base "${GITHUB_SHA}" --head "${HEAD_SHA}" "$@"
