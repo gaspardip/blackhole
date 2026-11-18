@@ -56,6 +56,12 @@ const CASES: &[Case] = &[
         snippet: "type Value = unknown; function outer() { type Value = User; function load(): Value { return user; } }",
         reporting: "ts/no-unknown-type-aliases",
     },
+    Case {
+        silent: "ts/no-reflect-apply",
+        path: "valid-02.ts",
+        snippet: "Reflect.get(owner, key);",
+        reporting: "ts/no-reflect-get",
+    },
 ];
 
 #[test]

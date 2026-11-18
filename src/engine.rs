@@ -80,6 +80,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_non_null_assertion::RULE,
         crate::packs::ts::no_object_parameters::RULE,
         crate::packs::ts::no_reflect_apply::RULE,
+        crate::packs::ts::no_reflect_get::RULE,
         crate::packs::ts::no_runtime_typeof::RULE,
         crate::packs::ts::no_unknown_parameters::RULE,
         crate::packs::ts::no_unknown_returns::RULE,

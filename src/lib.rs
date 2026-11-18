@@ -16,6 +16,7 @@ mod packs {
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;
         pub(crate) mod no_reflect_apply;
+        pub(crate) mod no_reflect_get;
         pub(crate) mod no_runtime_typeof;
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
