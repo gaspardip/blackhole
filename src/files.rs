@@ -37,8 +37,8 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
     found.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
-fn locate(cwd: &Path, what: &str) -> io::Result<PathBuf> {
-    let output = git(cwd, &["rev-parse", what])?;
+fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {
+    let output = git(dir, &["rev-parse", what])?;
     std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
         .map(PathBuf::from)
         .map_err(io::Error::other)
@@ -46,7 +46,9 @@ fn locate(cwd: &Path, what: &str) -> io::Result<PathBuf> {
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.
 pub(crate) fn lock() -> io::Result<fs::File> {
-    let path = locate(&env::current_dir()?, "--absolute-git-dir")?.join("blackhole.lock");
+    // The lock follows the tree that holds the ledger, whichever repository the caller stands in.
+    let root = locate(&env::current_dir()?, "--show-toplevel")?;
+    let path = locate(&root, "--absolute-git-dir")?.join("blackhole.lock");
     // Nothing is written through the handle, so a link swapped in after this look loses no data.
     if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
         return Err(io::Error::other(format!(
@@ -63,7 +65,7 @@ pub(crate) fn lock() -> io::Result<fs::File> {
     Ok(file)
 }
 
-// A file can go away between the listing and the read, and then it has nothing to check.
+// A file can go away or turn into a directory between the listing and the read, and then it has nothing to check.
 // A link to a file is read under the link's name, or a link could hide what kind of file it is.
 pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let found = fs::metadata(path).and_then(|meta| {
@@ -77,7 +79,9 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
         Err(e)
             if matches!(
                 e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::NotADirectory
+                    | io::ErrorKind::IsADirectory
             ) =>
         {
             Ok(None)
@@ -86,7 +90,7 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
+pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>, Vec<PathBuf>)> {
     let cwd = env::current_dir()?;
     let root = fs::canonicalize(locate(&cwd, "--show-toplevel")?)?;
     let paths = paths
@@ -120,5 +124,5 @@ pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
     }
     selected.sort_unstable();
     selected.dedup();
-    Ok((root, selected))
+    Ok((root, selected, paths))
 }
