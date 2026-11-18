@@ -326,6 +326,44 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn inherited_interface_members_determine_dictionary_safety() {
+    let cases = [
+        ("interface Base {}", "Base", true),
+        ("interface A {} interface Base extends A {}", "Base", true),
+        ("interface A {} interface B {}", "A, B", true),
+        ("interface A {} interface B { id: string }", "A, B", false),
+        (
+            "interface Base {} interface Base { value: string }",
+            "Base",
+            false,
+        ),
+        ("class Base {}", "Base", false),
+        ("import type { Base } from './other';", "Base", false),
+        ("interface Base<T> { value: T }", "Base<string>", false),
+        ("", "Missing", false),
+    ];
+    for (definitions, parents, empty) in cases {
+        let source = format!(
+            "{definitions}\ninterface Model extends {parents} {{}}\ntype Dict = Record<string, Model>;"
+        );
+        let rule = registry()
+            .iter()
+            .find(|r| r.id == "ts/no-unsafe-dictionary-type")
+            .unwrap();
+        let hits = run(
+            std::slice::from_ref(rule),
+            [("interface.ts", source.as_bytes())],
+        );
+        let expected = if empty {
+            vec![(rule.id, 3, 13)]
+        } else {
+            vec![]
+        };
+        assert_eq!(locations(&hits), expected, "{source}");
+    }
+}
+
+#[test]
 fn only_type_contributors_determine_interface_emptiness() {
     let rule = registry()
         .iter()

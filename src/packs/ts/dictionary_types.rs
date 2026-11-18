@@ -18,6 +18,7 @@ pub(super) enum Class {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Query {
+    Interface(SymbolId),
     UnsafeDictionary,
     ObjectInput,
     UnknownAlias,
@@ -295,6 +296,48 @@ impl Plan {
     }
 }
 impl Environments {
+    fn interface_goal(ctx: &TsCtx<'_>, sym: SymbolId) -> Goal {
+        Goal {
+            term: Term {
+                node: ctx.semantic.scoping().symbol_declaration(sym),
+                env: 0,
+                place: 0,
+            },
+            query: Query::Interface(sym),
+        }
+    }
+
+    fn interface(ctx: &TsCtx<'_>, sym: SymbolId, budget: &mut Budget) -> Plan {
+        let mut parents = Vec::new();
+        for id in type_declarations(ctx, sym) {
+            let AstKind::TSInterfaceDeclaration(i) = ctx.semantic.nodes().kind(id) else {
+                return Plan::Done(Class::None);
+            };
+            if !budget.take(1 + i.extends.len()) || !empty(&i.body.body, budget) {
+                return Plan::Done(Class::None);
+            }
+            for parent in &i.extends {
+                let TSTypeName::IdentifierReference(name) = &parent.type_name else {
+                    return Plan::Done(Class::None);
+                };
+                let Some(base) = symbol(ctx, name) else {
+                    return Plan::Done(Class::None);
+                };
+                if parent.type_arguments.is_some()
+                    || !ctx.semantic.scoping().symbol_flags(base).is_interface()
+                {
+                    return Plan::Done(Class::None);
+                }
+                parents.push(Self::interface_goal(ctx, base));
+            }
+        }
+        if parents.is_empty() {
+            Plan::Done(Class::Broad)
+        } else {
+            Plan::many(Combine::All, parents)
+        }
+    }
+
     fn reference(
         &mut self,
         ctx: &TsCtx<'_>,
@@ -316,24 +359,13 @@ impl Environments {
             {
                 return Plan::child(Combine::First, Goal { term, ..g });
             }
+            if g.query == Query::Value && scopes.symbol_flags(sym).is_interface() {
+                return Plan::child(Combine::First, Self::interface_goal(ctx, sym));
+            }
             let Some(id) = type_declarations(ctx, sym).next() else {
                 return Plan::Done(Class::None);
             };
             match ctx.semantic.nodes().kind(id) {
-                AstKind::TSInterfaceDeclaration(_)
-                    if g.query == Query::Value
-                        && type_declarations(ctx, sym).all(|id| {
-                            budget.take(1)
-                                && match ctx.semantic.nodes().kind(id) {
-                                    AstKind::TSInterfaceDeclaration(i) => {
-                                        i.extends.is_empty() && empty(&i.body.body, budget)
-                                    }
-                                    _ => false,
-                                }
-                        }) =>
-                {
-                    return Plan::Done(Class::Broad);
-                }
                 AstKind::TSTypeAliasDeclaration(a) => {
                     return self.alias(ctx, g, a, args, budget);
                 }
@@ -438,6 +470,9 @@ impl Environments {
     }
     fn plan(&mut self, ctx: &TsCtx<'_>, g: Goal, budget: &mut Budget) -> Plan {
         let q = g.query;
+        if let Query::Interface(sym) = q {
+            return Self::interface(ctx, sym, budget);
+        }
         let kind = ctx.semantic.nodes().kind(g.term.node);
         let width = match kind {
             AstKind::TSUnionType(n) => n.types.len(),
