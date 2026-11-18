@@ -36,20 +36,17 @@ pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
         Err(failure(&out))
     }
 }
-fn run(args: &[&str]) -> io::Result<Vec<u8>> {
-    output(command().args(args))
+fn run(args: &[&str]) -> io::Result<String> {
+    String::from_utf8(output(command().args(args))?).map_err(io::Error::other)
 }
 pub(crate) fn commit(rev: &str) -> io::Result<String> {
-    let bytes = run(&[
+    let name = run(&[
         "rev-parse",
         "--verify",
         "--end-of-options",
         &format!("{rev}^{{commit}}"),
     ])?;
-    Ok(std::str::from_utf8(&bytes)
-        .map_err(io::Error::other)?
-        .trim_end()
-        .into())
+    Ok(name.trim_end().into())
 }
 pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
     let out = command()
@@ -71,11 +68,8 @@ pub(crate) struct Tree(BTreeMap<String, Entry>);
 impl Tree {
     pub(crate) fn load(sha: &str) -> io::Result<Self> {
         let mut entries = BTreeMap::new();
-        let bytes = run(&["ls-tree", "--full-tree", "-r", "-t", "-z", sha])?;
-        for line in std::str::from_utf8(&bytes)
-            .map_err(io::Error::other)?
-            .split_terminator('\0')
-        {
+        let listing = run(&["ls-tree", "--full-tree", "-r", "-t", "-z", sha])?;
+        for line in listing.split_terminator('\0') {
             let (header, path) = line
                 .split_once('\t')
                 .ok_or_else(|| io::Error::other("invalid git tree"))?;
@@ -159,9 +153,7 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
         head,
         "--",
     ])?;
-    let mut fields = std::str::from_utf8(&raw)
-        .map_err(io::Error::other)?
-        .split_terminator('\0');
+    let mut fields = raw.split_terminator('\0');
     let mut changes = Vec::new();
     while let Some(status) = fields.next() {
         let mut path = || {
@@ -221,7 +213,6 @@ impl Batch {
         Ok(bytes)
     }
     pub(crate) fn finish(mut self) -> io::Result<()> {
-        drop(self.child.stdin.take());
         if self.child.wait()?.success() {
             Ok(())
         } else {
@@ -231,7 +222,6 @@ impl Batch {
 }
 impl Drop for Batch {
     fn drop(&mut self) {
-        drop(self.child.stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -26,8 +26,7 @@ fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {
 // Held while the ledger is read and replaced, so two runs cannot interleave.
 pub(crate) fn lock() -> io::Result<fs::File> {
     // The lock follows the tree that holds the ledger, whichever repository the caller stands in.
-    let root = locate(&env::current_dir()?, "--show-toplevel")?;
-    let path = locate(&root, "--absolute-git-dir")?.join("blackhole.lock");
+    let path = locate(&root()?, "--absolute-git-dir")?.join("blackhole.lock");
     // Nothing is written through the handle, so a link swapped in after this look loses no data.
     if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
         return Err(io::Error::other(format!(

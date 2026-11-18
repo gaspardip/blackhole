@@ -447,6 +447,20 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
 }
 
 #[test]
+fn ci_is_behind_when_head_lacks_base() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    fs::write(root.join("b.py"), "pass").unwrap();
+    commit(root);
+    assert_eq!(
+        run(root, &["ci", "--base", "HEAD", "--head", "HEAD~"], 1).stdout,
+        b"head does not contain base; update the branch\nblackhole ci: red (behind)\n"
+    );
+}
+
+#[test]
 fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     let dir = repo();
     let root = dir.path();

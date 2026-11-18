@@ -49,7 +49,6 @@ pub struct Change {
     pub path: String,
 }
 pub struct Inputs<'a> {
-    pub ancestor: bool,
     pub approved: bool,
     pub today: Date,
     pub excludes: &'a GlobSet,
@@ -166,9 +165,6 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
 /// # Errors
 /// Propagates diagnostic formatting errors.
 pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
-    if !i.ancestor {
-        return Ok(Verdict::behind());
-    }
     let mut v = Verdict::default();
     protected(i, &mut v)?;
     let rows = eligible(i, &mut v)?;
@@ -188,12 +184,7 @@ pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
     let over = ledger::excess(&actual, &objections::allowances(head, &rows, i.today));
     if !over.is_empty() {
         v.gates.insert("findings");
-        crate::report(
-            i.findings
-                .iter()
-                .filter(|f| over.contains_key(&(f.rule.into(), f.path.clone()))),
-            &mut v.lines,
-        )?;
+        crate::report(i.findings, &over, &mut v.lines)?;
     }
     Ok(v)
 }

@@ -13,7 +13,6 @@ mod packs {
 pub mod verdict;
 
 use std::{
-    fmt::Write as _,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -95,12 +94,8 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
         config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     names.retain(|name| !excludes.is_match(name));
     let home = home(&root)?;
-    // A repository without a ledger allows nothing, which is what an empty one says.
-    let base = files::policy(&home.join("ledger"))?.map_or_else(
-        || Ok(ledger::Counts::new()),
-        |bytes| ledger::parse(&bytes, engine::registry()),
-    )?;
-    let mut findings = scan_files(names.iter().map(String::as_str), |name| {
+    let base = ledger::load(files::policy(&home.join("ledger"))?)?;
+    let findings = scan_files(names.iter().map(String::as_str), |name| {
         files::read(&root.join(name))
     })?;
     let actual = ledger::counts(&findings);
@@ -118,8 +113,7 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
             selection.iter().any(|chosen| file.starts_with(chosen))
         });
     }
-    findings.retain(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())));
-    report(&findings, output)?;
+    report(&findings, &over, output)?;
     Ok(Scan {
         ledger: home.join("ledger"),
         actual,
@@ -143,11 +137,16 @@ fn scan_files<'a>(
     Ok(findings)
 }
 
-fn report<'a>(
-    findings: impl IntoIterator<Item = &'a engine::Finding>,
+// Only the findings above their allowance are printed.
+fn report(
+    findings: &[engine::Finding],
+    over: &ledger::Counts,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let findings: Vec<_> = findings.into_iter().collect();
+    let findings: Vec<_> = findings
+        .iter()
+        .filter(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())))
+        .collect();
     for f in &findings {
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
         if let Some(note) = &f.note {
@@ -185,17 +184,19 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         if row.renewal.is_some() {
             return Err(io::Error::other("already renewed once"));
         }
+        let renewed = objections::Objection {
+            renewal: Some(today),
+            ..row.clone()
+        }
+        .line(&key);
         let prefix = format!("{}\t{}\t", key.0, key.1);
         contents = contents
             .split_inclusive('\n')
             .map(|line| {
                 if line.starts_with(&prefix) {
-                    format!(
-                        "{prefix}{}\t{}\t{today}\t{}\n",
-                        row.extra, row.filed, row.reason
-                    )
+                    &renewed
                 } else {
-                    line.to_owned()
+                    line
                 }
             })
             .collect();
@@ -216,16 +217,14 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         if extra == 0 || ledger::invalid_path(&key.1) {
             return Err(io::Error::other("no representable overage"));
         }
-        writeln!(
-            contents,
-            "{}\t{}\t{extra}\t{today}\t-\t{reason}",
-            key.0, key.1
-        )
-        .map_err(io::Error::other)?;
+        let filed = objections::Objection {
+            extra,
+            filed: today,
+            renewal: None,
+            reason: reason.to_owned(),
+        };
+        contents.push_str(&filed.line(&key));
     }
-    match fs::create_dir(&dir) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
-    }
+    fs::create_dir_all(&dir)?;
     replace(&file, &contents)
 }

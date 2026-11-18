@@ -70,7 +70,6 @@ fn gate_table() {
             })
             .collect::<Vec<_>>();
         let result = judge(&Inputs {
-            ancestor: true,
             approved: false,
             today: "2026-11-18".parse().unwrap(),
             excludes: &excludes,
@@ -91,7 +90,7 @@ fn gate_table() {
 }
 
 #[test]
-fn objection_transitions_and_ancestry() {
+fn objection_transitions() {
     let today = "2026-11-18".parse().unwrap();
     let empty = Counts::new();
     let excludes = GlobSetBuilder::new().build().unwrap();
@@ -106,21 +105,14 @@ fn objection_transitions_and_ancestry() {
         col: 1,
         note: None,
     }];
-    for (ancestor, approval, old, new, gates) in [
-        (false, false, "", "-", "behind"),
-        (true, false, "", "-", "findings protected"),
-        (true, true, "", "-", ""),
-        (true, false, "-", "-", ""),
-        (true, true, "-", "2026-11-18", ""),
-        (true, true, "", "2026-11-18", "findings objections"),
-        (
-            true,
-            true,
-            "2026-11-17",
-            "2026-11-18",
-            "findings objections",
-        ),
-        (true, false, "-", "", "findings"),
+    for (approval, old, new, gates) in [
+        (false, "", "-", "findings protected"),
+        (true, "", "-", ""),
+        (false, "-", "-", ""),
+        (true, "-", "2026-11-18", ""),
+        (true, "", "2026-11-18", "findings objections"),
+        (true, "2026-11-17", "2026-11-18", "findings objections"),
+        (false, "-", "", "findings"),
     ] {
         let rows = |renew: &str| {
             let text = if renew.is_empty() {
@@ -131,7 +123,6 @@ fn objection_transitions_and_ancestry() {
             blackhole_check::objections::parse(text.as_bytes(), today).unwrap()
         };
         let result = judge(&Inputs {
-            ancestor,
             approved: approval,
             today,
             excludes: &excludes,
