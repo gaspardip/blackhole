@@ -1,8 +1,15 @@
 #!/bin/sh
-# Everything CI runs. Green here means green there.
+# Everything the check workflow runs. Green here means green there.
 set -eu
 cd "$(dirname "$0")/.."
-python3 -I -m unittest discover -s tools -p 'test_*.py'
+# Without rustup nothing applies rust-toolchain.toml, so a newer local Rust would pass here and fail in CI.
+want="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+have="$(rustc --version | cut -d' ' -f2)"
+if [ "${have}" != "${want}" ]; then
+  echo "bin/check: rustc is ${have}, rust-toolchain.toml pins ${want}" >&2
+  exit 1
+fi
+python3 -I -m unittest discover -s tools
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked

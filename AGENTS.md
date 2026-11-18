@@ -1,14 +1,14 @@
 # blackhole
 
-Rules that coding agents cannot switch off. A Rust CLI (`blackhole`, crate `blackhole-check`) with its own rule engine.
+Rules that coding agents cannot talk their way around. A Rust CLI (`blackhole`, crate `blackhole-check`) with its own rule engine.
 
 ## Verify
 
-`bin/check` runs everything CI runs: the name guard tests, `cargo fmt --check`, clippy pedantic with warnings denied, and `cargo test`. A change is done when it exits 0.
+A change is done when `bin/check` exits 0. The `check` workflow runs that script and nothing else. The name guard is a second required check that only the hooks and CI can run.
 
 ## Setup
 
-Once per clone: `git config core.hooksPath .githooks`.
+Once per clone: `git config core.hooksPath .githooks`. The hooks need the list of names from outside the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`) and block the commit without it.
 
 ## The name guard
 
