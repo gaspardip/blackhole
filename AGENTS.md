@@ -29,3 +29,6 @@ A private list of names must never appear in this repository: file contents, fil
 
 - `main` is protected. Branch, commit with conventional commits (`fix:`, `feat:`, `refactor:`, `chore:`, `test:`, `docs:`), open one pull request per change. Merges are squashes.
 - Tests come first: a new behaviour starts as a failing test.
+
+Each rule needs a unique id, reject and accept fixtures, a root-cause fix and provenance.
+Run `BLACKHOLE_BLESS=1 ~/.agents/bin/heavy run -- cargo test --test fixtures` to update expectations, then review the diff.
