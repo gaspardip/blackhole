@@ -1,4 +1,4 @@
-use super::test_context::{chain_property, is_test, suite, test_file};
+use super::test_context::{chain_property, enclosing_runners, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -52,28 +52,20 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let call = super::values::invoked(ctx, c);
         let path = super::test_context::runner(ctx, &call);
         let base = path.first().copied().unwrap_or("");
-        let position = if is_test(base) || suite(base) {
+        let position = if path.test_or_suite() {
             if path.skipped {
                 Some(
                     chain_property(ctx, call.callee, modifier)
                         .unwrap_or(call.callee.span().start as usize),
                 )
             } else {
-                call.arg(1).and_then(|arg| skip_option(ctx, arg))
+                call.test_options()[0].and_then(|arg| skip_option(ctx, arg))
             }
         } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe") {
             Some(call.callee.span().start as usize)
         } else if is_test_file
             && let Some(at) = body_skip(call.callee)
-            && super::values::enclosing_functions(ctx, id).any(|f| {
-                let Some(AstKind::CallExpression(parent)) = super::values::outer(ctx, f.id())
-                else {
-                    return false;
-                };
-                super::test_context::runner(ctx, &super::values::invoked(ctx, parent))
-                    .first()
-                    .is_some_and(|s| is_test(s))
-            })
+            && enclosing_runners(ctx, id).any(|r| r.test())
         {
             Some(at)
         } else {

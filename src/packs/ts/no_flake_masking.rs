@@ -1,4 +1,4 @@
-use super::test_context::{is_test, runner, suite};
+use super::test_context::runner;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -69,15 +69,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         config(ctx, call.arg(0), &["retries"], findings);
                     }
                     Some(["test", "slow"]) => findings.report(c.span.start as usize, None),
-                    _ if p.first().is_some_and(|base| is_test(base) || suite(base))
+                    _ if p.test_or_suite()
                         && (super::values::call_expr(call.callee).is_some()
                             || !matches!(
                                 p.last,
                                 Some("each" | "for" | "extend" | "scoped" | "override")
                             )) =>
                     {
-                        let second = call.arg(1);
-                        let third = call.arg(2);
+                        let [second, third] = call.test_options();
                         inspect(ctx, second, &["retry", "timeout"], findings);
                         inspect(ctx, third, &["retry", "timeout"], findings);
                         if let Some(arg) = third

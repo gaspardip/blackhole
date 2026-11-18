@@ -61,26 +61,26 @@ fn page<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
         {
             return true;
         }
-        match e {
-            Expression::CallExpression(c) => {
-                if let Some(m) = invoked(ctx, c).callee.get_member_expr()
-                    && matches!(
-                        MemberKeys::Resolve(ctx).read(m),
-                        Some(
-                            "launch"
-                                | "launchPersistentContext"
-                                | "connect"
-                                | "connectOverCDP"
-                                | "newContext"
-                                | "newPage"
-                        )
+        if let Some(c) = super::values::call_expr(e) {
+            if let Some(m) = invoked(ctx, c).callee.get_member_expr()
+                && matches!(
+                    MemberKeys(ctx).read(m),
+                    Some(
+                        "launch"
+                            | "launchPersistentContext"
+                            | "connect"
+                            | "connectOverCDP"
+                            | "newContext"
+                            | "newPage"
                     )
-                {
-                    pending.push(m.object());
-                }
+                )
+            {
+                pending.push(m.object());
             }
-            _ => pending.extend(super::values::alternatives(e)),
+
+            continue;
         }
+        pending.extend(super::values::alternatives(e));
     }
     false
 }
@@ -100,7 +100,7 @@ fn route<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     };
     call.callee
         .get_member_expr()
-        .is_some_and(|m| MemberKeys::Resolve(ctx).read(m) == Some("route") && page(ctx, m.object()))
+        .is_some_and(|m| MemberKeys(ctx).read(m) == Some("route") && page(ctx, m.object()))
 }
 pub(super) fn canned<'a>(
     ctx: &TsCtx<'a>,

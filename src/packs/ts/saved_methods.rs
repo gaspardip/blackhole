@@ -21,8 +21,8 @@ fn same<'a>(
     let (mut left, mut right) = (left, right);
     let mut seen = std::collections::HashSet::new();
     while seen.insert(left.span()) {
-        if MemberKeys::Resolve(ctx).read(left).is_none()
-            || MemberKeys::Resolve(ctx).read(left) != MemberKeys::Resolve(ctx).read(right)
+        if MemberKeys(ctx).read(left).is_none()
+            || MemberKeys(ctx).read(left) != MemberKeys(ctx).read(right)
         {
             return false;
         }
@@ -150,16 +150,8 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
-        if MemberKeys::Resolve(ctx)
-            .read(m)
-            .is_some_and(|k| k.starts_with("on"))
-            && path(ctx, m.object()).is_some_and(|p| {
-                matches!(
-                    p.as_slice(),
-                    ["window" | "self" | "global" | "globalThis" | "document"]
-                        | ["window" | "globalThis", "document"]
-                )
-            })
+        if MemberKeys(ctx).read(m).is_some_and(|k| k.starts_with("on"))
+            && path(ctx, m.object()).is_some_and(|p| matches!(p.as_slice(), [] | ["document"]))
         {
             continue;
         }

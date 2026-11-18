@@ -20,9 +20,9 @@ use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
 pub(super) fn is_test(name: &str) -> bool {
     matches!(name, "it" | "test" | "specify")
 }
-pub(super) fn static_method(e: &Expression<'_>, names: &[&str]) -> bool {
+pub(super) fn static_method<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
     e.get_member_expr()
-        .and_then(|m| MemberKeys::Literal.read(m))
+        .and_then(|m| MemberKeys(ctx).read(m))
         .is_some_and(|key| names.contains(&key))
 }
 fn single_statement<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Statement<'a>> {
@@ -76,21 +76,24 @@ pub(super) fn chain_property<'a>(
     loop {
         current = resolve(ctx, current);
         if let Some(m) = current.get_member_expr() {
-            if MemberKeys::Resolve(ctx).read(m).is_some_and(&wanted) {
+            if MemberKeys(ctx).read(m).is_some_and(&wanted) {
                 return Some(super::values::member_span(ctx, m).start as usize);
             }
             current = m.object();
             continue;
         }
+        if let Some(c) = call_expr(current) {
+            current = &c.callee;
+            continue;
+        }
         match current {
-            Expression::CallExpression(c) => current = &c.callee,
             Expression::TaggedTemplateExpression(t) => current = &t.tag,
             _ => return None,
         }
     }
 }
 
-use super::values::{Invocation, call_expr, invoked, path, resolve, unqualified};
+use super::values::{Invocation, call_expr, invoked, path, resolve};
 use crate::engine::TsCtx;
 use oxc::span::GetSpan;
 
@@ -141,7 +144,7 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
         }
         if let Some(parts) = path(ctx, e) {
             let mut result = Runner::default();
-            let names = match unqualified(&parts) {
+            let names = match parts.as_slice() {
                 ["node:test", "default", rest @ ..] => {
                     result.push("test");
                     rest
@@ -159,7 +162,7 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             break result;
         }
         if let Some(m) = e.get_member_expr()
-            && let Some(key) = MemberKeys::Resolve(ctx).read(m)
+            && let Some(key) = MemberKeys(ctx).read(m)
         {
             steps.push((span, Some(key)));
             e = m.object();
@@ -185,4 +188,38 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
         cache.insert(span, result);
     }
     result
+}
+
+impl Runner<'_> {
+    pub(super) fn test(&self) -> bool {
+        self.first().is_some_and(|name| is_test(name))
+    }
+    pub(super) fn test_or_suite(&self) -> bool {
+        self.test() || self.first().is_some_and(|name| suite(name))
+    }
+}
+
+impl<'a> Invocation<'a> {
+    pub(super) fn test_options(&self) -> [Option<&'a Expression<'a>>; 2] {
+        [self.arg(1), self.arg(2)]
+    }
+    pub(super) fn inline_test_body(&self) -> Option<oxc::span::Span> {
+        self.args
+            .iter()
+            .flatten()
+            .find_map(|arg| match arg.get_inner_expression() {
+                Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
+                Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
+                _ => None,
+            })
+    }
+}
+pub(super) fn enclosing_runners<'ctx, 'a>(
+    ctx: &'ctx TsCtx<'a>,
+    id: oxc::syntax::node::NodeId,
+) -> impl Iterator<Item = Runner<'a>> + 'ctx {
+    super::values::enclosing_functions(ctx, id).map(|f| {
+        super::values::enclosing_call(ctx, f.id())
+            .map_or_else(Runner::default, |call| runner(ctx, &call))
+    })
 }

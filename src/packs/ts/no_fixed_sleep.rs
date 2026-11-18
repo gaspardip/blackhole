@@ -1,4 +1,4 @@
-use super::test_context::{is_test, single_effect};
+use super::test_context::{enclosing_runners, single_effect};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
@@ -11,55 +11,54 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Await the operation or a promise resolved by its handler. Use fake timers to test elapsed time.",
     run: Run::Ts(check),
 };
-fn calls_resolver(body: Option<&Expression<'_>>, name: &str) -> bool {
-    let Some(Expression::CallExpression(c)) = body else {
-        return false;
-    };
-    c.callee.is_specific_id(name)
-}
 fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
-    if !super::values::resolves_to_global(ctx, &n.callee, "Promise") {
+    use super::values::{call_expr, invoked, path, resolve, symbol};
+    if path(ctx, &n.callee).as_deref() != Some(&["Promise"]) {
         return false;
     }
-    let Some(callback) = n.arguments.first().and_then(|a| a.as_expression()) else {
+    let Some(callback) = n
+        .arguments
+        .first()
+        .and_then(|a| a.as_expression())
+        .map(|e| resolve(ctx, e))
+    else {
         return false;
     };
-    let params = match callback.get_inner_expression() {
+    let params = match callback {
         Expression::ArrowFunctionExpression(f) => &f.params,
         Expression::FunctionExpression(f) => &f.params,
         _ => return false,
     };
-    let Some(resolve) = params
+    let Some(resolver) = params
         .items
         .first()
         .and_then(|p| p.pattern.get_binding_identifier())
+        .and_then(|id| id.symbol_id.get())
     else {
         return false;
     };
-    let Some(Expression::CallExpression(c)) =
-        single_effect(callback.get_inner_expression()).map(Expression::get_inner_expression)
-    else {
+    let Some(effect) = single_effect(callback).and_then(|e| call_expr(resolve(ctx, e))) else {
         return false;
     };
-    if !(c.callee.is_specific_id("setTimeout")
-        || c.callee.is_specific_member_access("window", "setTimeout")
-        || c.callee
-            .is_specific_member_access("globalThis", "setTimeout"))
-    {
+    let timer = invoked(ctx, effect);
+    if timer.path.as_deref() != Some(&["setTimeout"]) {
         return false;
     }
-    match c
-        .arguments
-        .first()
-        .and_then(|a| a.as_expression())
-        .map(Expression::get_inner_expression)
-    {
-        Some(Expression::Identifier(id)) => id.name == resolve.name,
-        Some(Expression::ArrowFunctionExpression(f)) => {
-            calls_resolver(f.body.as_expression(), resolve.name.as_str())
-        }
-        _ => false,
-    }
+    let Some(arg) = timer.arg(0).map(|e| resolve(ctx, e)) else {
+        return false;
+    };
+    let callee = match arg {
+        Expression::ArrowFunctionExpression(f) => f
+            .body
+            .as_expression()
+            .and_then(call_expr)
+            .map(|c| invoked(ctx, c).callee),
+        e => Some(e),
+    };
+    callee
+        .and_then(Expression::get_identifier_reference)
+        .and_then(|id| symbol(ctx, id))
+        == Some(resolver)
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
@@ -84,14 +83,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             })
         };
         if sleep
-            && let Some(f) = super::values::enclosing_functions(ctx, id).next()
-            && let Some(AstKind::CallExpression(c)) = super::values::outer(ctx, f.id())
-            && super::test_context::runner(ctx, &super::values::invoked(ctx, c))
-                .first()
-                .is_some_and(|s| {
-                    is_test(s)
-                        || matches!(*s, "beforeEach" | "beforeAll" | "afterEach" | "afterAll")
-                })
+            && enclosing_runners(ctx, id).next().is_some_and(|owner| {
+                owner.test()
+                    || matches!(
+                        owner.first().copied(),
+                        Some("beforeEach" | "beforeAll" | "afterEach" | "afterAll")
+                    )
+            })
         {
             sleeps.push(a.span.start as usize);
         }

@@ -9,12 +9,12 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Await the operation or resolve a promise from the handler that records the event.",
     run: Run::Ts(check),
 };
-fn recorder(mut e: &Expression<'_>) -> Option<bool> {
+fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
     let mut first = true;
     let mut reads = false;
     loop {
         if let Some(m) = e.get_member_expr() {
-            let name = MemberKeys::Literal.read(m);
+            let name = MemberKeys(ctx).read(m);
             if name == Some("current") {
                 return None;
             }
@@ -41,7 +41,7 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
     let object = m.object().get_inner_expression();
     let subject = object
         .get_member_expr()
-        .filter(|n| MemberKeys::Literal.read(n) == Some("not"))
+        .filter(|n| MemberKeys(ctx).read(n) == Some("not"))
         .map_or(object, |n| n.object().get_inner_expression());
     let Expression::CallExpression(call) = subject else {
         return false;
@@ -52,11 +52,11 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
     call.arguments
         .first()
         .and_then(|a| a.as_expression())
-        .and_then(recorder)
+        .and_then(|e| recorder(ctx, e))
         .is_some_and(|reads| {
             reads
                 || matches!(
-                    MemberKeys::Literal.read(m).unwrap_or(""),
+                    MemberKeys(ctx).read(m).unwrap_or(""),
                     "toHaveLength"
                         | "toHaveBeenCalled"
                         | "toHaveBeenCalledOnce"
@@ -97,13 +97,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         else {
             continue;
         };
-        let reads = recorder(value);
+        let reads = recorder(ctx, value);
         if reads == Some(true)
             || poll
                 && reads.is_some()
                 && super::values::outer(ctx, id)
                     .and_then(|n| n.as_member_expression_kind())
-                    .and_then(|m| MemberKeys::Literal.read_kind(m))
+                    .and_then(|m| MemberKeys(ctx).read_kind(m))
                     == Some("toHaveLength")
             || !poll && assertion(ctx, value)
         {

@@ -10,21 +10,12 @@ use oxc::ast::{
 
 fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<String> {
     let parts = path(ctx, expr)?;
-    Some(native_name(&parts))
+    Some(parts.join("."))
 }
-fn native_name(parts: &[&str]) -> String {
-    let skip = usize::from(
-        parts
-            .first()
-            .is_some_and(|s| super::values::global_object(s)),
-    );
-    parts[skip..].join(".")
-}
-
 fn protected_member<'a>(ctx: &TsCtx<'a>, m: &'a MemberExpression<'a>) -> bool {
     native(ctx, m.object())
         .and_then(|owner| super::native_properties::owner_properties(&owner))
-        .is_some_and(|protected| MemberKeys::Resolve(ctx).read(m).is_none_or(protected))
+        .is_some_and(|protected| MemberKeys(ctx).read(m).is_none_or(protected))
 }
 
 pub(super) fn writes<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> bool {
@@ -55,7 +46,7 @@ pub(super) enum Mutation {
 use super::values::Invocation;
 impl Invocation<'_> {
     pub(super) fn mutation(&self) -> Option<Mutation> {
-        match native_name(self.path.as_deref()?).as_str() {
+        match self.path.as_deref()?.join(".").as_str() {
             "Object.assign" => Some(Mutation::Assign),
             "Object.defineProperties" => Some(Mutation::DefineMany),
             "Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set" => {
@@ -126,7 +117,7 @@ pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool
         return false;
     };
 
-    match super::values::unqualified(parts) {
+    match parts.as_slice() {
         [
             "@tauri-apps/api/mocks",
             "mockIPC" | "mockWindows" | "mockConvertFileSrc",

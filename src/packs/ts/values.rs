@@ -184,10 +184,7 @@ pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a s
     literal(ctx, expr)
 }
 
-pub(super) enum MemberKeys<'ctx, 'a> {
-    Literal,
-    Resolve(&'ctx TsCtx<'a>),
-}
+pub(super) struct MemberKeys<'ctx, 'a>(pub(super) &'ctx TsCtx<'a>);
 impl<'a> MemberKeys<'_, 'a> {
     pub(super) fn read(&self, member: &'a MemberExpression<'a>) -> Option<&'a str> {
         use oxc::ast::MemberExpressionKind as Kind;
@@ -199,9 +196,7 @@ impl<'a> MemberKeys<'_, 'a> {
     }
     pub(super) fn read_kind(&self, member: oxc::ast::MemberExpressionKind<'a>) -> Option<&'a str> {
         match (self, member) {
-            (Self::Resolve(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => {
-                literal(ctx, &m.expression)
-            }
+            (Self(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => literal(ctx, &m.expression),
             (_, m) => m.static_property_name()?.as_str(),
         }
     }
@@ -217,15 +212,21 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
             return None;
         }
         if let Some(member) = expr.get_member_expr() {
-            parts.push(MemberKeys::Resolve(ctx).read(member)?);
+            parts.push(MemberKeys(ctx).read(member)?);
             expr = member.object();
             continue;
+        }
+        if matches!(expr, Expression::ImportMeta(_)) {
+            parts.push("import.meta");
+            break;
         }
         let Expression::Identifier(id) = expr else {
             return None;
         };
         if ctx.semantic.is_reference_to_global_variable(id) {
-            parts.push(id.name.as_str());
+            if !global_object(id.name.as_str()) {
+                parts.push(id.name.as_str());
+            }
             break;
         }
         let decl = declaration(ctx, id)?;
@@ -246,6 +247,12 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
         break;
     }
     parts.reverse();
+    if matches!(
+        parts.as_slice(),
+        ["node:timers" | "timers", "setTimeout" | "setInterval"]
+    ) {
+        parts.remove(0);
+    }
     Some(parts)
 }
 
@@ -286,13 +293,20 @@ pub(super) fn callback_call<'a>(
     if parameter_index(params, symbol)? >= first_parameters {
         return None;
     }
-    let AstKind::CallExpression(c) = ctx.semantic.nodes().parent_kind(function.id()) else {
-        return None;
-    };
-    let call = invoked(ctx, c);
+    let call = enclosing_call(ctx, function.id())?;
     call.arg(1)
-        .is_some_and(|e| e.span() == function.span())
+        .is_some_and(|e| resolve(ctx, e).span() == function.span())
         .then_some(call)
+}
+
+pub(super) fn enclosing_call<'a>(
+    ctx: &TsCtx<'a>,
+    id: oxc::syntax::node::NodeId,
+) -> Option<Rc<Invocation<'a>>> {
+    match outer(ctx, id)? {
+        AstKind::CallExpression(c) => Some(invoked(ctx, c)),
+        _ => None,
+    }
 }
 
 pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Option<AstKind<'a>> {
@@ -348,12 +362,6 @@ pub(super) fn any_property<'a>(
     false
 }
 
-pub(super) fn unqualified<'p, 'a>(p: &'p [&'a str]) -> &'p [&'a str] {
-    match p {
-        [root, rest @ ..] if global_object(root) => rest,
-        _ => p,
-    }
-}
 pub(super) struct Invocation<'a> {
     pub(super) callee: &'a Expression<'a>,
     pub(super) path: Option<Vec<&'a str>>,
@@ -388,15 +396,15 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<I
         if !seen.insert(callee.span()) {
             break parts;
         }
-        if let Expression::CallExpression(c) = callee
+        if let Some(c) = call_expr(callee)
             && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
-            && MemberKeys::Resolve(ctx).read(m) == Some("bind")
+            && MemberKeys(ctx).read(m) == Some("bind")
         {
             args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
             callee = resolve(ctx, m.object());
             continue;
         }
-        if parts.as_deref().map(unqualified) == Some(&["Reflect", "apply"])
+        if parts.as_deref() == Some(&["Reflect", "apply"])
             && let Some(target) = args.first().copied().flatten()
         {
             args = array_args(ctx, args.get(2).copied().flatten());
@@ -406,7 +414,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<I
         let Some(m) = callee.get_member_expr() else {
             break parts;
         };
-        match MemberKeys::Resolve(ctx).read(m) {
+        match MemberKeys(ctx).read(m) {
             Some("call") => {
                 args.drain(..args.len().min(1));
             }
@@ -493,7 +501,7 @@ pub(super) fn receiver<'a>(
     callee: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
     if let Some(m) = callee.get_member_expr() {
-        return Some((m.object(), MemberKeys::Resolve(ctx).read(m)?));
+        return Some((m.object(), MemberKeys(ctx).read(m)?));
     }
     let id = callee.get_identifier_reference()?;
     let AstKind::VariableDeclarator(v) = declaration(ctx, id)? else {

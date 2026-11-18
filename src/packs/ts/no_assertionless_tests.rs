@@ -1,10 +1,7 @@
-use super::test_context::{chain_property, is_test};
+use super::test_context::chain_property;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
-    ast::{
-        AstKind,
-        ast::{CallExpression, Expression},
-    },
+    ast::{AstKind, ast::Expression},
     span::GetSpan,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,34 +30,34 @@ fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bo
         _ => false,
     }
 }
-fn tautology<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>, base: &str) -> bool {
-    let first = call.arguments.first().and_then(|a| a.as_expression());
-    if call.callee.is_specific_id("assert") {
+fn tautology<'a>(
+    ctx: &TsCtx<'a>,
+    call: &super::values::Invocation<'a>,
+    parts: super::test_context::Runner<'a>,
+) -> bool {
+    use super::values::{call_expr, invoked, receiver, resolve};
+    let first = call.arg(0);
+    if parts == ["assert"] {
         return first.is_some_and(literal);
     }
-    let Some(m) = call.callee.get_member_expr() else {
+    if parts.first() == Some(&"assert") {
+        return first.zip(call.arg(1)).is_some_and(|(a, b)| same(ctx, a, b));
+    }
+    let Some((object, _)) = receiver(ctx, call.callee) else {
         return false;
     };
-    if base == "assert" {
-        return first
-            .zip(call.arguments.get(1).and_then(|a| a.as_expression()))
-            .is_some_and(|(a, b)| same(ctx, a, b));
+    let mut object = resolve(ctx, object);
+    while let Some(m) = object.get_member_expr() {
+        object = m.object().get_inner_expression();
     }
-    let mut object = m.object().get_inner_expression();
-    while let Some(n) = object.get_member_expr() {
-        object = n.object().get_inner_expression();
-    }
-    let Expression::CallExpression(expect) = object else {
+    let Some(expect) = call_expr(object) else {
         return false;
     };
-    expect.callee.is_specific_id("expect")
-        && expect
-            .arguments
-            .first()
-            .and_then(|a| a.as_expression())
-            .is_some_and(|subject| {
-                literal(subject) || first.is_some_and(|arg| same(ctx, subject, arg))
-            })
+    let expect = invoked(ctx, expect);
+    super::test_context::runner(ctx, &expect) == ["expect"]
+        && expect.arg(0).is_some_and(|subject| {
+            literal(subject) || first.is_some_and(|arg| same(ctx, subject, arg))
+        })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, bool>::new();
@@ -106,26 +103,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             let bare_literal = parts == ["expect"]
                 && inv.arg(0).is_some_and(literal)
                 && !matches!(super::values::outer(ctx,n.id()),Some(kind) if kind.as_member_expression_kind().is_some());
-            let found = bare_literal || tautology(ctx, c, base);
+            let found = bare_literal || tautology(ctx, &inv, parts);
             *assertions.entry(c.span.start).or_default() |= found;
         }
-        if !is_test(base)
+        if !parts.test()
             || chain_property(ctx, &c.callee, |s| s == "todo").is_some()
-            || super::test_context::static_method(&c.callee, &["each", "for", "extend"])
+            || super::test_context::static_method(ctx, &c.callee, &["each", "for", "extend"])
         {
             continue;
         }
         // shortcut: callbacks passed by reference need interprocedural analysis before their assertions can be judged.
-        if let Some(body) = inv
-            .args
-            .iter()
-            .flatten()
-            .find_map(|a| match a.get_inner_expression() {
-                Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
-                Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
-                _ => None,
-            })
-        {
+        if let Some(body) = inv.inline_test_body() {
             tests.push((c.span.start, body));
         }
     }

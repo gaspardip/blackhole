@@ -1,6 +1,6 @@
 use super::{
     double_mutations::Mutation,
-    values::{Invocation, MemberKeys, declaration, invoked, path, resolve},
+    values::{Invocation, MemberKeys, declaration, enclosing_call, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{
@@ -20,6 +20,16 @@ pub(super) fn contains_function<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>
         if !seen.insert(e.span()) {
             continue;
         }
+        if let Some(c) = super::values::call_expr(e) {
+            if let Some(m) = resolve(ctx, &c.callee).get_member_expr()
+                && MemberKeys(ctx).read(m) == Some("bind")
+                && !matches!(resolve(ctx, m.object()), Expression::ObjectExpression(_))
+            {
+                pending.push(m.object());
+            }
+
+            continue;
+        }
         match e {
             Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
                 return true;
@@ -29,14 +39,7 @@ pub(super) fn contains_function<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>
             {
                 return true;
             }
-            Expression::CallExpression(c) => {
-                if let Some(m) = resolve(ctx, &c.callee).get_member_expr()
-                    && MemberKeys::Resolve(ctx).read(m) == Some("bind")
-                    && !matches!(resolve(ctx, m.object()), Expression::ObjectExpression(_))
-                {
-                    pending.push(m.object());
-                }
-            }
+
             Expression::ObjectExpression(obj) => {
                 for p in &obj.properties {
                     pending.push(match p {
@@ -122,8 +125,8 @@ pub(super) fn spread<'a>(ctx: &TsCtx<'a>, obj: &'a ObjectExpression<'a>) -> bool
     if !has_binding_spread {
         return false;
     }
-    if let AstKind::CallExpression(c) = ctx.semantic.nodes().parent_kind(obj.node_id.get())
-        && invoked(ctx, c).path.as_deref() == Some(&["cloudflare:workers", "withEnv"])
+    if enclosing_call(ctx, obj.node_id.get())
+        .is_some_and(|call| call.path.as_deref() == Some(&["cloudflare:workers", "withEnv"]))
     {
         return false;
     }

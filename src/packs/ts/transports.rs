@@ -13,13 +13,6 @@ use oxc::{
 };
 use std::collections::HashSet;
 
-fn fetch_path(parts: &[&str]) -> bool {
-    match parts {
-        ["fetch"] => true,
-        [root, "fetch"] => global_object(root),
-        _ => false,
-    }
-}
 fn global_qualifier(ctx: &TsCtx<'_>, name: &TSTypeName<'_>) -> bool {
     let TSTypeName::IdentifierReference(id) = name else {
         return false;
@@ -38,7 +31,7 @@ fn fetch<'a>(ctx: &TsCtx<'a>, mut ty: &'a TSType<'a>) -> bool {
                         } else {
                             initializer(ctx, id)
                                 .and_then(|e| path(ctx, e))
-                                .is_some_and(|p| fetch_path(&p))
+                                .is_some_and(|p| p == ["fetch"])
                         }
                     }
                     TSTypeQueryExprName::QualifiedName(n) => {
@@ -182,7 +175,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             arguments(ctx, symbol, &mut next);
         }
         if let Some(m) = e.get_member_expr()
-            && let Some(k) = super::values::MemberKeys::Resolve(ctx).read(m)
+            && let Some(k) = super::values::MemberKeys(ctx).read(m)
         {
             pending.push(Step::Visit(m.object(), Some(paths.push(fields, k))));
             continue;

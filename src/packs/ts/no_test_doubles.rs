@@ -1,5 +1,4 @@
 use super::values::Imported;
-use super::values::MemberKeys;
 pub(crate) use super::values::Resolution;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
@@ -53,6 +52,31 @@ fn hono<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
             if worker_entry(ctx, e) {
                 return true;
             }
+            if let Some(c) = super::values::call_expr(e) {
+                if let Some(m) = super::values::invoked(ctx, c).callee.get_member_expr()
+                    && matches!(
+                        super::values::MemberKeys(ctx).read(m),
+                        Some(
+                            "use"
+                                | "route"
+                                | "get"
+                                | "post"
+                                | "put"
+                                | "patch"
+                                | "delete"
+                                | "all"
+                                | "on"
+                                | "basePath"
+                                | "notFound"
+                                | "onError"
+                        )
+                    )
+                {
+                    pending.push(m.object());
+                }
+
+                continue;
+            }
             match e {
                 Expression::NewExpression(n)
                     if super::values::path(ctx, &n.callee).is_some_and(|p| {
@@ -61,29 +85,7 @@ fn hono<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
                 {
                     return true;
                 }
-                Expression::CallExpression(c) => {
-                    if let Some(m) = super::values::invoked(ctx, c).callee.get_member_expr()
-                        && matches!(
-                            super::values::MemberKeys::Resolve(ctx).read(m),
-                            Some(
-                                "use"
-                                    | "route"
-                                    | "get"
-                                    | "post"
-                                    | "put"
-                                    | "patch"
-                                    | "delete"
-                                    | "all"
-                                    | "on"
-                                    | "basePath"
-                                    | "notFound"
-                                    | "onError"
-                            )
-                        )
-                    {
-                        pending.push(m.object());
-                    }
-                }
+
                 _ => (),
             }
         }
@@ -179,23 +181,19 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             findings.report(call.span.start as usize, None);
             continue;
         }
+        let Some((object, method)) = super::values::receiver(ctx, invocation.callee) else {
+            continue;
+        };
         if test_code
-            && let Some(m) = invocation.callee.get_member_expr()
-            && super::values::MemberKeys::Resolve(ctx).read(m) == Some("fulfill")
+            && method == "fulfill"
             && let Some(arg) = invocation.arg(0)
-            && super::playwright::canned(ctx, m.object(), arg)
+            && super::playwright::canned(ctx, object, arg)
         {
             findings.report(call.span.start as usize, None);
         }
-        let Some(member) = call.callee.get_member_expr() else {
-            continue;
-        };
-        let Some(method) = MemberKeys::Literal.read(member) else {
-            continue;
-        };
         if method == "request"
             && test_code
-            && hono(ctx, member.object())
+            && hono(ctx, object)
             && let Some(value) = invocation.arg(2)
         {
             check_bindings(ctx, value, &mut reported, findings);

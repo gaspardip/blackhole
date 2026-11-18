@@ -45,21 +45,8 @@ const NAMES: &[(&str, Marker)] = &[
 fn marker(key: &str, kind: Marker) -> bool {
     NAMES.contains(&(key, kind))
 }
-fn meta(e: &Expression<'_>) -> bool {
-    matches!(e.get_inner_expression(), Expression::ImportMeta(_))
-}
-fn unbound_name<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
-    let Expression::Identifier(id) = e.get_inner_expression() else {
-        return false;
-    };
-    names.contains(&id.name.as_str()) && ctx.semantic.is_reference_to_global_variable(id)
-}
-fn env<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    let m = e.get_member_expr()?;
-    (MemberKeys::Resolve(ctx).read(m)? == "env").then(|| m.object())
-}
 fn process_env<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, suffix: &[&str]) -> bool {
-    super::values::path(ctx, e).is_some_and(|p| match super::values::unqualified(&p) {
+    super::values::path(ctx, e).is_some_and(|p| match p.as_slice() {
         ["process" | "node:process", "env", rest @ ..]
         | ["node:process", "default", "env", rest @ ..] => rest == suffix,
         _ => false,
@@ -70,12 +57,11 @@ fn mode<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<Span> {
     if process_env(ctx, e, &["NODE_ENV"]) {
         return Some(e.span());
     }
-    let m = e.get_member_expr()?;
-    let owner = env(ctx, m.object())?;
-    let name = MemberKeys::Resolve(ctx).read(m)?;
-    (marker(name, Marker::Mode)
-        && (meta(owner) || name == "NODE_ENV" && unbound_name(ctx, owner, &["process"])))
-    .then_some(e.span())
+    super::values::path(ctx, e)
+        .is_some_and(
+            |p| matches!(p.as_slice(),["import.meta","env",name] if marker(name,Marker::Mode)),
+        )
+        .then_some(e.span())
 }
 fn comparison<'a>(
     ctx: &TsCtx<'a>,
@@ -102,9 +88,10 @@ fn read(ctx: &TsCtx<'_>, id: NodeId, span: Span) -> bool {
 }
 fn test_member<'a>(ctx: &TsCtx<'a>, object: &'a Expression<'a>, name: &str) -> bool {
     (marker(name, Marker::Worker) && process_env(ctx, object, &[]))
-        || (name == "vitest" && meta(object))
+        || (name == "vitest"
+            && super::values::path(ctx, object).is_some_and(|p| p == ["import.meta"]))
         || (marker(name, Marker::Runner)
-            && unbound_name(ctx, object, &["window", "globalThis", "global"]))
+            && super::values::path(ctx, object).is_some_and(|p| p.is_empty()))
 }
 fn runner_global<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
     let Expression::Identifier(id) = expr.get_inner_expression() else {
@@ -122,7 +109,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
         let span = match node.kind() {
             kind if let Some(m) = kind.as_member_expression_kind()
-                && MemberKeys::Resolve(ctx).read_kind(m).is_some_and(|name| {
+                && MemberKeys(ctx).read_kind(m).is_some_and(|name| {
                     test_member(ctx, super::values::member_object(m), name)
                 })
                 && read(ctx, id, node.span()) =>

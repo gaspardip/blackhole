@@ -1,4 +1,3 @@
-use super::values::MemberKeys;
 use super::values::{declaration, resolve, resolves_to_global};
 use crate::engine::TsCtx;
 use oxc::{
@@ -60,6 +59,24 @@ fn raw_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, kinds: ResponseK
         if !seen.insert(expr.span()) {
             continue;
         }
+        if let Some(call) = super::values::call_expr(expr) {
+            let invocation = super::values::invoked(ctx, call);
+            match invocation.path.as_deref() {
+                Some(["Promise", "resolve"]) => pending.extend(invocation.arg(0)),
+                Some(["Response", "json" | "redirect" | "error"]) => return true,
+                Some(
+                    [
+                        "msw",
+                        "HttpResponse",
+                        "json" | "text" | "html" | "xml" | "arrayBuffer" | "formData" | "error"
+                        | "redirect" | "bytes",
+                    ],
+                ) if matches!(kinds, ResponseKinds::WithMsw) => return true,
+                _ => {}
+            }
+            pending.push(invocation.callee);
+            continue;
+        }
         match expr {
             Expression::NewExpression(n)
                 if resolves_to_global(ctx, &n.callee, "Response")
@@ -68,44 +85,6 @@ fn raw_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, kinds: ResponseK
                             .is_some_and(|p| p == ["msw", "HttpResponse"]) =>
             {
                 return true;
-            }
-            Expression::CallExpression(call) => {
-                let invocation = super::values::invoked(ctx, call);
-                let callee = invocation.callee;
-                if invocation.path.as_deref() == Some(&["Promise", "resolve"]) {
-                    pending.extend(invocation.arg(0));
-                }
-                if matches!(kinds, ResponseKinds::WithMsw)
-                    && let Some(m) = callee.get_member_expr()
-                    && super::values::path(ctx, m.object())
-                        .is_some_and(|p| p == ["msw", "HttpResponse"])
-                    && matches!(
-                        super::values::MemberKeys::Resolve(ctx).read(m),
-                        Some(
-                            "json"
-                                | "text"
-                                | "html"
-                                | "xml"
-                                | "arrayBuffer"
-                                | "formData"
-                                | "error"
-                                | "redirect"
-                                | "bytes"
-                        )
-                    )
-                {
-                    return true;
-                }
-                if let Some(member) = callee.get_member_expr()
-                    && matches!(
-                        MemberKeys::Literal.read(member),
-                        Some("json" | "redirect" | "error")
-                    )
-                    && resolves_to_global(ctx, member.object(), "Response")
-                {
-                    return true;
-                }
-                pending.push(callee);
             }
             Expression::Identifier(id) => {
                 if let Some(AstKind::Function(f)) = declaration(ctx, id) {
