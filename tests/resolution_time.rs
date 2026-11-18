@@ -7,6 +7,26 @@ use std::{
 fn source(shape: &str, n: usize) -> String {
     let mut text = String::new();
     match shape {
+        "object-spreads" | "aliased-spreads" | "array-spreads" => {
+            let array = shape == "array-spreads";
+            let (left, right) = if array { ("[", "]") } else { ("{", "}") };
+            writeln!(text, "const a0={left}{right};").unwrap();
+            for i in 1..=n {
+                let prev = i - 1;
+                let parent = if shape == "aliased-spreads" {
+                    writeln!(text, "const p{i}=a{prev};").unwrap();
+                    format!("p{i}")
+                } else {
+                    format!("a{prev}")
+                };
+                writeln!(text, "const a{i}={left}...{parent},...{parent}{right};").unwrap();
+            }
+            if array {
+                writeln!(text, "vi.setConfig(...a{n});").unwrap();
+            } else {
+                writeln!(text, "vi.setConfig(a{n});").unwrap();
+            }
+        }
         "chain" | "chaincalls" => {
             let links = if shape == "chain" { n } else { n / 2 };
             text.push_str("const a0=test;\n");
@@ -58,6 +78,9 @@ fn resolves_large_files() {
 
 fn check_shapes() {
     for shape in [
+        "object-spreads",
+        "aliased-spreads",
+        "array-spreads",
         "imported",
         "letalias",
         "fnhelper",

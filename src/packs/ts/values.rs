@@ -22,6 +22,7 @@ pub(crate) struct Resolution<'a> {
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
     written: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
+    objects: RefCell<HashMap<u32, Properties<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
@@ -452,58 +453,99 @@ pub(super) fn call_expr<'a>(e: &'a Expression<'a>) -> Option<&'a CallExpression<
     }
 }
 
+#[derive(Clone, Default)]
 pub(super) struct Properties<'a> {
     pub(super) named: std::collections::BTreeMap<&'a str, &'a oxc::ast::ast::ObjectProperty<'a>>,
     pub(super) unknown: bool,
+}
+impl Properties<'_> {
+    fn invalidate(&mut self) {
+        self.unknown = true;
+        self.named.clear();
+    }
+    fn overlay(&mut self, other: &Self) {
+        if other.unknown {
+            self.invalidate();
+        }
+        self.named.extend(
+            other
+                .named
+                .iter()
+                .map(|(&name, &property)| (name, property)),
+        );
+    }
 }
 pub(super) fn properties<'a>(
     ctx: &TsCtx<'a>,
     initial: &'a Expression<'a>,
 ) -> Option<Properties<'a>> {
-    enum Step<'a> {
-        Value(&'a Expression<'a>),
-        Property(&'a ObjectPropertyKind<'a>),
-        Leave(u32),
+    use oxc::ast::ast::ObjectExpression;
+    struct Frame<'a> {
+        object: &'a ObjectExpression<'a>,
+        index: usize,
+        summary: Properties<'a>,
+        cyclic: bool,
     }
-    let mut pending = vec![Step::Value(initial)];
-    let mut active = HashSet::new();
-    let mut result = Properties {
-        named: std::collections::BTreeMap::new(),
-        unknown: false,
-    };
-    if !matches!(resolve(ctx, initial), Expression::ObjectExpression(_)) {
+    let Expression::ObjectExpression(root) = resolve(ctx, initial) else {
         return None;
+    };
+    let mut cache = ctx.resolution.objects.borrow_mut();
+    if let Some(hit) = cache.get(&root.span.start) {
+        return Some(hit.clone());
     }
-    while let Some(step) = pending.pop() {
-        match step {
-            Step::Value(e) => {
-                if let Expression::ObjectExpression(o) = resolve(ctx, e)
-                    && active.insert(o.span.start)
-                {
-                    pending.push(Step::Leave(o.span.start));
-                    pending.extend(o.properties.iter().rev().map(Step::Property));
-                } else {
-                    result.unknown = true;
-                    result.named.clear();
-                }
+    let mut active = HashSet::from([root.span.start]);
+    let mut stack = vec![Frame {
+        object: root,
+        index: 0,
+        summary: Properties::default(),
+        cyclic: false,
+    }];
+    loop {
+        let frame = stack.last_mut()?;
+        let Some(property) = frame.object.properties.get(frame.index) else {
+            let finished = stack.pop()?;
+            let start = finished.object.span.start;
+            active.remove(&start);
+            if !finished.cyclic {
+                cache.insert(start, finished.summary.clone());
             }
-            Step::Property(ObjectPropertyKind::ObjectProperty(p)) => {
+            let Some(parent) = stack.last_mut() else {
+                return Some(finished.summary);
+            };
+            parent.cyclic |= finished.cyclic;
+            parent.summary.overlay(&finished.summary);
+            continue;
+        };
+        frame.index += 1;
+        match property {
+            ObjectPropertyKind::ObjectProperty(p) => {
                 if let Some(name) = key(ctx, &p.key) {
-                    result.named.insert(name, p);
+                    frame.summary.named.insert(name, p);
                 } else {
-                    result.unknown = true;
-                    result.named.clear();
+                    frame.summary.invalidate();
                 }
             }
-            Step::Property(ObjectPropertyKind::SpreadProperty(s)) => {
-                pending.push(Step::Value(&s.argument));
-            }
-            Step::Leave(start) => {
-                active.remove(&start);
+            ObjectPropertyKind::SpreadProperty(s) => {
+                let Expression::ObjectExpression(child) = resolve(ctx, &s.argument) else {
+                    frame.summary.invalidate();
+                    continue;
+                };
+                if let Some(hit) = cache.get(&child.span.start) {
+                    frame.summary.overlay(hit);
+                } else if active.insert(child.span.start) {
+                    stack.push(Frame {
+                        object: child,
+                        index: 0,
+                        summary: Properties::default(),
+                        cyclic: false,
+                    });
+                } else {
+                    frame.cyclic = true;
+                    frame.summary.invalidate();
+                }
             }
         }
     }
-    Some(result)
 }
 
 pub(super) fn receiver<'a>(
