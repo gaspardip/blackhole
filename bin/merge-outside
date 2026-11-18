@@ -4,10 +4,15 @@ set -eu
 number="$1"
 cd "$(dirname "$0")/.."
 git fetch -q origin main
+base="$(git rev-parse origin/main)"
 git fetch -q origin "pull/${number}/head"
 head="$(git rev-parse FETCH_HEAD)"
 title="$(gh pr view "${number}" --json title --jq .title)"
 body="$(gh pr view "${number}" --json body --jq .body)"
-GUARD_TEXT_TITLE="${title}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_guard.py range origin/main "${head}"
-# The title and body are passed back so an edit made after the scan cannot reach main.
-gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${title} (#${number})" --body "${body}"
+subject="${title} (#${number})"
+GUARD_TEXT_SUBJECT="${subject}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_guard.py range "${base}" "${head}"
+# The subject and body are passed back so an edit made after the scan cannot reach main.
+gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}"
+# GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
+git fetch -q origin main
+python3 -I tools/name_guard.py range "${base}" origin/main

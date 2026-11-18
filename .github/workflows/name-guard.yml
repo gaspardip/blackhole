@@ -24,7 +24,6 @@ jobs:
     timeout-minutes: 10
     env:
       BLACKHOLE_BANNED: ${{ secrets.BANNED_NAMES }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: scan
@@ -38,8 +37,10 @@ jobs:
             git fetch -q origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
           fi
           # The guard always comes from the default branch; the scanned refs are data.
+          # The remote is asked which branch that is, because a scheduled event does not say.
+          git remote set-head origin --auto > /dev/null
           guard="${RUNNER_TEMP}/name_guard.py"
-          git show "origin/${DEFAULT_BRANCH}:tools/name_guard.py" > "${guard}"
+          git show "origin/HEAD:tools/name_guard.py" > "${guard}"
           # The guard reads the event file itself and decides whose text to scan. Event text
           # passed through `env:` would be printed in this public log before the guard ran.
           python3 -I "${guard}" event
