@@ -125,12 +125,40 @@ impl Objection {
 
 pub type Rows = BTreeMap<Key, Objection>;
 
+#[derive(Debug)]
+pub(crate) struct RowError {
+    pub(crate) key: Option<Key>,
+    line: usize,
+    reason: String,
+}
+
+impl fmt::Display for RowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "objections line {}: {}", self.line, self.reason)
+    }
+}
+
+impl std::error::Error for RowError {}
+
 /// # Errors
 /// Reports the first invalid or duplicated row.
 pub fn parse(bytes: &[u8], today: Date) -> io::Result<Rows> {
     let mut rows = Rows::new();
     for (i, raw) in bytes.split_inclusive(|&b| b == b'\n').enumerate() {
-        let err = |why: &str| io::Error::other(format!("objections line {}: {why}", i + 1));
+        let err = |why: &str| {
+            let key = std::str::from_utf8(raw).ok().and_then(|line| {
+                let mut fields = line.split('\t');
+                Some((
+                    fields.next()?.escape_debug().to_string(),
+                    fields.next()?.escape_debug().to_string(),
+                ))
+            });
+            io::Error::other(RowError {
+                key,
+                line: i + 1,
+                reason: why.into(),
+            })
+        };
         let raw = raw
             .strip_suffix(b"\n")
             .ok_or_else(|| err("missing newline"))?;

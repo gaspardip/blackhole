@@ -1,0 +1,11 @@
+{
+  "author": "author",
+  "reviews": [
+    {
+      "login": "AUTHOR",
+      "state": "APPROVED",
+      "commit": "HEAD",
+      "permission": "write"
+    }
+  ]
+}
