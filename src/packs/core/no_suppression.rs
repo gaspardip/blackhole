@@ -201,25 +201,40 @@ fn reach(text: &str) -> &str {
 // The text ran out, or ran past the window, before it could be read.
 struct End;
 
-// A C compiler joins a line ending in a backslash to the next one, and reads a comment as a space, before it reads a pragma.
+// A C compiler joins a line ending in a backslash to the next one before it reads anything else, a comment delimiter included.
+fn splices(mut text: &str) -> &str {
+    while let Some(rest) = text
+        .strip_prefix('\\')
+        .or_else(|| text.strip_prefix("??/"))
+        .map(|line| line.trim_start_matches([' ', '\t']))
+        .and_then(|line| {
+            line.strip_prefix("\r\n")
+                .or_else(|| line.strip_prefix(['\r', '\n']))
+        })
+    {
+        text = rest;
+    }
+    text
+}
+
+fn pair(text: &str, first: char, second: char) -> Option<&str> {
+    splices(text.strip_prefix(first)?).strip_prefix(second)
+}
+
+// A C compiler reads a comment as a space before it reads a pragma.
 fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     loop {
-        let mut rest = text
-            .strip_prefix('\\')
-            .or_else(|| text.strip_prefix("??/"))
-            .map(|line| line.trim_start_matches([' ', '\t']))
-            .and_then(|line| {
-                line.strip_prefix("\r\n")
-                    .or_else(|| line.strip_prefix(['\r', '\n']))
-            })
-            .unwrap_or(text);
+        let mut rest = splices(text);
         if gaps {
             // The tools read a byte order mark as whitespace too.
             rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-            if let Some(inner) = rest.strip_prefix("/*") {
+            if let Some(inner) = pair(rest, '/', '*') {
                 let window = reach(inner);
-                match window.find("*/") {
-                    Some(end) => rest = &inner[end + 2..],
+                let close = window
+                    .match_indices('*')
+                    .find_map(|(at, _)| pair(&window[at..], '*', '/'));
+                match close {
+                    Some(after) => rest = &inner[window.len() - after.len()..],
                     // A comment that closes past the window could hide the rest of a directive.
                     None if window.len() < inner.len() => return Err(End),
                     None => {}
@@ -330,17 +345,32 @@ fn rust(text: &str, hits: &mut Findings) {
     for (start, _) in text.match_indices('#') {
         let rest = &text[start + 1..];
         let window = reach(rest);
-        if attribute(start, window, hits).is_err() && window.len() < rest.len() {
-            hits.report(start, Some("directive too long to read"));
+        let cut = window.len() < rest.len();
+        let opened = trivia(window)
+            .and_then(|after| tokens(after.strip_prefix('!').unwrap_or(after), &["["]));
+        let unread = match opened {
+            Ok(None) => false,
+            Ok(Some(body)) => attribute(start, window, body, hits).is_err(),
+            // Text that ends before an attribute opens holds none.
+            Err(End) => cut,
+        };
+        if unread {
+            // An attribute that opened and cannot be read to its end may hold anything.
+            let note = if cut {
+                "directive too long to read"
+            } else {
+                "unreadable attribute"
+            };
+            hits.report(start, Some(note));
         }
     }
 }
 
-fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End> {
-    let after = trivia(window)?;
-    let Some(body) = tokens(after.strip_prefix('!').unwrap_or(after), &["["])? else {
-        return Ok(());
-    };
+fn word(text: &str) -> &str {
+    text.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn attribute(start: usize, window: &str, body: &str, hits: &mut Findings) -> Result<(), End> {
     let conditional = tokens(body, &["cfg_attr", "("])?.is_some();
     let mut positions = Vec::new();
     if suppresses(body)? {
@@ -378,37 +408,37 @@ fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End>
                 }
             }
             Some('"') => {
-                let before = &window[..window.len() - rest.len()];
-                let prefix = before.trim_end_matches('#');
-                let word = prefix.trim_end_matches(|c: char| c == '_' || c.is_alphanumeric());
-                if matches!(&prefix[word.len()..], "r" | "br" | "cr") {
-                    let close = format!("\"{}", &before[prefix.len()..]);
-                    let inside = chars.as_str();
-                    chars = inside[inside.find(&close).ok_or(End)? + close.len()..].chars();
-                } else {
-                    loop {
-                        match chars.next().ok_or(End)? {
-                            '\\' => {
-                                chars.next();
-                            }
-                            '"' => break,
-                            _ => {}
+                loop {
+                    match chars.next().ok_or(End)? {
+                        '\\' => {
+                            chars.next();
                         }
+                        '"' => break,
+                        _ => {}
                     }
                 }
+                // A suffix belongs to the literal, or its letters would read as the prefix of the next one.
+                chars = word(chars.as_str()).chars();
             }
             Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
-                let tail = chars
-                    .as_str()
-                    .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-                if matches!(
-                    &rest[..rest.len() - tail.len()],
-                    "tarpaulin" | "tarpaulin_include"
-                ) && !positions.contains(&start)
+                let tail = word(rest);
+                let name = &rest[..rest.len() - tail.len()];
+                let quoted = tail.trim_start_matches('#');
+                let hashes = &tail[..tail.len() - quoted.len()];
+                if let Some(inside) = quoted.strip_prefix('"')
+                    && matches!(name, "r" | "br" | "cr")
                 {
-                    positions.push(start);
+                    let close = format!("\"{hashes}");
+                    let end = inside.find(&close).ok_or(End)? + close.len();
+                    chars = word(&inside[end..]).chars();
+                } else {
+                    if matches!(name, "tarpaulin" | "tarpaulin_include")
+                        && !positions.contains(&start)
+                    {
+                        positions.push(start);
+                    }
+                    chars = tail.chars();
                 }
-                chars = tail.chars();
             }
             _ => {}
         }
@@ -445,6 +475,10 @@ fn encoding(text: &str, hits: &mut Findings) {
 // golangci-lint drops every leading slash and space of a comment before it looks for the directive.
 fn nolint(text: &str, hits: &mut Findings) {
     for (start, _) in text.match_indices("//") {
+        // A longer run of slashes opens one comment.
+        if text[..start].ends_with('/') {
+            continue;
+        }
         let rest = &text[start..];
         let window = reach(rest);
         let comment = window.trim_start_matches(|c: char| c == '/' || c.is_whitespace());
@@ -542,11 +576,15 @@ fn script_kinds(text: &str) -> Vec<&'static str> {
     }
     let mut kinds = Vec::new();
     for word in words {
-        for piece in word.split("-S").flat_map(|piece| piece.split('=')) {
-            if let Some(kind) = interpreter(piece)
-                && !kinds.contains(&kind)
-            {
-                kinds.push(kind);
+        for piece in word.split('=') {
+            // Short options can be bundled in front of S, so the text after each S is a candidate too.
+            let split = piece.match_indices('S').map(|(at, _)| &piece[at + 1..]);
+            for candidate in std::iter::once(piece).chain(split) {
+                if let Some(kind) = interpreter(candidate)
+                    && !kinds.contains(&kind)
+                {
+                    kinds.push(kind);
+                }
             }
         }
     }
