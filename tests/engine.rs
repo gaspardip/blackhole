@@ -97,6 +97,7 @@ fn a_directive_too_long_to_read_is_reported() {
         ),
         ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
         ("a.go", format!("//{}nolint\n", " ".repeat(4096))),
+        ("cut.go", format!("//{}nolint\n", " ".repeat(4091))),
     ] {
         let found = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(found.len(), 1, "{path}");
@@ -169,4 +170,20 @@ fn long_c_pragma_comment_is_reported() {
     let found = run(registry(), [("long.c", text.as_bytes())]);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
+}
+
+#[test]
+fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
+    let found = run(
+        registry(),
+        [(
+            "a.cs",
+            "#pragma\u{feff}warning disable CS0168\n[Suppress\u{feff}Message(\"x\", \"y\")]\n"
+                .as_bytes(),
+        )],
+    );
+    assert_eq!(
+        found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
+        [(1, 1), (2, 2)]
+    );
 }

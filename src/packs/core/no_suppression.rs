@@ -233,7 +233,7 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     }
 }
 
-fn matches(text: &str, pattern: &str) -> Result<bool, End> {
+fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
     let mut rest = text;
     let mut tokens = pattern.chars();
     while let Some(token) = tokens.next() {
@@ -241,7 +241,7 @@ fn matches(text: &str, pattern: &str) -> Result<bool, End> {
             let window = reach(rest);
             let line = window.split('\n').next().unwrap_or(window);
             for (at, _) in line.char_indices() {
-                if matches(&rest[at..], tokens.as_str())? {
+                if matches(&rest[at..], tokens.as_str(), kind)? {
                     return Ok(true);
                 }
             }
@@ -259,6 +259,10 @@ fn matches(text: &str, pattern: &str) -> Result<bool, End> {
         }
         rest = after;
         if !gaps {
+            // Inside a name the character is dropped; between two words a byte order mark is still the gap.
+            if matches!(kind, "java" | "cs") && token.is_ascii_alphanumeric() {
+                rest = rest.trim_start_matches(|c| ignorable(c, kind));
+            }
             let Some(after) = rest.strip_prefix(token) else {
                 return Ok(false);
             };
@@ -446,13 +450,14 @@ fn nolint(text: &str, hits: &mut Findings) {
         let comment = window.trim_start_matches(|c: char| c == '/' || c.is_whitespace());
         if comment.starts_with("nolint") {
             hits.report(start, None);
-        } else if comment.is_empty() && window.len() < rest.len() {
+        } else if window.len() < rest.len() && "nolint".starts_with(comment) {
+            // The window ended before the word did.
             hits.report(start, Some("directive too long to read"));
         }
     }
 }
 
-// Unicode General_Category=Cf and the additional ISO controls ignored by Java identifiers.
+// Java and C# drop these from a name: Unicode General_Category=Cf, and for Java some ISO controls as well.
 fn ignorable(c: char, kind: &str) -> bool {
     matches!(u32::from(c), 0xad | 0x600..=0x605 | 0x61c | 0x6dd | 0x70f | 0x890..=0x891 |
         0x8e2 | 0x180e | 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 |
@@ -490,9 +495,9 @@ fn escape(text: &str) -> Option<(char, usize)> {
     Some((char::from_u32(scalar)?, len + next))
 }
 
-// Java and C# read an escape as the character itself before they read an annotation, and drop format characters from a name.
+// Java and C# read an escape as the character itself before they read an annotation.
 // Returns the translated text and, for each of its bytes, the offset it came from.
-fn unescape(text: &str, kind: &str) -> (String, Vec<usize>) {
+fn unescape(text: &str) -> (String, Vec<usize>) {
     let mut out = String::new();
     let mut origin = Vec::new();
     let mut rest = text;
@@ -501,7 +506,7 @@ fn unescape(text: &str, kind: &str) -> (String, Vec<usize>) {
             ("\\\\".to_owned(), 2)
         } else {
             let (ch, len) = escape(rest).unwrap_or((first, first.len_utf8()));
-            (String::from_iter((!ignorable(ch, kind)).then_some(ch)), len)
+            (ch.to_string(), len)
         };
         out.push_str(&piece);
         origin.resize(out.len(), text.len() - rest.len());
@@ -589,7 +594,7 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
         return;
     }
     let (mut text, origin) = if matches!(kind, "java" | "cs") {
-        unescape(ctx.text, kind)
+        unescape(ctx.text)
     } else {
         (ctx.text.to_owned(), Vec::new())
     };
@@ -604,7 +609,7 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     for (offset, first) in text.char_indices() {
         let mut found = None;
         for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
-            match matches(&text[offset..], pattern) {
+            match matches(&text[offset..], pattern, kind) {
                 Ok(true) => {
                     found = Some(None);
                     break;
