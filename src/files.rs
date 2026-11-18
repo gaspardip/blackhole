@@ -1,28 +1,11 @@
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
-    let mut command = Command::new("git");
-    // The caller's git variables must not point discovery at another repository or index.
-    for (name, _) in env::vars_os() {
-        if name.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(name);
-        }
-    }
-    let output = command.args(args).current_dir(dir).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .next()
-                .unwrap_or("git failed")
-                .to_owned(),
-        ));
-    }
-    Ok(output.stdout)
+    crate::git::output(crate::git::command().args(args).current_dir(dir))
 }
 
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
@@ -97,6 +80,40 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
         }
         other => other,
     }
+}
+
+#[cfg(unix)]
+fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+// shortcut: std gives no file identity elsewhere, so there a link swapped in after the look is followed; compare volume and file index when Windows is supported
+#[cfg(not(unix))]
+fn same(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+    true
+}
+
+// A policy file is read only as a regular file: a link would point it outside the repository.
+pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let named = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        other => other?,
+    };
+    if named.is_file() {
+        // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
+        let mut file = fs::File::open(path)?;
+        // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
+        if same(&named, &file.metadata()?) {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return Ok(Some(bytes));
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} must be a regular file",
+        path.display()
+    )))
 }
 
 pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, Vec<PathBuf>)> {

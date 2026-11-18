@@ -1,6 +1,6 @@
 use blackhole_check::{
     engine::registry,
-    ledger::{Counts, excess, growth, parse, write},
+    ledger::{Counts, excess, moved, parse, write},
 };
 
 const HEADER: &str = "blackhole-ledger 1\n";
@@ -117,7 +117,7 @@ fn rename_allowances() {
     ] {
         let head = entries(&[(path, n)]);
         assert_eq!(
-            growth(&base, &head, &renames),
+            excess(&head, &moved(&base, &renames)),
             if grows { head } else { Counts::new() }
         );
     }
