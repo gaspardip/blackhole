@@ -79,7 +79,7 @@ struct Scan {
 }
 
 fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
-    let (root, names) = files::list(paths)?;
+    let (root, names, selection) = files::list(paths)?;
     let home = root.join(".blackhole");
     let base = read_ledger(&home)?;
     let rules = engine::registry();
@@ -94,9 +94,12 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     let actual = ledger::counts(&findings);
     let over = ledger::excess(&actual, &base);
     let mut stale = ledger::excess(&base, &actual);
-    if !paths.is_empty() {
-        // The list is sorted. A line for a file outside the selection says nothing about this run.
-        stale.retain(|(_, path), _| names.binary_search(path).is_ok());
+    if !selection.is_empty() {
+        // A line for a file outside the selection says nothing about this run. A file that is gone is still inside it.
+        stale.retain(|(_, path), _| {
+            let file = root.join(path);
+            selection.iter().any(|chosen| file.starts_with(chosen))
+        });
     }
     findings.retain(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())));
     report(&findings, output)?;

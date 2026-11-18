@@ -210,6 +210,23 @@ fn stale_and_deleted_entries_shrink() {
 }
 
 #[test]
+fn a_selection_keeps_the_rows_of_files_that_are_gone() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/clean.py"), "").unwrap();
+    fs::write(root.join("other.py"), "").unwrap();
+    baseline(
+        root,
+        &[("gone.py", 1), ("sub/gone.py", 1), ("subway/gone.py", 1)],
+    );
+    let stale = format!("sub/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["sub"], 1).stdout, stale.as_bytes());
+    assert_eq!(check(&root.join("sub"), &["."], 1).stdout, stale.as_bytes());
+    assert_eq!(check(root, &["other.py"], 0).stdout, b"");
+}
+
+#[test]
 fn absent_baseline() {
     let dir = repo();
     let root = dir.path();
@@ -243,8 +260,8 @@ fn over_blocks_the_shrink() {
 #[test]
 fn regeneration_waits_for_the_lock() {
     let other = repo();
-    // A caller's git variables must not move the lock away from the ledger it guards.
-    for separate in [false, true] {
+    // Neither the caller's git variables nor a second repository on the same tree may move the lock away from the ledger it guards.
+    for case in ["plain", "variables", "nested"] {
         let dir = repo();
         let root = dir.path();
         fs::write(root.join("a.py"), "#noqa").unwrap();
@@ -253,14 +270,23 @@ fn regeneration_waits_for_the_lock() {
         lock.lock().unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_blackhole"));
         command.current_dir(root).arg("ledger");
-        if separate {
+        if case == "variables" {
             command
                 .env("GIT_DIR", other.path().join(".git"))
                 .env("GIT_WORK_TREE", root);
         }
+        if case == "nested" {
+            git(root, &["init", "-q", "nested"]);
+            let nested = root.join("nested");
+            git(
+                &nested,
+                &["config", "core.worktree", root.to_str().unwrap()],
+            );
+            command.current_dir(nested);
+        }
         let mut child = command.spawn().unwrap();
         thread::sleep(Duration::from_millis(500));
-        assert!(child.try_wait().unwrap().is_none(), "{separate}");
+        assert!(child.try_wait().unwrap().is_none(), "{case}");
         assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
         lock.unlock().unwrap();
         assert!(child.wait().unwrap().success());
