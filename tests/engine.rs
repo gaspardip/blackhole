@@ -92,13 +92,6 @@ fn a_directive_too_long_to_read_is_reported() {
             format!("#pragma GCC /*{pad}*/ diagnostic ignored \"-Wunused\"\n"),
         ),
         (
-            "long.c",
-            format!(
-                "#pragma GCC/*{}*/diagnostic ignored \"-Wunused-variable\"",
-                "x".repeat(4097)
-            ),
-        ),
-        (
             "long.sh",
             format!("# shellcheck shell=bash{}disable=SC2086", " ".repeat(4096)),
         ),
@@ -164,4 +157,15 @@ fn env_options_can_name_multiple_interpreters() {
             .collect::<Vec<_>>()
     });
     assert_eq!(lines, [vec![2], vec![2], vec![2]]);
+}
+
+#[test]
+fn long_c_pragma_comment_is_reported() {
+    let text = format!(
+        "#pragma GCC/*{}*/diagnostic ignored \"-Wunused-variable\"",
+        "x".repeat(4097)
+    );
+    let found = run(registry(), [("long.c", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
 }
