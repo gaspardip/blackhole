@@ -17,9 +17,18 @@ use std::{
 /// Checks the selected files and returns whether any rule was violated.
 ///
 /// # Errors
-/// Returns an error if discovery, file reading, or output fails.
+/// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
-    evaluate(paths, false, output)
+    let scan = scan(paths, output)?;
+    for (key, allowed) in &scan.stale {
+        let (rule, path) = key;
+        let found = scan.actual.get(key).copied().unwrap_or(0);
+        writeln!(
+            output,
+            "{path} {rule}: ledger allows {allowed}, found {found}; run blackhole ledger"
+        )?;
+    }
+    Ok(scan.over || !scan.stale.is_empty())
 }
 
 /// Regenerates the repository ledger within its existing allowances.
@@ -27,44 +36,42 @@ pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
 /// # Errors
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
-    evaluate(&[], true, output)
+    let scan = scan(&[], output)?;
+    if !scan.over && !scan.stale.is_empty() {
+        replace(&scan.ledger, &scan.actual)?;
+    }
+    Ok(scan.over)
 }
 
-fn read_ledger(path: &Path) -> io::Result<Option<ledger::Counts>> {
+// A repository without a ledger allows nothing, which is what an empty one says.
+fn read_ledger(path: &Path) -> io::Result<ledger::Counts> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => ledger::parse(&fs::read(path)?, engine::registry()).map(Some),
+        Ok(meta) if meta.is_file() => ledger::parse(&fs::read(path)?, engine::registry()),
         Ok(_) => Err(io::Error::other(".blackhole/ledger must be a regular file")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(ledger::Counts::new()),
         Err(e) => Err(e),
     }
 }
 
+// The rename is the only write to the ledger, so a crash leaves the old one whole.
 fn replace(path: &Path, actual: &ledger::Counts) -> io::Result<()> {
     let contents = ledger::write(actual)?;
     let temp = path.with_file_name(format!("ledger.{}.tmp", std::process::id()));
-    let mut file = fs::File::create_new(&temp)?;
-    let result = file
-        .write_all(contents.as_bytes())
-        .and_then(|()| fs::rename(&temp, path));
-    if result.is_err() {
-        fs::remove_file(temp)?;
-    }
-    result
+    fs::File::create_new(&temp)?.write_all(contents.as_bytes())?;
+    fs::rename(temp, path)
 }
 
-fn evaluate(paths: &[PathBuf], regenerate: bool, output: &mut impl Write) -> io::Result<bool> {
+struct Scan {
+    ledger: PathBuf,
+    actual: ledger::Counts,
+    over: bool,
+    stale: ledger::Counts,
+}
+
+fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     let (root, names) = files::list(paths)?;
-    let directory = root.join(".blackhole");
-    let path = directory.join("ledger");
-    // Lock the directory because replacing the ledger changes its inode.
-    let _lock = if regenerate && directory.try_exists()? {
-        let dir = fs::File::open(directory)?;
-        dir.lock()?;
-        Some(dir)
-    } else {
-        None
-    };
-    let baseline = read_ledger(&path)?;
+    let ledger = root.join(".blackhole/ledger");
+    let base = read_ledger(&ledger)?;
     let rules = engine::registry();
     let mut findings = Vec::new();
     for name in &names {
@@ -72,30 +79,21 @@ fn evaluate(paths: &[PathBuf], regenerate: bool, output: &mut impl Write) -> io:
             .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
         findings.extend(engine::run(rules, [(name.as_str(), bytes.as_slice())]));
     }
-    let Some(base) = baseline else {
-        report(&findings, output)?;
-        return Ok(!findings.is_empty());
-    };
     let actual = ledger::counts(&findings);
-    let selected = (!paths.is_empty()).then(|| names.iter().map(String::as_str).collect());
-    let diff = ledger::exact(&base, &actual, selected.as_ref());
-    findings.retain(|f| diff.over.contains_key(&(f.rule.to_owned(), f.path.clone())));
+    let over = ledger::excess(&actual, &base);
+    let mut stale = ledger::excess(&base, &actual);
+    if !paths.is_empty() {
+        // The list is sorted. A line for a file outside the selection says nothing about this run.
+        stale.retain(|(_, path), _| names.binary_search(path).is_ok());
+    }
+    findings.retain(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())));
     report(&findings, output)?;
-    if regenerate {
-        if findings.is_empty() && actual != base {
-            replace(&path, &actual)?;
-        }
-        return Ok(!findings.is_empty());
-    }
-    for (key, allowed) in &diff.stale {
-        let (rule, path) = key;
-        let found = actual.get(key).copied().unwrap_or(0);
-        writeln!(
-            output,
-            "{path} {rule}: ledger allows {allowed}, found {found}; run blackhole ledger"
-        )?;
-    }
-    Ok(!findings.is_empty() || !diff.stale.is_empty())
+    Ok(Scan {
+        ledger,
+        actual,
+        over: !over.is_empty(),
+        stale,
+    })
 }
 
 fn report(findings: &[engine::Finding], output: &mut impl Write) -> io::Result<()> {

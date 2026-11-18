@@ -1,9 +1,5 @@
 use crate::engine::{Finding, Rule};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write,
-    io,
-};
+use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
 pub type Counts = BTreeMap<Key, usize>;
@@ -85,27 +81,14 @@ pub fn counts(findings: &[Finding]) -> Counts {
     rows
 }
 
-pub struct Difference {
-    pub over: Counts,
-    pub stale: Counts,
-}
-
+/// The keys of `counts` that hold more than `allowed` gives them.
 #[must_use]
-pub fn exact(base: &Counts, actual: &Counts, selected: Option<&BTreeSet<&str>>) -> Difference {
-    let included = |key: &Key| selected.is_none_or(|paths| paths.contains(key.1.as_str()));
-    let mut over = Counts::new();
-    let mut stale = Counts::new();
-    for (key, &n) in actual {
-        if included(key) && n > base.get(key).copied().unwrap_or(0) {
-            over.insert(key.clone(), n);
-        }
-    }
-    for (key, &n) in base {
-        if included(key) && actual.get(key).copied().unwrap_or(0) < n {
-            stale.insert(key.clone(), n);
-        }
-    }
-    Difference { over, stale }
+pub fn excess(counts: &Counts, allowed: &Counts) -> Counts {
+    counts
+        .iter()
+        .filter(|&(key, &n)| n > allowed.get(key).copied().unwrap_or(0))
+        .map(|(key, &n)| (key.clone(), n))
+        .collect()
 }
 
 #[must_use]
@@ -117,5 +100,5 @@ pub fn growth(base: &Counts, head: &Counts, renames: &[(&str, &str)]) -> Counts 
         let allowance = moved.entry((rule.clone(), dest.to_owned())).or_default();
         *allowance = allowance.saturating_add(n);
     }
-    exact(&moved, head, None).over
+    excess(head, &moved)
 }
