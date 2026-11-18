@@ -7,6 +7,283 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn malformed_units_are_reported_even_inside_allowed_syntax() {
+    let cases = [
+        ("// WARNING:", "", 12),
+        ("const s = \"", "\";", 12),
+        ("const t = `", "`;", 12),
+        ("const x = 1;", "", 13),
+    ];
+    for (prefix, suffix, column) in cases {
+        let text = format!("\u{feff}{prefix}");
+        let check = |bytes: &[u8]| {
+            assert_eq!(
+                locations(&run(registry(), [("a.ts", bytes)])),
+                [("core/unparseable", 1, column)],
+                "{prefix}"
+            );
+        };
+        for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+            for bad in [0xd800, 0xdc00] {
+                let bytes: Vec<_> = text
+                    .encode_utf16()
+                    .chain([bad])
+                    .chain(suffix.encode_utf16())
+                    .flat_map(encode)
+                    .collect();
+                check(&bytes);
+            }
+            if suffix.is_empty() {
+                let mut bytes: Vec<_> = text.encode_utf16().flat_map(encode).collect();
+                bytes.push(0x2f);
+                check(&bytes);
+            }
+        }
+        for encode in [u32::to_le_bytes, u32::to_be_bytes] {
+            for bad in [0xd800, 0x0011_0000] {
+                let bytes: Vec<_> = text
+                    .chars()
+                    .map(u32::from)
+                    .chain([bad])
+                    .chain(suffix.chars().map(u32::from))
+                    .flat_map(encode)
+                    .collect();
+                check(&bytes);
+            }
+            if suffix.is_empty() {
+                for count in 1..=3 {
+                    let mut bytes: Vec<_> =
+                        text.chars().flat_map(|c| encode(u32::from(c))).collect();
+                    bytes.extend(vec![0x2f; count]);
+                    check(&bytes);
+                }
+            }
+        }
+    }
+    for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+        let mut bytes: Vec<_> = "\u{feff}const "
+            .encode_utf16()
+            .chain([0xd800])
+            .flat_map(encode)
+            .collect();
+        bytes.push(0x2f);
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", bytes.as_slice())])),
+            [("core/unparseable", 1, 7)]
+        );
+    }
+}
+
+#[test]
+fn valid_unicode_and_raw_encoding_verdicts_are_preserved() {
+    let valid = "\u{feff}const s = '🌑�';";
+    for bytes in [
+        valid.as_bytes().to_vec(),
+        valid.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        valid.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        valid
+            .chars()
+            .flat_map(|c| u32::from(c).to_be_bytes())
+            .collect(),
+        valid
+            .chars()
+            .flat_map(|c| u32::from(c).to_le_bytes())
+            .collect(),
+    ] {
+        assert!(run(registry(), [("valid.ts", bytes.as_slice())]).is_empty());
+    }
+    assert_eq!(
+        locations(&run(
+            registry(),
+            [("quoted.ts", b"const x=\"\xff\";".as_slice())]
+        )),
+        [("core/unparseable", 1, 10)]
+    );
+    for path in ["a.ts", "a.js"] {
+        assert_eq!(
+            locations(&run(registry(), [(path, b"'\0\xff'".as_slice())])),
+            [("core/unparseable", 1, 3)]
+        );
+    }
+    for path in ["a.py", "a.rs"] {
+        assert!(run(registry(), [(path, b"'\xff'".as_slice())]).is_empty());
+    }
+    assert_eq!(
+        locations(&run(
+            registry(),
+            [("a.ts", b"// @ts-ignore\xff".as_slice())]
+        )),
+        [("core/no-suppression", 1, 4), ("core/unparseable", 1, 14)]
+    );
+    assert_eq!(
+        locations(&run(registry(), [("a.py", b"# noqa\xff".as_slice())])),
+        [("core/no-suppression", 1, 1)]
+    );
+}
+
+#[test]
+fn documentation_and_directives_use_javascript_whitespace() {
+    for gap in ['\u{85}', '\u{feff}', '\u{2028}'] {
+        for (source, allowed) in [
+            ("export default (/** docs */GAPclass {});", gap != '\u{85}'),
+            ("export = (/** docs */GAPclass {});", false),
+            ("/** docs */GAPexport class C {}", gap != '\u{85}'),
+            ("/* @jsxGAPh */", gap != '\u{85}'),
+            ("/* @ts-checkGAPexplanation */", gap != '\u{85}'),
+            ("/* #GAPsourceURL=x */", gap != '\u{85}'),
+            ("/* /GAP<reference types='node' /> */", gap != '\u{85}'),
+            ("/*\nGAP* @license MIT\n */", gap != '\u{85}'),
+        ] {
+            let text = source.replace("GAP", &gap.to_string());
+            let hits = run(registry(), [("a.ts", text.as_bytes())]);
+            let column = source.find('/').unwrap() + 1;
+            let expected = (!allowed).then_some(("ts/no-comments", 1, column));
+            assert_eq!(locations(&hits), expected.as_slice(), "{text:?}");
+        }
+    }
+    for (gap, allowed) in [('\u{85}', true), ('\u{feff}', false)] {
+        let text = format!("// WARNING:{gap}");
+        let hits = run(registry(), [("a.ts", text.as_bytes())]);
+        assert_eq!(
+            locations(&hits),
+            (!allowed).then_some(("ts/no-comments", 1, 1)).as_slice()
+        );
+    }
+}
+
+#[test]
+fn suppression_after_literal_nul_keeps_its_source_column() {
+    let wide: Vec<_> = "\u{feff}const s = \"🌑\0c8 ignore\";"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    for (path, bytes, expected) in [
+        (
+            "literal.ts",
+            b"const s = \"\0c8 ignore\";".as_slice(),
+            vec![("core/unparseable", 1, 12), ("core/no-suppression", 1, 13)],
+        ),
+        (
+            "split.py",
+            "é\0 # no\0qa".as_bytes(),
+            vec![("core/no-suppression", 1, 4)],
+        ),
+        (
+            "split.rs",
+            b"\0  #[al\0low(dead_code)]",
+            vec![("core/no-suppression", 1, 4)],
+        ),
+        (
+            "two.py",
+            b"\0\0# noqa\0",
+            vec![("core/no-suppression", 1, 3)],
+        ),
+        (
+            "lines.py",
+            b"a\r\0\nb\n# noqa",
+            vec![("core/no-suppression", 4, 1)],
+        ),
+        (
+            "start.ts",
+            b"\0\"v8 ignore\";",
+            vec![("core/unparseable", 1, 1), ("core/no-suppression", 1, 3)],
+        ),
+        (
+            "end.ts",
+            b"const a = 1;\0",
+            vec![("core/unparseable", 1, 13)],
+        ),
+        (
+            "wide.ts",
+            wide.as_slice(),
+            vec![("core/unparseable", 1, 13), ("core/no-suppression", 1, 14)],
+        ),
+    ] {
+        assert_eq!(
+            locations(&run(registry(), [(path, bytes)])),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn incomplete_wide_source_retains_the_replacement_character() {
+    let mut inputs = Vec::new();
+    for encode in [u16::to_le_bytes, u16::to_be_bytes] {
+        for (source, expected) in [
+            ("const x = 1;", vec![("core/unparseable", 1, 13)]),
+            // Malformed UTF-16 prevents ts/no-comments from receiving a parsed context.
+            (
+                "// @ts-ignore",
+                vec![("core/no-suppression", 1, 4), ("core/unparseable", 1, 14)],
+            ),
+        ] {
+            let mut bytes: Vec<_> = format!("\u{feff}{source}")
+                .encode_utf16()
+                .flat_map(encode)
+                .collect();
+            bytes.push(0x2f);
+            inputs.push((bytes, expected));
+        }
+        let units = "\u{feff}const "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("x=1;".encode_utf16());
+        inputs.push((
+            units.flat_map(encode).collect(),
+            vec![("core/unparseable", 1, 7)],
+        ));
+    }
+    for encode in [u32::to_le_bytes, u32::to_be_bytes] {
+        for tail in 1..=3 {
+            let mut bytes: Vec<_> = "\u{feff}const x = 1;"
+                .chars()
+                .flat_map(|c| encode(u32::from(c)))
+                .collect();
+            bytes.extend(vec![0x2f; tail]);
+            inputs.push((bytes, vec![("core/unparseable", 1, 13)]));
+        }
+    }
+    for (bytes, expected) in inputs {
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", bytes.as_slice())])),
+            expected
+        );
+    }
+}
+
+#[test]
+fn default_export_documentation_matches_the_expression_span() {
+    for (export, col) in [
+        ("export default /** docs */ (x);", Some(16)),
+        ("export default (/** docs */ x);", Some(17)),
+        ("export default /** docs */ ((x));", Some(16)),
+        ("export default /** docs */ (class {});", Some(16)),
+        ("export default /** docs */ (function () {});", Some(16)),
+        ("export default /** docs */ (() => {});", Some(16)),
+        ("export default /** docs */ x as T;", None),
+        ("export default /** docs */ (x as T);", Some(16)),
+        ("export default /** docs */ x satisfies T;", None),
+        ("export default /** docs */ x!;", None),
+        ("export default (/** docs */ class {});", None),
+        ("export default (/** docs */ (() => {}));", Some(17)),
+        ("export default /** docs */ ((x) as T)!;", None),
+        ("export = /** docs */ (x);", Some(10)),
+    ] {
+        let text = format!("type T = number; const x = 1;\n{export}");
+        let mut hits = run(registry(), [("a.ts", text.as_bytes())]);
+        // The other TypeScript rules judge these wrappers themselves.
+        hits.retain(|f| f.rule == "ts/no-comments" || !f.rule.starts_with("ts/"));
+        assert_eq!(
+            locations(&hits),
+            col.map(|c| ("ts/no-comments", 2, c)).as_slice(),
+            "{export}"
+        );
+    }
+}
+
+#[test]
 fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
     for (open, close) in [("(", ")"), ("[", "]")] {
         let judge = |depth| {
@@ -331,15 +608,91 @@ fn exported_alias_chain_is_judged_in_linear_time() {
 }
 
 #[test]
-fn diagnostic_points_to_the_offending_token() {
-    for (text, line, col) in [
-        ("let x;\nlet x;", 2, 5),
-        ("const x=1;export {x};\nexport {x};", 2, 9),
-        ("tag: {\ntag: {} }", 2, 1),
-        ("const x = [1", 1, 13),
-        ("break;", 1, 1),
+fn export_aliases_expand_each_root_binding_once() {
+    use std::time::{Duration, Instant};
+    let aliases = (0..4000)
+        .map(|i| format!("M as A{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let text = format!(
+        "/** Public contract. */\n{}export {{ {aliases} }};",
+        "interface M {}\n".repeat(4000)
+    );
+    let start = Instant::now();
+    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_gap_after_a_comment_is_scanned_once() {
+    use std::{
+        fmt::Write as _,
+        time::{Duration, Instant},
+    };
+    let mut text = format!("/** Public value. */{}", " ".repeat(100_000));
+    for i in 0..2000 {
+        writeln!(text, "export const a{i} = 0;").unwrap();
+    }
+    let start = Instant::now();
+    assert!(run(registry(), [("gap.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_lone_valid_replacement_character_locates_the_binary_verdict() {
+    for (text, at) in [
+        ("const a = 1;\nconst b = \u{fffd};\n", (2, 11)),
+        ("const a = '\u{fffd}';\nconst b = \u{fffd};\n", (1, 1)),
     ] {
-        let hits = run(registry(), [("a.mjs", text.as_bytes())]);
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", text.as_bytes())])),
+            [("core/unparseable", at.0, at.1)]
+        );
+    }
+}
+
+#[test]
+fn merged_interfaces_are_expanded_once() {
+    use std::time::{Duration, Instant};
+    let text = format!(
+        "/** Public tuple. */\nexport type Tuple = [{}];\n{}",
+        "Merge,".repeat(8000),
+        "interface Merge {}\n".repeat(8000)
+    );
+    let start = Instant::now();
+    assert!(run(registry(), [("merge.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn diagnostic_points_to_the_offending_token() {
+    for (path, text, line, col) in [
+        (
+            "a.mts",
+            "type T = [first?: number,\n second: string];",
+            2,
+            2,
+        ),
+        ("a.mjs", "class C {\n  constructor() { super(); }\n}", 2, 19),
+        ("a.mjs", "let x;\nlet x;", 2, 5),
+        ("a.mjs", "const x=1;export {x};\nexport {x};", 2, 9),
+        ("a.mjs", "tag: {\ntag: {} }", 2, 1),
+        ("a.mjs", "const x = [1", 1, 13),
+        ("a.mjs", "break;", 1, 1),
+    ] {
+        let hits = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(
             locations(&hits),
             [("core/unparseable", line, col)],
