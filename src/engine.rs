@@ -74,6 +74,7 @@ pub fn registry() -> &'static [Rule] {
             run: Run::ParseError,
         },
         crate::packs::ts::no_comments::RULE,
+        crate::packs::ts::no_explicit_any::RULE,
     ]
 }
 
