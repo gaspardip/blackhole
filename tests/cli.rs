@@ -16,12 +16,6 @@ fn git(dir: &Path, args: &[&str]) {
         Command::new("git")
             .current_dir(dir)
             .args(args)
-            .envs([
-                ("GIT_AUTHOR_NAME", "Tester"),
-                ("GIT_AUTHOR_EMAIL", "tester@example.org"),
-                ("GIT_COMMITTER_NAME", "Tester"),
-                ("GIT_COMMITTER_EMAIL", "tester@example.org")
-            ])
             .status()
             .unwrap()
             .success()

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn entries(path: &Path) -> Vec<PathBuf> {
+fn entries(path: &Path) -> BTreeSet<PathBuf> {
     fs::read_dir(path)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -18,11 +18,11 @@ fn verify(rule: &Rule, dir: &Path) {
     let accept = dir.join("accept");
     let reject = dir.join("reject");
     assert_eq!(
-        entries(dir).into_iter().collect::<BTreeSet<_>>(),
+        entries(dir),
         BTreeSet::from([accept.clone(), reject.clone()])
     );
     let clean = entries(&accept);
-    assert_ne!(clean, [] as [PathBuf; 0]);
+    assert!(!clean.is_empty());
     for file in clean {
         let data = fs::read(&file).unwrap();
         assert!(
@@ -31,14 +31,14 @@ fn verify(rule: &Rule, dir: &Path) {
             file.display()
         );
     }
-    let mut count = 0;
-    for file in entries(&reject) {
+    let rejects = entries(&reject);
+    assert!(!rejects.is_empty());
+    for file in rejects {
         let name = file.file_name().unwrap().to_str().unwrap();
         if let Some(base) = name.strip_suffix(".expect") {
             assert!(reject.join(base).is_file(), "orphan {}", file.display());
             continue;
         }
-        count += 1;
         let bytes = fs::read(&file).unwrap();
         let hits = run(std::slice::from_ref(rule), [(name, bytes.as_slice())]);
         assert!(!hits.is_empty(), "no finding for {}", file.display());
@@ -53,7 +53,6 @@ fn verify(rule: &Rule, dir: &Path) {
             assert_eq!(fs::read_to_string(expected).unwrap(), actual, "{name}");
         }
     }
-    assert!(count > 0);
 }
 
 #[test]
@@ -64,7 +63,7 @@ fn fixtures() {
         .iter()
         .map(|p| p.parent().unwrap().to_owned())
         .collect();
-    assert_eq!(entries(root).into_iter().collect::<BTreeSet<_>>(), families);
+    assert_eq!(entries(root), families);
     assert_eq!(
         families
             .iter()

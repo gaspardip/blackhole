@@ -2,3 +2,12 @@
 #! [ EXPECT (unused)]
 #[cfg_attr(test, allow(unused), expect(dead_code))]
 #[coverage(off)]
+#[/* why */ allow(dead_code)]
+# /* a /* b */ c */ ! [ // x
+allow(unused)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(feature = ")]"), allow(unused))]
+#[cfg_attr(not(feature = r#"""#), allow(unused))]
+#[cfg_attr(all(), cfg_attr(all(), expect(unused)))]
+#[tarpaulin::skip]
+#[cfg(not(tarpaulin_include))]

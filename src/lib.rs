@@ -8,7 +8,6 @@ mod packs {
 mod files;
 
 use std::{
-    collections::BTreeSet,
     fs,
     io::{self, Write},
     path::PathBuf,
@@ -27,17 +26,15 @@ pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
             .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
         findings.extend(engine::run(rules, [(name.as_str(), bytes.as_slice())]));
     }
-    let mut violated = BTreeSet::new();
     for f in &findings {
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
         if let Some(note) = &f.note {
             write!(output, " {note}")?;
         }
         writeln!(output)?;
-        violated.insert(f.rule);
     }
     for rule in rules {
-        if violated.contains(rule.id) {
+        if findings.iter().any(|f| f.rule == rule.id) {
             writeln!(output, "{} {}", rule.id, rule.fix)?;
         }
     }

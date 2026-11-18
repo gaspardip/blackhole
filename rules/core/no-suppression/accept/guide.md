@@ -3,3 +3,5 @@ Prose mentions markdownlint-disable and eslint-disable.
 ```py
 # noqa
 ```
+
+<!-- a markdownlint-disable-line that the tool ignores -->
