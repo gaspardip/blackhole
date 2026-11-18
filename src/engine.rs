@@ -78,10 +78,11 @@ pub fn registry() -> &'static [Rule] {
     ]
 }
 
-fn decode_units(units: impl Iterator<Item = Option<char>>) -> (String, Option<usize>) {
+// Bytes left over after the last whole unit are one more malformed unit.
+fn decode_units(units: impl Iterator<Item = Option<char>>, tail: &[u8]) -> (String, Option<usize>) {
     let mut text = String::new();
     let mut malformed = None;
-    for unit in units {
+    for unit in units.chain((!tail.is_empty()).then_some(None)) {
         let ch = unit.unwrap_or_else(|| {
             malformed.get_or_insert(text.len());
             char::REPLACEMENT_CHARACTER
@@ -96,12 +97,11 @@ fn decode(bytes: &[u8]) -> (String, Option<usize>) {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let (pairs, tail) = bytes[2..].as_chunks();
         let chars = char::decode_utf16(pairs.iter().copied().map(unit)).map(Result::ok);
-        decode_units(chars.chain((!tail.is_empty()).then_some(None)))
+        decode_units(chars, tail)
     };
     let utf32 = |unit: fn([u8; 4]) -> u32| {
-        let (chars, tail) = bytes[4..].as_chunks();
-        let chars = chars.iter().copied().map(unit).map(char::from_u32);
-        decode_units(chars.chain((!tail.is_empty()).then_some(None)))
+        let (units, tail) = bytes[4..].as_chunks();
+        decode_units(units.iter().copied().map(unit).map(char::from_u32), tail)
     };
     match bytes {
         [0xff, 0xfe, 0, 0, ..] => utf32(u32::from_le_bytes),
@@ -152,11 +152,10 @@ fn parse<'a>(
         if error.labels.is_empty()
             && error.code.scope.as_deref() == Some("TS")
             && error.code.number.as_deref() == Some("1490")
+            && let Some(at) = text.find(char::REPLACEMENT_CHARACTER)
+            && text.rfind(char::REPLACEMENT_CHARACTER) == Some(at)
         {
-            let mut replacements = text.match_indices(char::REPLACEMENT_CHARACTER);
-            if let (Some((at, _)), None) = (replacements.next(), replacements.next()) {
-                return Err((at, error.message.to_string()));
-            }
+            return Err((at, error.message.to_string()));
         }
         return Err(diagnostic(error));
     }
@@ -260,12 +259,8 @@ pub fn run<'a>(
         let text = stripped.as_deref().unwrap_or(&decoded);
         let mut hits = match (source_type(path), malformed, nul) {
             (Some(_), Some(at), _) => {
-                let offset = if nul.is_some_and(|n| n < at) {
-                    at - decoded[..at].bytes().filter(|&b| b == 0).count()
-                } else {
-                    at
-                };
-                Err((offset, "Malformed source encoding".to_owned()))
+                let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
+                Err((at - nuls, "Malformed source encoding".to_owned()))
             }
             (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
             (Some(kind), None, None) => parsed_hits(rules, path, text, kind),

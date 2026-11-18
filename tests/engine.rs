@@ -339,6 +339,38 @@ fn export_aliases_expand_each_root_binding_once() {
 }
 
 #[test]
+fn a_gap_after_a_comment_is_scanned_once() {
+    use std::{
+        fmt::Write as _,
+        time::{Duration, Instant},
+    };
+    let mut text = format!("/** Public value. */{}", " ".repeat(100_000));
+    for i in 0..2000 {
+        writeln!(text, "export const a{i} = 0;").unwrap();
+    }
+    let start = Instant::now();
+    assert!(run(registry(), [("gap.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_lone_valid_replacement_character_locates_the_binary_verdict() {
+    for (text, at) in [
+        ("const a = 1;\nconst b = \u{fffd};\n", (2, 11)),
+        ("const a = '\u{fffd}';\nconst b = \u{fffd};\n", (1, 1)),
+    ] {
+        assert_eq!(
+            locations(&run(registry(), [("a.ts", text.as_bytes())])),
+            [("core/unparseable", at.0, at.1)]
+        );
+    }
+}
+
+#[test]
 fn merged_interfaces_are_expanded_once() {
     use std::time::{Duration, Instant};
     let text = format!(

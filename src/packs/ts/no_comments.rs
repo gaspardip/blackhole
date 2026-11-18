@@ -82,7 +82,7 @@ fn directive(raw: &str) -> bool {
         || (matches!(
             first,
             "@jsx" | "@jsxFrag" | "@jsxImportSource" | "@jsxRuntime"
-        ) && !argument.trim_start_matches(js_whitespace).is_empty())
+        ) && !argument.is_empty())
         || value.strip_prefix('/').is_some_and(|v| {
             v.trim_start_matches(js_whitespace)
                 .split_once(js_whitespace)
@@ -91,10 +91,8 @@ fn directive(raw: &str) -> bool {
                 })
         })
         || value.strip_prefix('#').is_some_and(|v| {
-            v.trim_start_matches(js_whitespace)
-                .starts_with("sourceURL=")
-                || v.trim_start_matches(js_whitespace)
-                    .starts_with("sourceMappingURL=")
+            let v = v.trim_start_matches(js_whitespace);
+            v.starts_with("sourceURL=") || v.starts_with("sourceMappingURL=")
         })
         || value.split('\n').any(|v| {
             v.starts_with("SPDX-License-Identifier:")
@@ -286,9 +284,11 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
     let end = ctx.comments.partition_point(|c| c.span.end <= start);
     for c in ctx.comments[..end].iter().rev() {
+        // From the back, so code in between ends the scan before a long gap is read again.
         if !ctx.text[c.span.end as usize..start as usize]
-            .trim_matches(js_whitespace)
-            .is_empty()
+            .chars()
+            .rev()
+            .all(js_whitespace)
         {
             return None;
         }
