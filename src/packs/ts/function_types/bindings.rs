@@ -32,7 +32,15 @@ pub(crate) fn value_declarations<'a>(
     ctx.semantic
         .scoping()
         .symbol_declarations(symbol)
-        .filter(|id| !is_type_declaration(ctx.semantic.nodes().kind(*id)))
+        .filter(|&id| {
+            let nodes = ctx.semantic.nodes();
+            match nodes.kind(id) {
+                AstKind::ImportSpecifier(s) if s.import_kind.is_type() => false,
+                AstKind::ImportSpecifier(_) | AstKind::ImportNamespaceSpecifier(_) | AstKind::ImportDefaultSpecifier(_) =>
+                    !matches!(nodes.parent_kind(id), AstKind::ImportDeclaration(i) if i.import_kind.is_type()),
+                kind => !is_type_declaration(kind),
+            }
+        })
 }
 
 pub(crate) struct ConstBindings<T> {

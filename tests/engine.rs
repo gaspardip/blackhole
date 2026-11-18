@@ -49,6 +49,38 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn type_only_imports_leave_local_value_evidence_visible() {
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-widen-then-assert")
+        .unwrap();
+    let check = |source: &str| {
+        run(
+            std::slice::from_ref(rule),
+            [("value.ts", source.as_bytes())],
+        )
+    };
+    for declaration in [
+        "import type { value } from './types';",
+        "import type value from './types';",
+        "import type * as value from './types';",
+        "import { type X as value } from './types';",
+        "export type { value } from './types';",
+    ] {
+        let source = format!(
+            "{declaration}\nconst value: unknown = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert_eq!(
+            locations(&check(&source)),
+            [(rule.id, 3, 16)],
+            "{declaration}"
+        );
+    }
+    let ambient = "import type { value } from './types';\ndeclare const value: unknown;\nconst picked = value as { id: number };";
+    assert!(check(ambient).is_empty());
+}
+
+#[test]
 fn alias_verdicts_follow_declarations_in_every_order() {
     let cases: &[(&str, &[(&str, usize)])] = &[
         (
