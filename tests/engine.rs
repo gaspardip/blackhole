@@ -7,6 +7,62 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn suppression_after_literal_nul_keeps_its_source_column() {
+    let wide: Vec<_> = "\u{feff}const s = \"🌑\0c8 ignore\";"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    for (path, bytes, expected) in [
+        (
+            "literal.ts",
+            b"const s = \"\0c8 ignore\";".as_slice(),
+            vec![("core/unparseable", 1, 12), ("core/no-suppression", 1, 13)],
+        ),
+        (
+            "split.py",
+            "é\0 # no\0qa".as_bytes(),
+            vec![("core/no-suppression", 1, 4)],
+        ),
+        (
+            "split.rs",
+            b"\0  #[al\0low(dead_code)]",
+            vec![("core/no-suppression", 1, 4)],
+        ),
+        (
+            "two.py",
+            b"\0\0# noqa\0",
+            vec![("core/no-suppression", 1, 3)],
+        ),
+        (
+            "lines.py",
+            b"a\r\0\nb\n# noqa",
+            vec![("core/no-suppression", 4, 1)],
+        ),
+        (
+            "start.ts",
+            b"\0\"v8 ignore\";",
+            vec![("core/unparseable", 1, 1), ("core/no-suppression", 1, 3)],
+        ),
+        (
+            "end.ts",
+            b"const a = 1;\0",
+            vec![("core/unparseable", 1, 13)],
+        ),
+        (
+            "wide.ts",
+            wide.as_slice(),
+            vec![("core/unparseable", 1, 13), ("core/no-suppression", 1, 14)],
+        ),
+    ] {
+        assert_eq!(
+            locations(&run(registry(), [(path, bytes)])),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn incomplete_wide_source_retains_the_replacement_character() {
     let mut inputs = Vec::new();
     for encode in [u16::to_le_bytes, u16::to_be_bytes] {

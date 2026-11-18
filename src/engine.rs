@@ -79,7 +79,7 @@ pub fn registry() -> &'static [Rule] {
 }
 
 // A UTF-32LE mark starts with the UTF-16LE mark.
-fn decode(bytes: &[u8]) -> (String, Option<usize>) {
+fn decode(bytes: &[u8]) -> String {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let (pairs, tail) = bytes[2..].as_chunks();
         let units: Vec<_> = pairs
@@ -100,18 +100,13 @@ fn decode(bytes: &[u8]) -> (String, Option<usize>) {
             .chain((!tail.is_empty()).then_some(char::REPLACEMENT_CHARACTER))
             .collect()
     };
-    let mut text = match bytes {
+    match bytes {
         [0xff, 0xfe, 0, 0, ..] => utf32(u32::from_le_bytes),
         [0, 0, 0xfe, 0xff, ..] => utf32(u32::from_be_bytes),
         [0xff, 0xfe, ..] => wide(u16::from_le_bytes),
         [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
-    };
-    let nul = text.find('\0');
-    if nul.is_some() {
-        text.retain(|c| c != '\0');
     }
-    (text, nul)
 }
 
 pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
@@ -185,14 +180,14 @@ fn source_type(path: &str) -> Option<SourceType> {
     Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
 }
 
-type Hit = (usize, &'static str, Option<String>);
+type Hit<'a> = (usize, &'a Rule, Option<String>);
 
-fn collect(
-    rules: &[Rule],
+fn collect<'r>(
+    rules: &'r [Rule],
     path: &str,
     text: &str,
     parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
-) -> Vec<Hit> {
+) -> Vec<Hit<'r>> {
     let ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
@@ -215,17 +210,17 @@ fn collect(
                 }
             }
         }
-        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule, note)));
     }
     hits
 }
 
-fn parsed_hits(
-    rules: &[Rule],
+fn parsed_hits<'r>(
+    rules: &'r [Rule],
     path: &str,
     text: &str,
     kind: SourceType,
-) -> Result<Vec<Hit>, (usize, String)> {
+) -> Result<Vec<Hit<'r>>, (usize, String)> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
     std::thread::scope(|scope| {
@@ -242,35 +237,44 @@ fn parsed_hits(
     })
 }
 
+/// # Panics
+/// Panics if a rule reports an offset past the end of its input.
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let (text, nul) = decode(bytes);
+        let decoded = decode(bytes);
+        let nul = decoded.find('\0');
+        let stripped = nul.map(|_| decoded.replace('\0', ""));
+        let text = stripped.as_deref().unwrap_or(&decoded);
         let mut hits = match (source_type(path), nul) {
             (Some(_), Some(at)) => Err((at, "NUL in source text".to_owned())),
-            (Some(kind), None) => parsed_hits(rules, path, &text, kind),
-            (None, _) => Ok(collect(rules, path, &text, Ok(None))),
+            (Some(kind), None) => parsed_hits(rules, path, text, kind),
+            (None, _) => Ok(collect(rules, path, text, Ok(None))),
         }
-        .unwrap_or_else(|error| collect(rules, path, &text, Err(&error)));
-        hits.sort_by_key(|hit| hit.0);
-        let (mut previous, mut line, mut col) = (0, 1, 1);
+        .unwrap_or_else(|error| collect(rules, path, text, Err(&error)));
+        // A parse failure at the first NUL precedes matches at the same stripped offset.
+        hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
+        let mut chars = decoded.chars().peekable();
+        let (mut matched, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
-            for (at, ch) in text[previous..offset].char_indices() {
-                // A carriage return before a line feed is the same break, counted at the line feed.
-                let crlf = ch == '\r' && text[previous + at + 1..].starts_with('\n');
-                if is_line_terminator(ch) && !crlf {
+            let at_nul = matches!(rule.run, Run::ParseError) && nul == Some(offset);
+            while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
+                let ch = chars.next().expect("finding offset exceeds decoded text");
+                if ch != '\0' {
+                    matched += ch.len_utf8();
+                }
+                if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
                     line += 1;
                     col = 1;
                 } else {
                     col += 1;
                 }
             }
-            previous = offset;
             result.push(Finding {
-                rule,
+                rule: rule.id,
                 path: path.to_owned(),
                 line,
                 col,
