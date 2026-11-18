@@ -115,12 +115,12 @@ pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
 }
 
 fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {
-    // Oxc marks primary spans explicitly or puts the offending span after related declarations.
+    // Without a primary span, the later token triggers the error and earlier tokens supply context.
     let at = error
         .labels
         .iter()
         .find(|label| label.primary())
-        .or_else(|| error.labels.last())
+        .or_else(|| error.labels.iter().max_by_key(|label| label.offset()))
         .map_or(0, LabeledSpan::offset);
     (at as usize, error.message.to_string())
 }
@@ -264,4 +264,16 @@ pub fn run<'a>(
     }
     result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn an_unlocated_diagnostic_starts_at_zero() {
+        assert_eq!(
+            diagnostic(&OxcDiagnostic::error("failure")),
+            (0, "failure".to_owned())
+        );
+    }
 }

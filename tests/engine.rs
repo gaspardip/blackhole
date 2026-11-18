@@ -73,14 +73,21 @@ fn exported_alias_chain_is_judged_in_linear_time() {
 
 #[test]
 fn diagnostic_points_to_the_offending_token() {
-    for (text, line, col) in [
-        ("let x;\nlet x;", 2, 5),
-        ("const x=1;export {x};\nexport {x};", 2, 9),
-        ("tag: {\ntag: {} }", 2, 1),
-        ("const x = [1", 1, 13),
-        ("break;", 1, 1),
+    for (path, text, line, col) in [
+        (
+            "a.mts",
+            "type T = [first?: number,\n second: string];",
+            2,
+            2,
+        ),
+        ("a.mjs", "class C {\n  constructor() { super(); }\n}", 2, 19),
+        ("a.mjs", "let x;\nlet x;", 2, 5),
+        ("a.mjs", "const x=1;export {x};\nexport {x};", 2, 9),
+        ("a.mjs", "tag: {\ntag: {} }", 2, 1),
+        ("a.mjs", "const x = [1", 1, 13),
+        ("a.mjs", "break;", 1, 1),
     ] {
-        let hits = run(registry(), [("a.mjs", text.as_bytes())]);
+        let hits = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(
             locations(&hits),
             [("core/unparseable", line, col)],
