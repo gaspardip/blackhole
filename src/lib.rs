@@ -1,6 +1,8 @@
+use std::fmt::Write as _;
 mod config;
 pub mod engine;
 pub mod ledger;
+pub mod objections;
 mod packs {
     pub(crate) mod core {
         pub(crate) mod no_suppression;
@@ -40,7 +42,12 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
     let _lock = files::lock()?;
     let scan = scan(&[], output)?;
     if !scan.over && !scan.stale.is_empty() {
-        replace(&scan.ledger, &scan.actual)?;
+        let mut shrunk = scan.base;
+        shrunk.retain(|key, n| {
+            *n = (*n).min(scan.actual.get(key).copied().unwrap_or(0));
+            *n > 0
+        });
+        replace(&scan.ledger, &shrunk)?;
     }
     Ok(scan.over)
 }
@@ -74,6 +81,7 @@ fn replace(path: &Path, actual: &ledger::Counts) -> io::Result<()> {
 
 struct Scan {
     ledger: PathBuf,
+    base: ledger::Counts,
     actual: ledger::Counts,
     over: bool,
     stale: ledger::Counts,
@@ -95,7 +103,12 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
         }
     }
     let actual = ledger::counts(&findings);
-    let over = ledger::excess(&actual, &base);
+    let today = objections::Date::today()?;
+    let objections = objections::parse(
+        &config::read_optional(&root.join(".blackhole/objections"))?,
+        today,
+    )?;
+    let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
     let mut stale = ledger::excess(&base, &actual);
     if !paths.is_empty() {
         // The list is sorted. A line for a file outside the selection says nothing about this run.
@@ -106,6 +119,7 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     Ok(Scan {
         ledger: home.join("ledger"),
         actual,
+        base,
         over: !over.is_empty(),
         stale,
     })
@@ -125,4 +139,73 @@ fn report(findings: &[engine::Finding], output: &mut impl Write) -> io::Result<(
         }
     }
     Ok(())
+}
+
+/// Files or renews an objection against the working tree.
+/// # Errors
+/// Rejects invalid objections, absent overages and repeated renewals.
+pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> io::Result<bool> {
+    let (root, _) = files::list(&[])?;
+    let dir = root.join(".blackhole");
+    fs::create_dir_all(&dir)?;
+    let lock = fs::File::open(&dir)?;
+    lock.lock()?;
+    let file = dir.join("objections");
+    let bytes = config::read_optional(&file)?;
+    let today = objections::Date::today()?;
+    let rows = objections::parse(&bytes, today)?;
+    let key = (rule, path);
+    let mut contents = String::from_utf8(bytes).map_err(io::Error::other)?;
+    if renew {
+        if reason.is_some() {
+            return Err(io::Error::other("renewal takes no reason"));
+        }
+        let row = rows
+            .get(&key)
+            .ok_or_else(|| io::Error::other("no objection"))?;
+        if row.renewal.is_some() {
+            return Err(io::Error::other("already renewed once"));
+        }
+        let prefix = format!("{}\t{}\t", key.0, key.1);
+        contents = contents
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with(&prefix) {
+                    format!(
+                        "{prefix}{}\t{}\t{today}\t{}\n",
+                        row.extra, row.filed, row.reason
+                    )
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect();
+    } else {
+        if rows.contains_key(&key) {
+            return Err(io::Error::other("duplicate objection"));
+        }
+        let reason = reason
+            .filter(|s| !s.trim().is_empty() && !s.contains(['\r', '\n', '\t']))
+            .ok_or_else(|| io::Error::other("invalid reason"))?;
+        let scan = scan(&[], &mut io::sink())?;
+        let extra = scan
+            .actual
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(scan.base.get(&key).copied().unwrap_or(0));
+        if extra == 0 || ledger::invalid_path(&key.1) {
+            return Err(io::Error::other("no representable overage"));
+        }
+        writeln!(
+            contents,
+            "{}\t{}\t{extra}\t{today}\t-\t{reason}",
+            key.0, key.1
+        )
+        .unwrap();
+    }
+    let temp = dir.join(format!("objections.{}.tmp", std::process::id()));
+    fs::File::create_new(&temp)?.write_all(contents.as_bytes())?;
+    fs::rename(temp, file)?;
+    Ok(false)
 }

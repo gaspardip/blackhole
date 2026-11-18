@@ -343,3 +343,41 @@ fn unknown_config_key_is_an_error() {
     fs::write(dir.path().join("blackhole.toml"), "excludes = []").unwrap();
     check(dir.path(), &[], 2);
 }
+
+#[test]
+fn objection_commands_and_shrink() {
+    let dir = repo();
+    let root = dir.path();
+    let args = ["object", RULE, "bad.py", "reason"];
+    fs::write(root.join("bad.py"), "").unwrap();
+    run(root, &args, 2);
+    fs::write(root.join("bad.py"), "#noqa\n#noqa").unwrap();
+    baseline(root, &[("bad.py", 1), ("gone.py", 1)]);
+    run(root, &["object", RULE, "bad.py", "a\tb"], 2);
+    run(root, &args, 0);
+    run(root, &args, 2);
+    let path = root.join(".blackhole/objections");
+    let today = std::process::Command::new("date")
+        .args(["-u", "+%F"])
+        .output()
+        .unwrap()
+        .stdout;
+    let today = std::str::from_utf8(&today).unwrap().trim();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("{RULE}\tbad.py\t1\t{today}\t-\treason\n")
+    );
+    regenerate(root, 0);
+    assert_eq!(
+        fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\tbad.py\n")
+    );
+    check(root, &[], 0);
+    let renew = ["object", "--renew", RULE, "bad.py"];
+    run(root, &renew, 0);
+    assert!(String::from_utf8_lossy(&run(root, &renew, 2).stderr).contains("already renewed once"));
+    fs::write(&path, format!("{RULE}\tbad.py\t1\t2000-01-01\t-\treason\n")).unwrap();
+    check(root, &[], 1);
+    fs::write(path, "invalid").unwrap();
+    check(root, &[], 2);
+}

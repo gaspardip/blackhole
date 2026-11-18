@@ -11,13 +11,28 @@ struct Args {
 #[derive(Subcommand)]
 enum Action {
     Ledger,
-    Check { paths: Vec<PathBuf> },
+    Object {
+        #[arg(long)]
+        renew: bool,
+        rule: String,
+        path: String,
+        reason: Option<String>,
+    },
+    Check {
+        paths: Vec<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
     let mut out = io::stdout().lock();
     let result = match Args::parse().command {
         Action::Check { paths } => blackhole_check::check(&paths, &mut out),
+        Action::Object {
+            rule,
+            path,
+            reason,
+            renew,
+        } => blackhole_check::object(rule, path, reason.as_deref(), renew),
         Action::Ledger => blackhole_check::regenerate(&mut out),
     };
     match result {

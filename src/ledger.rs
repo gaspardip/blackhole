@@ -53,7 +53,7 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
 }
 
 // Git stores one spelling of a path, so any other spelling is a line no file can match.
-fn invalid_path(path: &str) -> bool {
+pub(crate) fn invalid_path(path: &str) -> bool {
     path.contains(['\\', '\r', '\t', '\n', '\0'])
         || path.split('/').any(|p| matches!(p, "" | "." | ".."))
 }
