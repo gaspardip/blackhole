@@ -17,6 +17,7 @@ pub(super) enum Class {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Query {
+    UnsafeDictionary,
     ObjectInput,
     UnknownAlias,
     UnknownReturn,
@@ -64,6 +65,18 @@ fn transparent<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
 }
 
 impl<'a> Resolution<'a> {
+    fn index_values(&self, ctx: &TsCtx<'a>, members: &'a [TSSignature<'a>]) -> Class {
+        members
+            .iter()
+            .find_map(|m| {
+                let TSSignature::TSIndexSignature(i) = m else {
+                    return None;
+                };
+                let value = self.classify(ctx, &i.type_annotation.type_annotation, Query::Value);
+                (value != Class::None).then_some(value)
+            })
+            .unwrap_or(Class::None)
+    }
     fn reference(
         &self,
         ctx: &TsCtx<'a>,
@@ -132,12 +145,21 @@ impl<'a> Resolution<'a> {
         }
         match name.name.as_str() {
             "Readonly" | "NonNullable" | "Partial" | "Required"
-                if matches!(query, Query::Target | Query::AliasTarget | Query::Value) =>
+                if matches!(
+                    query,
+                    Query::Target | Query::AliasTarget | Query::Value | Query::UnsafeDictionary
+                ) =>
             {
                 args.first()
                     .map_or(Class::None, |v| self.classify(ctx, v, query))
             }
             "Promise" | "PromiseLike" if query == Query::UnknownReturn => args
+                .first()
+                .map_or(Class::None, |v| self.classify(ctx, v, query)),
+            "Record" if query == Query::UnsafeDictionary => args
+                .get(1)
+                .map_or(Class::None, |v| self.classify(ctx, v, Query::Value)),
+            "Pick" | "Omit" if query == Query::UnsafeDictionary => args
                 .first()
                 .map_or(Class::None, |v| self.classify(ctx, v, query)),
             "Record"
@@ -154,6 +176,17 @@ impl<'a> Resolution<'a> {
     }
     fn classify(&self, ctx: &TsCtx<'a>, ty: &'a TSType<'a>, query: Query) -> Class {
         let ty = transparent(ty);
+        if query == Query::UnsafeDictionary {
+            return match ty {
+                TSType::TSTypeReference(r) => self.reference(ctx, r, query),
+                TSType::TSTypeLiteral(n) => self.index_values(ctx, &n.members),
+                TSType::TSMappedType(n) => n
+                    .type_annotation
+                    .as_ref()
+                    .map_or(Class::None, |v| self.classify(ctx, v, Query::Value)),
+                _ => Class::None,
+            };
+        }
         if let TSType::TSTypeReference(r) = ty {
             return self.reference(ctx, r, query);
         }
@@ -217,5 +250,20 @@ impl<'a> Resolution<'a> {
             }
             _ => Class::None,
         }
+    }
+}
+
+pub(super) fn unsafe_dictionary<'a>(ctx: &TsCtx<'a>, kind: AstKind<'a>) -> bool {
+    let resolution = Resolution::default();
+    match kind {
+        AstKind::TSTypeReference(r) => {
+            resolution.reference(ctx, r, Query::UnsafeDictionary) != Class::None
+        }
+        AstKind::TSTypeLiteral(n) => resolution.index_values(ctx, &n.members) != Class::None,
+        AstKind::TSMappedType(n) => n
+            .type_annotation
+            .as_ref()
+            .is_some_and(|v| !informative(ctx, v)),
+        _ => false,
     }
 }

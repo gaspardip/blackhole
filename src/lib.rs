@@ -18,6 +18,7 @@ mod packs {
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
         pub(crate) mod no_unknown_type_aliases;
+        pub(crate) mod no_unsafe_dictionary_type;
         pub(crate) mod no_widen_then_assert;
     }
     pub(crate) mod core {
