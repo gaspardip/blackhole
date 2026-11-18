@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   judge:
+    # Whoever opens a pull request picks its target, so the check says whose policy it passed. Require the one named for the branch.
+    name: judge (${{ github.event.pull_request.base.ref }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

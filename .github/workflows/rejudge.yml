@@ -20,13 +20,16 @@ jobs:
       - name: rerun the judge
         run: |
           set -eu
-          run="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/judge.yml/runs" \
-            -f head_sha="${HEAD_SHA}" -f event=pull_request_target -f per_page=1 --jq '.workflow_runs[0].id // empty')"
-          if [ -z "${run}" ]; then
+          # Two pull requests can share a head commit, and the event does not always say which one was reviewed. So every judge run of the commit is rerun.
+          runs="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/judge.yml/runs" \
+            -f head_sha="${HEAD_SHA}" -f event=pull_request_target -f per_page=100 --jq '.workflow_runs[].id')"
+          if [ -z "${runs}" ]; then
             echo "rejudge: no judge run for ${HEAD_SHA}"
             exit 1
           fi
-          # A run still going may have read the reviews before this one arrived, and cannot be rerun until it ends.
-          gh run watch "${run}" --repo "${GITHUB_REPOSITORY}" > /dev/null
-          # A rerun keeps the workflow file and the commit of the first run, and reads the reviews again.
-          gh run rerun "${run}" --repo "${GITHUB_REPOSITORY}"
+          for run in ${runs}; do
+            # A run still going may have read the reviews before this one arrived, and cannot be rerun until it ends.
+            gh run watch "${run}" --repo "${GITHUB_REPOSITORY}" > /dev/null
+            # A rerun keeps the workflow file and the commit of the first run, and reads the reviews again.
+            gh run rerun "${run}" --repo "${GITHUB_REPOSITORY}"
+          done
