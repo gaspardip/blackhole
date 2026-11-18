@@ -49,6 +49,51 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn guard_evidence_uses_only_an_identifiers_own_annotation() {
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-known-value-widening")
+        .unwrap();
+    let guard = "function guard(v: unknown): v is string { return true; }";
+    let check = |body: &str| {
+        let src = format!("{guard}\n{body}");
+        run(std::slice::from_ref(rule), [("case.ts", src.as_bytes())])
+    };
+    for parameter in [
+        "...[value]: [unknown]",
+        "[value]: [unknown]",
+        "{ value }: { value: unknown }",
+        "[{ value }]: [{ value: unknown }]",
+        "[value = 0]: [unknown]",
+        "[...value]: unknown[]",
+    ] {
+        assert!(
+            check(&format!("function wrap({parameter}) {{ guard(value); }}")).is_empty(),
+            "{parameter}"
+        );
+    }
+    for binding in [
+        "[value]: [unknown]",
+        "{ value }: { value: unknown }",
+        "[{ value }]: [{ value: unknown }]",
+        "[value = 0]: [unknown]",
+        "[...value]: unknown[]",
+    ] {
+        assert!(
+            check(&format!("const {binding} = source; guard(value);")).is_empty(),
+            "{binding}"
+        );
+    }
+    for parameter in ["value: string = ''", "...value: string[]"] {
+        let body = format!("function wrap({parameter}) {{ guard(value); }}");
+        assert_eq!(
+            locations(&check(&body)),
+            [(rule.id, 2, body.find("guard(value)").unwrap() + 7)]
+        );
+    }
+}
+
+#[test]
 fn type_only_imports_leave_local_value_evidence_visible() {
     let rule = registry()
         .iter()

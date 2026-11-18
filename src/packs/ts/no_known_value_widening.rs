@@ -117,10 +117,7 @@ fn guard_argument<'a>(
         },
         |_, kind| {
             let annotation = binding_annotation(kind)
-                .filter(|(pattern, _)| {
-                    !matches!(kind, AstKind::VariableDeclarator(_))
-                        || matches!(pattern, BindingPattern::BindingIdentifier(_))
-                })
+                .filter(|(pattern, _)| matches!(pattern, BindingPattern::BindingIdentifier(_)))
                 .map(|(_, a)| a);
             annotation.map_or(Continue(()), |a| {
                 Break(
