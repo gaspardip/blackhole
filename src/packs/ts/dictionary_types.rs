@@ -201,9 +201,13 @@ fn evaluate(
         return Some(*value);
     }
     let mut equations = HashMap::new();
-    let mut discover = vec![goal];
+    let mut discover = vec![(goal, false)];
     let mut queue = std::collections::VecDeque::new();
-    while let Some(g) = discover.pop() {
+    while let Some((g, expanded)) = discover.pop() {
+        if expanded {
+            queue.push_back(g);
+            continue;
+        }
         if !budget.take(1) {
             return None;
         }
@@ -214,7 +218,8 @@ fn evaluate(
         if !budget.take(p.children().len()) {
             return None;
         }
-        discover.extend_from_slice(p.children());
+        discover.push((g, true));
+        discover.extend(p.children().iter().rev().map(|&child| (child, false)));
         equations.insert(
             g,
             Equation {
@@ -224,7 +229,6 @@ fn evaluate(
                 queued: true,
             },
         );
-        queue.push_front(g);
     }
     let mut edges = Vec::new();
     for (&parent, eq) in &equations {

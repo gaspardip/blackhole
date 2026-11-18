@@ -658,6 +658,26 @@ fn shared_union_members_fit_the_budget_with_and_without_a_cycle() {
 }
 
 #[test]
+fn forward_union_members_settle_before_the_union() {
+    use std::fmt::Write as _;
+    let members = (0..4000)
+        .map(|i| format!("A{i}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let mut source = format!("type Hub = {members};\n");
+    for i in 0..3999 {
+        writeln!(source, "type A{i} = A{};", i + 1).unwrap();
+    }
+    source.push_str("type A3999 = unknown;");
+    let hits = timed_alias_findings(&source, 3);
+    assert_eq!(hits.len(), 4001);
+    assert!(
+        hits.iter()
+            .all(|h| h.rule == "ts/no-unknown-type-aliases" && h.note.is_none())
+    );
+}
+
+#[test]
 fn recursive_node_types_propagate_unknown_to_every_alias() {
     use std::fmt::Write as _;
     let mut source = String::from("type Leaf = unknown;\n");
