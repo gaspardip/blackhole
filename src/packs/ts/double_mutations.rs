@@ -8,7 +8,7 @@ use oxc::ast::{
     ast::{AssignmentTarget, Expression, MemberExpression},
 };
 
-fn native(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> Option<String> {
+fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<String> {
     let parts = path(ctx, expr)?;
     Some(native_name(&parts))
 }
@@ -21,13 +21,13 @@ fn native_name(parts: &[&str]) -> String {
     parts[skip..].join(".")
 }
 
-fn protected_member(ctx: &TsCtx<'_>, m: &MemberExpression<'_>) -> bool {
+fn protected_member<'a>(ctx: &TsCtx<'a>, m: &'a MemberExpression<'a>) -> bool {
     native(ctx, m.object())
         .and_then(|owner| super::native_properties::owner_properties(&owner))
         .is_some_and(|protected| MemberKeys::Resolve(ctx).read(m).is_none_or(protected))
 }
 
-pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
+pub(super) fn writes<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> bool {
     match node {
         AstKind::AssignmentExpression(a) => match &a.left {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
@@ -66,7 +66,7 @@ impl Invocation<'_> {
         }
     }
 }
-pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
+pub(super) fn call_writes<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
     let Some(kind) = call.mutation() else {
         return false;
     };
@@ -88,7 +88,7 @@ pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     }
 }
 
-fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
+fn observation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
     if call.args.len() != 2 {
         return false;
     }
@@ -102,7 +102,7 @@ fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
         })
 }
 
-pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
+pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
     if super::values::receiver(ctx, call.callee).is_some_and(|(_, s)| {
         matches!(
             s,

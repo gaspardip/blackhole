@@ -11,7 +11,7 @@ use std::collections::HashSet;
 fn library(s: &str) -> bool {
     matches!(s, "@playwright/test" | "playwright" | "playwright-core")
 }
-fn typed(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
+fn typed<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
     let Expression::Identifier(id) = e else {
         return false;
     };
@@ -45,7 +45,7 @@ fn typed(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
 fn browser_engine(parts: &[&str]) -> bool {
     matches!(parts,[source,"chromium"|"firefox"|"webkit"] if library(source))
 }
-fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
+fn page<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let mut pending = vec![initial];
     let mut seen = HashSet::new();
     while let Some(e) = pending.pop() {
@@ -84,7 +84,7 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
     }
     false
 }
-fn route(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
+fn route<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let e = resolve(ctx, initial);
     if typed(ctx, e, &["Route"]) {
         return true;
@@ -102,7 +102,11 @@ fn route(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
         .get_member_expr()
         .is_some_and(|m| MemberKeys::Resolve(ctx).read(m) == Some("route") && page(ctx, m.object()))
 }
-pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expression<'_>) -> bool {
+pub(super) fn canned<'a>(
+    ctx: &TsCtx<'a>,
+    receiver: &'a Expression<'a>,
+    arg: &'a Expression<'a>,
+) -> bool {
     if !route(ctx, receiver) {
         return false;
     }

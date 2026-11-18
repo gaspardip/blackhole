@@ -239,9 +239,9 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
     results
 }
 
-pub(super) fn report(
-    ctx: &TsCtx<'_>,
-    kind: AstKind<'_>,
+pub(super) fn report<'a>(
+    ctx: &TsCtx<'a>,
+    kind: AstKind<'a>,
     reported: &mut HashSet<Span>,
 ) -> Option<usize> {
     let transport = match kind {

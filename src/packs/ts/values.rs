@@ -12,6 +12,18 @@ use oxc::{
 };
 use std::collections::HashSet;
 
+use std::{
+    cell::{OnceCell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
+#[derive(Default)]
+pub(crate) struct Resolution<'a> {
+    pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
+    written: OnceCell<HashSet<SymbolId>>,
+    aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
+    calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
+}
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
@@ -59,8 +71,18 @@ pub(super) fn declaration<'a>(
 ) -> Option<AstKind<'a>> {
     let scope = ctx.semantic.scoping();
     let symbol = symbol(ctx, id)?;
-    (!scope.symbol_is_mutated(symbol) && scope.symbol_redeclarations(symbol).is_empty())
-        .then(|| ctx.semantic.symbol_declaration(symbol).kind())
+    (!ctx
+        .resolution
+        .written
+        .get_or_init(|| {
+            scope
+                .symbol_ids()
+                .filter(|&s| scope.symbol_is_mutated(s))
+                .collect()
+        })
+        .contains(&symbol)
+        && scope.symbol_redeclarations(symbol).is_empty())
+    .then(|| ctx.semantic.symbol_declaration(symbol).kind())
 }
 
 pub(super) fn initializer<'a>(
@@ -77,6 +99,7 @@ pub(super) fn initializer<'a>(
 
 pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     let mut seen = HashSet::new();
+    let mut aliases = Vec::new();
     loop {
         expr = expr.get_inner_expression();
         if let Expression::ChainExpression(chain) = expr
@@ -92,16 +115,28 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
             continue;
         }
         let Expression::Identifier(id) = expr else {
-            return expr;
+            break;
         };
+        if let Some(sym) = symbol(ctx, id)
+            && let Some(&cached) = ctx.resolution.aliases.borrow().get(&sym)
+        {
+            expr = cached;
+            break;
+        }
         if !seen.insert(id.span.start) {
             return expr;
         }
         let Some(next) = initializer(ctx, id) else {
-            return expr;
+            break;
         };
+        aliases.extend(symbol(ctx, id));
         expr = next;
     }
+    ctx.resolution
+        .aliases
+        .borrow_mut()
+        .extend(aliases.into_iter().map(|s| (s, expr)));
+    expr
 }
 
 pub(super) fn alternatives<'a>(
@@ -117,7 +152,11 @@ pub(super) fn alternatives<'a>(
     branches.into_iter().flatten()
 }
 
-pub(super) fn resolves_to_global(ctx: &TsCtx<'_>, expr: &Expression<'_>, name: &str) -> bool {
+pub(super) fn resolves_to_global<'a>(
+    ctx: &TsCtx<'a>,
+    expr: &'a Expression<'a>,
+    name: &str,
+) -> bool {
     let Expression::Identifier(id) = resolve(ctx, expr) else {
         return false;
     };
@@ -237,7 +276,7 @@ pub(super) fn callback_call<'a>(
     ctx: &TsCtx<'a>,
     symbol: SymbolId,
     first_parameters: usize,
-) -> Option<Invocation<'a>> {
+) -> Option<Rc<Invocation<'a>>> {
     let function = enclosing_functions(ctx, ctx.semantic.symbol_declaration(symbol).id()).next()?;
     let params = match function.kind() {
         AstKind::Function(f) => &f.params,
@@ -336,7 +375,10 @@ fn array_args<'a>(
         Vec::new()
     }
 }
-pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invocation<'a> {
+pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<Invocation<'a>> {
+    if let Some(hit) = ctx.resolution.calls.borrow().get(&call.span) {
+        return Rc::clone(hit);
+    }
     let mut callee = resolve(ctx, &call.callee);
     let mut args: Vec<_> = call.arguments.iter().map(Argument::as_expression).collect();
     let mut seen = HashSet::new();
@@ -373,7 +415,12 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
         }
         callee = resolve(ctx, m.object());
     };
-    Invocation { callee, path, args }
+    let result = Rc::new(Invocation { callee, path, args });
+    ctx.resolution
+        .calls
+        .borrow_mut()
+        .insert(call.span, Rc::clone(&result));
+    result
 }
 
 pub(super) fn call_expr<'a>(e: &'a Expression<'a>) -> Option<&'a CallExpression<'a>> {
@@ -461,10 +508,22 @@ pub(super) fn receiver<'a>(
     ))
 }
 
-pub(super) fn member_span(ctx: &TsCtx<'_>, member: &MemberExpression<'_>) -> oxc::span::Span {
+pub(super) fn member_span<'a>(
+    ctx: &TsCtx<'a>,
+    member: &'a MemberExpression<'a>,
+) -> oxc::span::Span {
     match member {
         MemberExpression::StaticMemberExpression(m) => m.property.span,
         MemberExpression::ComputedMemberExpression(m) => resolve(ctx, &m.expression).span(),
         MemberExpression::PrivateFieldExpression(m) => m.field.span,
+    }
+}
+
+pub(super) fn member_object(member: oxc::ast::MemberExpressionKind<'_>) -> &Expression<'_> {
+    use oxc::ast::MemberExpressionKind as Kind;
+    match member {
+        Kind::Computed(m) => &m.object,
+        Kind::Static(m) => &m.object,
+        Kind::PrivateField(m) => &m.object,
     }
 }

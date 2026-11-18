@@ -46,13 +46,13 @@ enum ResponseKinds {
     Native,
     WithMsw,
 }
-pub(super) fn transport_response(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
+pub(super) fn transport_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> bool {
     raw_response(ctx, value, ResponseKinds::WithMsw)
 }
-fn config_response(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
+fn config_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> bool {
     raw_response(ctx, value, ResponseKinds::Native)
 }
-fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -> bool {
+fn raw_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, kinds: ResponseKinds) -> bool {
     let mut pending = vec![value];
     let mut seen = HashSet::new();
     while let Some(expr) = pending.pop() {
@@ -123,7 +123,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
     false
 }
 
-pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> bool {
+pub(super) fn replacement<'a>(ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>) -> bool {
     let key = super::values::key(ctx, &property.key);
     if matches!(key, Some("outboundService") | None) && config_response(ctx, &property.value) {
         return true;

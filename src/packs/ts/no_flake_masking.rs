@@ -11,7 +11,12 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Fix the timing dependency or move slow setup into a suite hook. Wait for the event that makes the assertion true.",
     run: Run::Ts(check),
 };
-fn inspect(ctx: &TsCtx<'_>, expr: Option<&Expression<'_>>, keys: &[&str], findings: &mut Findings) {
+fn inspect<'a>(
+    ctx: &TsCtx<'a>,
+    expr: Option<&'a Expression<'a>>,
+    keys: &[&str],
+    findings: &mut Findings,
+) {
     let Some(expr) = expr else {
         return;
     };
@@ -27,7 +32,12 @@ fn inspect(ctx: &TsCtx<'_>, expr: Option<&Expression<'_>>, keys: &[&str], findin
         findings.report(expr.get_inner_expression().span().start as usize, None);
     }
 }
-fn config(ctx: &TsCtx<'_>, arg: Option<&Expression<'_>>, keys: &[&str], findings: &mut Findings) {
+fn config<'a>(
+    ctx: &TsCtx<'a>,
+    arg: Option<&'a Expression<'a>>,
+    keys: &[&str],
+    findings: &mut Findings,
+) {
     if let Some(arg) = arg {
         if matches!(
             super::values::resolve(ctx, arg),
@@ -48,24 +58,23 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             AstKind::CallExpression(c) => {
                 let call = super::values::invoked(ctx, c);
                 let p = runner(ctx, &call);
-                match p.as_slice() {
-                    ["vi", "setConfig"] => config(
+                match p.short() {
+                    Some(["vi", "setConfig"]) => config(
                         ctx,
                         call.arg(0),
                         &["retry", "testTimeout", "hookTimeout"],
                         findings,
                     ),
-                    ["test", "describe", "configure"] => {
+                    Some(["test", "describe", "configure"]) => {
                         config(ctx, call.arg(0), &["retries"], findings);
                     }
-                    ["test", "slow"] => findings.report(c.span.start as usize, None),
-                    [base, ..]
-                        if (is_test(base) || suite(base))
-                            && (super::values::call_expr(call.callee).is_some()
-                                || !matches!(
-                                    p.last(),
-                                    Some(&("each" | "for" | "extend" | "scoped" | "override"))
-                                )) =>
+                    Some(["test", "slow"]) => findings.report(c.span.start as usize, None),
+                    _ if p.first().is_some_and(|base| is_test(base) || suite(base))
+                        && (super::values::call_expr(call.callee).is_some()
+                            || !matches!(
+                                p.last,
+                                Some("each" | "for" | "extend" | "scoped" | "override")
+                            )) =>
                     {
                         let second = call.arg(1);
                         let third = call.arg(2);

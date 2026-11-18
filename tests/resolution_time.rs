@@ -1,0 +1,78 @@
+use blackhole_check::engine::{registry, run};
+use std::{
+    fmt::Write,
+    time::{Duration, Instant},
+};
+
+fn source(shape: &str, n: usize) -> String {
+    let mut text = String::new();
+    match shape {
+        "chain" | "chaincalls" => {
+            let links = if shape == "chain" { n } else { n / 2 };
+            text.push_str("const a0=test;\n");
+            for i in 1..links {
+                writeln!(text, "const a{i}=a{};", i - 1).unwrap();
+            }
+            for _ in 0..if shape == "chain" { 1 } else { n / 2 } {
+                writeln!(text, "a{}('x',()=>expect(read()).toBe(answer));", links - 1).unwrap();
+            }
+        }
+        "callchain" => {
+            text.push_str("test('x',()=>expect(read())");
+            for _ in 0..n {
+                text.push_str(".and()");
+            }
+            text.push_str(".toBe(answer));");
+        }
+        "fnhelper" => {
+            text.push_str("function helper(i:number){return i;} test('x',()=>{");
+            for i in 0..n {
+                writeln!(text, "expect(helper({i})).toBe({i});").unwrap();
+            }
+            text.push_str("});");
+        }
+        _ => {
+            text.push_str(if shape == "imported" {
+                "import {test as t,expect as e} from 'vitest';"
+            } else {
+                "let t=test;let e=expect;"
+            });
+            for i in 0..n {
+                writeln!(text, "t('x',()=>e(read({i})).toBe({i}));").unwrap();
+            }
+        }
+    }
+    text
+}
+
+#[test]
+fn resolves_large_files() {
+    // Parsing a long call chain needs a larger stack before resolution runs.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(check_shapes)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn check_shapes() {
+    for shape in [
+        "imported",
+        "letalias",
+        "fnhelper",
+        "callchain",
+        "chaincalls",
+        "chain",
+    ] {
+        let text = source(shape, 10_000);
+        let start = Instant::now();
+        let hits = run(registry(), [("large.test.ts", text.as_bytes())]);
+        assert!(hits.is_empty(), "{shape}");
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "{shape} took {:?}",
+            start.elapsed()
+        );
+    }
+}

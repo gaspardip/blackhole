@@ -19,7 +19,7 @@ fn literal(e: &Expression<'_>) -> bool {
     let e = e.get_inner_expression();
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
-fn same(ctx: &TsCtx<'_>, a: &Expression<'_>, b: &Expression<'_>) -> bool {
+fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
     match (a.get_inner_expression(), b.get_inner_expression()) {
         (Expression::Identifier(x), Expression::Identifier(y)) => x.name == y.name,
         (Expression::StringLiteral(x), Expression::StringLiteral(y)) => x.value == y.value,
@@ -33,7 +33,7 @@ fn same(ctx: &TsCtx<'_>, a: &Expression<'_>, b: &Expression<'_>) -> bool {
         _ => false,
     }
 }
-fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>, base: &str) -> bool {
+fn tautology<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>, base: &str) -> bool {
     let first = call.arguments.first().and_then(|a| a.as_expression());
     if call.callee.is_specific_id("assert") {
         return first.is_some_and(literal);
@@ -86,8 +86,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         if base.starts_with("expect") || base.starts_with("assert") {
             if matches!(
-                parts.as_slice(),
-                [
+                parts.short(),
+                Some([
                     "expect",
                     "assertions"
                         | "hasAssertions"
@@ -99,7 +99,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         | "stringContaining"
                         | "stringMatching"
                         | "closeTo"
-                ]
+                ])
             ) {
                 continue;
             }

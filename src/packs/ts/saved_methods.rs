@@ -13,7 +13,11 @@ use oxc::{
     syntax::symbol::SymbolId,
 };
 
-fn same(ctx: &TsCtx<'_>, left: &MemberExpression<'_>, right: &MemberExpression<'_>) -> bool {
+fn same<'a>(
+    ctx: &TsCtx<'a>,
+    left: &'a MemberExpression<'a>,
+    right: &'a MemberExpression<'a>,
+) -> bool {
     let (mut left, mut right) = (left, right);
     let mut seen = std::collections::HashSet::new();
     while seen.insert(left.span()) {
@@ -43,7 +47,7 @@ fn same(ctx: &TsCtx<'_>, left: &MemberExpression<'_>, right: &MemberExpression<'
     false
 }
 
-fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
+fn delegates<'a>(ctx: &TsCtx<'a>, f: &'a Function<'a>, original: SymbolId) -> bool {
     if f.r#async || f.generator || !f.params.items.is_empty() {
         return false;
     }
@@ -61,7 +65,7 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
     else {
         return false;
     };
-    let arg_id = |e: &Expression<'_>| match resolve(ctx, e) {
+    let arg_id = |e: &'a Expression<'a>| match resolve(ctx, e) {
         Expression::Identifier(id) => symbol(ctx, id) == Some(args),
         _ => false,
     };

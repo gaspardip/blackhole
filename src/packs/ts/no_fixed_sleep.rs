@@ -17,7 +17,7 @@ fn calls_resolver(body: Option<&Expression<'_>>, name: &str) -> bool {
     };
     c.callee.is_specific_id(name)
 }
-fn promise(ctx: &TsCtx<'_>, n: &NewExpression<'_>) -> bool {
+fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
     if !super::values::resolves_to_global(ctx, &n.callee, "Promise") {
         return false;
     }
@@ -63,7 +63,7 @@ fn promise(ctx: &TsCtx<'_>, n: &NewExpression<'_>) -> bool {
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
-    if nodes.iter().any(|n|matches!(n.kind(),AstKind::CallExpression(c) if super::test_context::runner(ctx,&super::values::invoked(ctx,c))==["vi","useFakeTimers"])){return;}
+    let mut sleeps = Vec::new();
     for (id, n) in nodes.iter_enumerated() {
         let AstKind::AwaitExpression(a) = n.kind() else {
             continue;
@@ -74,10 +74,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         } else {
             super::values::call_expr(value).is_some_and(|c| {
                 matches!(
-                    super::test_context::runner(ctx, &super::values::invoked(ctx, c)).as_slice(),
-                    ["scheduler", "wait"]
-                        | ["Bun", "sleep"]
-                        | ["node:timers/promises" | "timers/promises", "setTimeout"]
+                    super::test_context::runner(ctx, &super::values::invoked(ctx, c)).short(),
+                    Some(
+                        ["scheduler", "wait"]
+                            | ["Bun", "sleep"]
+                            | ["node:timers/promises" | "timers/promises", "setTimeout"]
+                    )
                 )
             })
         };
@@ -91,7 +93,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         || matches!(*s, "beforeEach" | "beforeAll" | "afterEach" | "afterAll")
                 })
         {
-            findings.report(a.span.start as usize, None);
+            sleeps.push(a.span.start as usize);
         }
+    }
+    if sleeps.is_empty() {
+        return;
+    }
+    if nodes.iter().any(|n|matches!(n.kind(),AstKind::CallExpression(c) if super::test_context::runner(ctx,&super::values::invoked(ctx,c))==["vi","useFakeTimers"])){return;}
+    for at in sleeps {
+        findings.report(at, None);
     }
 }

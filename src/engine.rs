@@ -38,6 +38,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    pub(crate) resolution: crate::packs::ts::no_test_doubles::Resolution<'a>,
     pub path: &'a str,
     pub text: &'a str,
     pub program: &'a Program<'a>,
@@ -150,6 +151,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        resolution: crate::packs::ts::no_test_doubles::Resolution::default(),
         path,
         text,
         program,

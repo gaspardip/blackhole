@@ -12,7 +12,7 @@ use oxc::{
 };
 use std::collections::HashSet;
 
-pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
+pub(super) fn contains_function<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let mut pending = vec![initial];
     let mut seen = HashSet::new();
     while let Some(next) = pending.pop() {
@@ -50,7 +50,7 @@ pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bo
     }
     false
 }
-fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
+fn binding<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
     if path(ctx, expr).is_some_and(|p| p.starts_with(&["cloudflare:workers", "env"])) {
         return true;
     }
@@ -83,7 +83,7 @@ fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
         });
     }
 }
-pub(super) fn mutation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
+pub(super) fn mutation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
     if call.path.as_deref() == Some(&["cloudflare:workers", "withEnv"]) {
         return call.arg(0).is_some_and(|arg| contains_function(ctx, arg));
     }
@@ -105,7 +105,7 @@ pub(super) fn mutation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
         Mutation::Delete => false,
     }
 }
-pub(super) fn assignment(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
+pub(super) fn assignment<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> bool {
     let AstKind::AssignmentExpression(a) = node else {
         return false;
     };
@@ -114,7 +114,7 @@ pub(super) fn assignment(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
         .is_some_and(|m| binding(ctx, m.object()))
         && contains_function(ctx, &a.right)
 }
-pub(super) fn spread(ctx: &TsCtx<'_>, obj: &ObjectExpression<'_>) -> bool {
+pub(super) fn spread<'a>(ctx: &TsCtx<'a>, obj: &'a ObjectExpression<'a>) -> bool {
     let has_binding_spread = obj.properties.iter().any(|property| match property {
         ObjectPropertyKind::SpreadProperty(spread) => binding(ctx, &spread.argument),
         ObjectPropertyKind::ObjectProperty(_) => false,

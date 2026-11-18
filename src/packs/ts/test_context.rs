@@ -67,9 +67,9 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
-pub(super) fn chain_property(
-    ctx: &TsCtx<'_>,
-    e: &Expression<'_>,
+pub(super) fn chain_property<'a>(
+    ctx: &TsCtx<'a>,
+    e: &'a Expression<'a>,
     wanted: impl Fn(&str) -> bool,
 ) -> Option<usize> {
     let mut current = e;
@@ -94,46 +94,95 @@ use super::values::{Invocation, call_expr, invoked, path, resolve, unqualified};
 use crate::engine::TsCtx;
 use oxc::span::GetSpan;
 
-pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Vec<&'a str> {
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Runner<'a> {
+    prefix: [&'a str; 3],
+    length: usize,
+    pub(super) last: Option<&'a str>,
+    pub(super) skipped: bool,
+}
+impl<'a> Runner<'a> {
+    fn push(&mut self, name: &'a str) {
+        if let Some(slot) = self.prefix.get_mut(self.length) {
+            *slot = name;
+        }
+        self.skipped |= self.length > 0 && super::no_skipped_tests::modifier(name);
+        self.length += 1;
+        self.last = Some(name);
+    }
+    pub(super) fn short(&self) -> Option<&[&'a str]> {
+        self.prefix.get(..self.length)
+    }
+    pub(super) fn first(&self) -> Option<&&'a str> {
+        (self.length > 0).then_some(&self.prefix[0])
+    }
+    pub(super) fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+impl<const N: usize> PartialEq<[&str; N]> for Runner<'_> {
+    fn eq(&self, other: &[&str; N]) -> bool {
+        self.short() == Some(other.as_slice())
+    }
+}
+
+pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
     let mut e = call.callee;
-    let mut suffix = Vec::new();
+    let mut steps = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    loop {
+    let mut result = loop {
         e = resolve(ctx, e);
-        if !seen.insert(e.span()) {
-            return Vec::new();
+        let span = e.span();
+        if let Some(result) = ctx.resolution.runners.borrow().get(&span) {
+            break *result;
+        }
+        if !seen.insert(span) {
+            return Runner::default();
         }
         if let Some(parts) = path(ctx, e) {
-            let mut parts = match unqualified(&parts) {
+            let mut result = Runner::default();
+            let names = match unqualified(&parts) {
                 ["node:test", "default", rest @ ..] => {
-                    let mut p = vec!["test"];
-                    p.extend(rest);
-                    p
+                    result.push("test");
+                    rest
                 }
                 [
                     "vitest" | "@jest/globals" | "node:test" | "@playwright/test",
                     rest @ ..,
-                ] => rest.to_vec(),
-                other => other.to_vec(),
+                ] => rest,
+                other => other,
             };
-            parts.extend(suffix.into_iter().rev());
-            return parts;
+            for name in names {
+                result.push(name);
+            }
+            ctx.resolution.runners.borrow_mut().insert(span, result);
+            break result;
         }
         if let Some(m) = e.get_member_expr()
-            && let Some(k) = MemberKeys::Resolve(ctx).read(m)
+            && let Some(key) = MemberKeys::Resolve(ctx).read(m)
         {
-            suffix.push(k);
+            steps.push((span, Some(key)));
             e = m.object();
             continue;
         }
         if let Some(c) = call_expr(e) {
+            steps.push((span, None));
             e = invoked(ctx, c).callee;
             continue;
         }
         if let Expression::TaggedTemplateExpression(t) = e {
+            steps.push((span, None));
             e = &t.tag;
             continue;
         }
-        return Vec::new();
+        return Runner::default();
+    };
+    let mut cache = ctx.resolution.runners.borrow_mut();
+    for (span, key) in steps.into_iter().rev() {
+        if let Some(key) = key {
+            result.push(key);
+        }
+        cache.insert(span, result);
     }
+    result
 }

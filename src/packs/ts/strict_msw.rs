@@ -20,7 +20,7 @@ enum Factory {
     Worker,
     Ambiguous,
 }
-fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
+fn factory<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<Factory> {
     let call = super::values::call_expr(super::values::resolve(ctx, e))?;
     let inv = super::values::invoked(ctx, call);
     let [source, name] = inv.path.as_deref()? else {
@@ -35,7 +35,7 @@ fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
         _ => None,
     }
 }
-fn strict(ctx: &TsCtx<'_>, opts: Option<&Expression<'_>>) -> bool {
+fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     let Some(p) = opts
         .and_then(|e| super::values::properties(ctx, e))
         .and_then(|p| p.named.get("onUnhandledRequest").copied())

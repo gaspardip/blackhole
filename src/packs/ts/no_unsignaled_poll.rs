@@ -31,7 +31,7 @@ fn recorder(mut e: &Expression<'_>) -> Option<bool> {
         }
     }
 }
-fn assertion(ctx: &TsCtx<'_>, e: &Expression<'_>) -> bool {
+fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
     let Some(c) = super::values::call_expr(e) else {
         return false;
     };

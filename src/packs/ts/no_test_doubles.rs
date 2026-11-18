@@ -1,5 +1,6 @@
 use super::values::Imported;
 use super::values::MemberKeys;
+pub(crate) use super::values::Resolution;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
@@ -15,7 +16,7 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-fn worker_entry(ctx: &TsCtx<'_>, receiver: &Expression<'_>) -> bool {
+fn worker_entry<'a>(ctx: &TsCtx<'a>, receiver: &'a Expression<'a>) -> bool {
     let Expression::Identifier(id) = receiver else {
         return false;
     };
@@ -41,7 +42,7 @@ fn worker_entry(ctx: &TsCtx<'_>, receiver: &Expression<'_>) -> bool {
     })
 }
 
-fn hono(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
+fn hono<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let mut pending = vec![initial];
     let mut seen = std::collections::HashSet::new();
     while let Some(e) = pending.pop() {
@@ -89,9 +90,9 @@ fn hono(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
     }
     false
 }
-fn check_bindings(
-    ctx: &TsCtx<'_>,
-    value: &Expression<'_>,
+fn check_bindings<'a>(
+    ctx: &TsCtx<'a>,
+    value: &'a Expression<'a>,
     reported: &mut std::collections::HashSet<oxc::span::Span>,
     findings: &mut Findings,
 ) {
