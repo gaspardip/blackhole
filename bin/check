@@ -3,6 +3,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 # Without rustup nothing applies rust-toolchain.toml, so a newer local Rust would pass here and fail in CI.
+# rustfmt and clippy must come from the same release as rustc; only rustc is checked.
 want="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
 have="$(rustc --version | cut -d' ' -f2)"
 if [ "${have}" != "${want}" ]; then

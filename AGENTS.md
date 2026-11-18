@@ -4,7 +4,7 @@ Rules that coding agents cannot talk their way around. A Rust CLI (`blackhole`, 
 
 ## Verify
 
-A change is done when `bin/check` exits 0. The `check` workflow runs that script and nothing else. The name guard is a second required check that only the hooks and CI can run.
+`bin/check` defines green for the code: the `check` workflow runs that script and nothing else. A pull request also has to pass `name-guard`, which scans its commits, branch name, title and body.
 
 ## Setup
 
@@ -17,7 +17,7 @@ A private list of names must never appear in this repository: file contents, fil
 - The hooks and CI run `tools/name_guard.py`. A hit prints `where:line banned name #n` and never the text.
 - On a hit, reword. Never pass `--no-verify`, and never print, copy or guess the list.
 - Repositories that adopt blackhole privately are "private repo A", "private repo B". Their code is never copied in.
-- Scan pull request text before opening it: `GUARD_TEXT_PR="<title and body>" python3 -I tools/name_guard.py text`.
+- Scan pull request text before opening it: write the title and body to a file, then `python3 -I tools/name_guard.py message <file>`. Never paste the text into a shell command.
 
 ## This repo lives by its own rules
 
