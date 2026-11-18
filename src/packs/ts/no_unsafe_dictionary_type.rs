@@ -17,8 +17,34 @@ use oxc::{
     span::GetSpan,
 };
 
+fn plain_alias(ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
+    let AstKind::TSTypeReference(r) = kind else {
+        return false;
+    };
+    let TSTypeName::IdentifierReference(ident) = &r.type_name else {
+        return false;
+    };
+    r.type_arguments.is_none()
+        && declaration(ctx, ident).is_some_and(|d| {
+            matches!(
+                ctx.semantic.nodes().kind(d),
+                AstKind::TSTypeAliasDeclaration(_)
+            )
+        })
+}
+
+fn inside_constraint(parent: AstKind<'_>, span: oxc::span::Span) -> bool {
+    let AstKind::TSTypeParameter(p) = parent else {
+        return false;
+    };
+    p.constraint
+        .as_ref()
+        .is_some_and(|t| t.span().contains_inclusive(span))
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
+    let mut dictionaries = std::collections::HashSet::new();
     for (id, node) in nodes.iter_enumerated() {
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
@@ -32,17 +58,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if !unsafe_dictionary(ctx, kind) {
             continue;
         }
-        let ancestors = || nodes.ancestor_ids(id).map(|a| nodes.kind(a));
-        if let AstKind::TSTypeReference(r) = kind
-            && r.type_arguments.is_none()
-            && let TSTypeName::IdentifierReference(i) = &r.type_name
-            && declaration(ctx, i)
-                .is_some_and(|d| matches!(nodes.kind(d), AstKind::TSTypeAliasDeclaration(_)))
-            && !ancestors().any(|k| matches!(k, AstKind::TSTypeAliasDeclaration(_)))
-        {
-            continue;
+        dictionaries.insert(id);
+        let mut needs_alias = plain_alias(ctx, kind);
+        let hidden = nodes.ancestor_ids(id).any(|id| {
+            let parent = nodes.kind(id);
+            if matches!(parent, AstKind::TSTypeAliasDeclaration(_)) {
+                needs_alias = false;
+            }
+            dictionaries.contains(&id) || inside_constraint(parent, node.span())
+        });
+        if !hidden && !needs_alias {
+            findings.report(node.span().start as usize, None);
         }
-        if ancestors().any(|k|matches!(k,AstKind::TSTypeParameter(p) if p.constraint.as_ref().is_some_and(|t|t.span().contains_inclusive(node.span()))) || unsafe_dictionary(ctx,k)){continue;}
-        findings.report(node.span().start as usize, None);
     }
 }

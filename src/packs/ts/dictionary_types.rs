@@ -2,7 +2,7 @@ use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{TSSignature, TSType, TSTypeName, TSTypeOperatorOperator},
+        ast::{TSSignature, TSType, TSTypeAliasDeclaration, TSTypeName, TSTypeOperatorOperator},
     },
     syntax::{node::NodeId, symbol::SymbolId},
 };
@@ -26,7 +26,7 @@ enum Query {
     Key,
     Value,
 }
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Resolution<'a> {
     arguments: HashMap<SymbolId, &'a TSType<'a>>,
     visiting: HashSet<NodeId>,
@@ -49,7 +49,18 @@ pub(super) fn unknown_return<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
 }
 
 fn empty(members: &[TSSignature<'_>]) -> bool {
-    members.iter().all(|m|matches!(m,TSSignature::TSPropertySignature(p) if p.optional && p.type_annotation.as_ref().is_some_and(|a|matches!(transparent(&a.type_annotation),TSType::TSNeverKeyword(_)))))
+    members.iter().all(optional_never_property)
+}
+
+fn optional_never_property(member: &TSSignature<'_>) -> bool {
+    let TSSignature::TSPropertySignature(property) = member else {
+        return false;
+    };
+    property.optional
+        && property
+            .type_annotation
+            .as_ref()
+            .is_some_and(|a| matches!(transparent(&a.type_annotation), TSType::TSNeverKeyword(_)))
 }
 
 fn transparent<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
@@ -65,7 +76,7 @@ fn transparent<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
 }
 
 impl<'a> Resolution<'a> {
-    fn index_values(&self, ctx: &TsCtx<'a>, members: &'a [TSSignature<'a>]) -> Class {
+    fn index_values(&mut self, ctx: &TsCtx<'a>, members: &'a [TSSignature<'a>]) -> Class {
         members
             .iter()
             .find_map(|m| {
@@ -77,8 +88,45 @@ impl<'a> Resolution<'a> {
             })
             .unwrap_or(Class::None)
     }
+    fn alias(
+        &mut self,
+        ctx: &TsCtx<'a>,
+        alias: &'a TSTypeAliasDeclaration<'a>,
+        args: &'a [TSType<'a>],
+        query: Query,
+    ) -> Class {
+        let params = alias
+            .type_parameters
+            .as_ref()
+            .map_or(&[][..], |p| p.params.as_slice());
+        if params.iter().skip(args.len()).any(|p| p.default.is_none()) {
+            return Class::None;
+        }
+        // Each active alias owns distinct parameter symbols, and visiting prevents alias re-entry.
+        for (i, p) in params.iter().enumerate() {
+            let arg = args.get(i).or(p.default.as_ref()).unwrap();
+            self.arguments.insert(p.name.symbol_id.get().unwrap(), arg);
+        }
+        let inner = self.classify(
+            ctx,
+            &alias.type_annotation,
+            if query == Query::Target {
+                Query::AliasTarget
+            } else {
+                query
+            },
+        );
+        for p in params {
+            self.arguments.remove(&p.name.symbol_id.get().unwrap());
+        }
+        if query == Query::Target && alias.type_parameters.is_some() && inner != Class::Dictionary {
+            Class::None
+        } else {
+            inner
+        }
+    }
     fn reference(
-        &self,
+        &mut self,
         ctx: &TsCtx<'a>,
         r: &'a oxc::ast::ast::TSTypeReference<'a>,
         query: Query,
@@ -93,51 +141,27 @@ impl<'a> Resolution<'a> {
         let scopes = ctx.semantic.scoping();
         if let Some(symbol) = super::function_types::bindings::symbol(ctx, name) {
             let id = scopes.symbol_declaration(symbol);
-            let mut next = self.clone();
-            if !next.visiting.insert(id) {
+            if !self.visiting.insert(id) {
                 return Class::None;
             }
-            if let Some(arg) = self.arguments.get(&symbol) {
-                return next.classify(ctx, arg, query);
-            }
-            return match ctx.semantic.nodes().kind(id) {
-                AstKind::TSInterfaceDeclaration(i)
-                    if query == Query::Value
-                        && scopes.symbol_declarations(symbol).count() == 1
-                        && i.extends.is_empty()
-                        && empty(&i.body.body) =>
-                {
-                    Class::Broad
-                }
-                AstKind::TSTypeAliasDeclaration(a) => {
-                    if let Some(params) = &a.type_parameters {
-                        for (i, p) in params.params.iter().enumerate() {
-                            let Some(arg) = args.get(i).or(p.default.as_ref()) else {
-                                return Class::None;
-                            };
-                            next.arguments.insert(p.name.symbol_id.get().unwrap(), arg);
-                        }
-                    }
-                    let inner = next.classify(
-                        ctx,
-                        &a.type_annotation,
-                        if query == Query::Target {
-                            Query::AliasTarget
-                        } else {
-                            query
-                        },
-                    );
-                    if query == Query::Target
-                        && a.type_parameters.is_some()
-                        && inner != Class::Dictionary
+            let result = if let Some(&arg) = self.arguments.get(&symbol) {
+                self.classify(ctx, arg, query)
+            } else {
+                match ctx.semantic.nodes().kind(id) {
+                    AstKind::TSInterfaceDeclaration(i)
+                        if query == Query::Value
+                            && scopes.symbol_declarations(symbol).count() == 1
+                            && i.extends.is_empty()
+                            && empty(&i.body.body) =>
                     {
-                        Class::None
-                    } else {
-                        inner
+                        Class::Broad
                     }
+                    AstKind::TSTypeAliasDeclaration(alias) => self.alias(ctx, alias, args, query),
+                    _ => Class::None,
                 }
-                _ => Class::None,
             };
+            self.visiting.remove(&id);
+            return result;
         }
         match name.name.as_str() {
             "Readonly" | "NonNullable" | "Partial" | "Required"
@@ -170,18 +194,10 @@ impl<'a> Resolution<'a> {
             _ => Class::None,
         }
     }
-    fn classify(&self, ctx: &TsCtx<'a>, ty: &'a TSType<'a>, query: Query) -> Class {
+    fn classify(&mut self, ctx: &TsCtx<'a>, ty: &'a TSType<'a>, query: Query) -> Class {
         let ty = transparent(ty);
         if query == Query::UnsafeDictionary {
-            return match ty {
-                TSType::TSTypeReference(r) => self.reference(ctx, r, query),
-                TSType::TSTypeLiteral(n) => self.index_values(ctx, &n.members),
-                TSType::TSMappedType(n) => n
-                    .type_annotation
-                    .as_ref()
-                    .map_or(Class::None, |v| self.classify(ctx, v, Query::Value)),
-                _ => Class::None,
-            };
+            return self.dictionary(ctx, ctx.semantic.nodes().kind(ty.node_id()));
         }
         if let TSType::TSTypeReference(r) = ty {
             return self.reference(ctx, r, query);
@@ -247,19 +263,19 @@ impl<'a> Resolution<'a> {
             _ => Class::None,
         }
     }
+    fn dictionary(&mut self, ctx: &TsCtx<'a>, kind: AstKind<'a>) -> Class {
+        match kind {
+            AstKind::TSTypeReference(r) => self.reference(ctx, r, Query::UnsafeDictionary),
+            AstKind::TSTypeLiteral(n) => self.index_values(ctx, &n.members),
+            AstKind::TSMappedType(n) => n
+                .type_annotation
+                .as_ref()
+                .map_or(Class::None, |v| self.classify(ctx, v, Query::Value)),
+            _ => Class::None,
+        }
+    }
 }
 
 pub(super) fn unsafe_dictionary<'a>(ctx: &TsCtx<'a>, kind: AstKind<'a>) -> bool {
-    let resolution = Resolution::default();
-    match kind {
-        AstKind::TSTypeReference(r) => {
-            resolution.reference(ctx, r, Query::UnsafeDictionary) != Class::None
-        }
-        AstKind::TSTypeLiteral(n) => resolution.index_values(ctx, &n.members) != Class::None,
-        AstKind::TSMappedType(n) => n
-            .type_annotation
-            .as_ref()
-            .is_some_and(|v| !informative(ctx, v)),
-        _ => false,
-    }
+    Resolution::default().dictionary(ctx, kind) != Class::None
 }
