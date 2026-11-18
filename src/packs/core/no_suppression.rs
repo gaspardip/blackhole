@@ -206,9 +206,12 @@ fn splices(mut text: &str) -> &str {
     while let Some(rest) = text
         .strip_prefix('\\')
         .or_else(|| text.strip_prefix("??/"))
-        .map(|line| line.trim_start_matches([' ', '\t']))
+        // GCC and Clang drop these between the backslash and the line break.
+        .map(|line| line.trim_start_matches([' ', '\t', '\u{b}', '\u{c}', '\0']))
         .and_then(|line| {
+            // Clang reads a line feed and a carriage return, in either order, as one line break.
             line.strip_prefix("\r\n")
+                .or_else(|| line.strip_prefix("\n\r"))
                 .or_else(|| line.strip_prefix(['\r', '\n']))
         })
     {
@@ -580,9 +583,9 @@ fn script_kinds(text: &str) -> Vec<&'static str> {
     let mut kinds = Vec::new();
     for word in words {
         for piece in word.split('=') {
-            // Short options can be bundled in front of S, so the text after each S is a candidate too.
-            let split = piece.match_indices('S').map(|(at, _)| &piece[at + 1..]);
-            for candidate in std::iter::once(piece).chain(split) {
+            // The command follows -S, and short options can be bundled in front of S, so the text after each S is a candidate too.
+            let bundled = piece.match_indices('S').map(|(at, _)| &piece[at + 1..]);
+            for candidate in piece.split("-S").chain(bundled) {
                 if let Some(kind) = interpreter(candidate)
                     && !kinds.contains(&kind)
                 {

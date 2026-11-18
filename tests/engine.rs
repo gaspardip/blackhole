@@ -126,7 +126,15 @@ fn utf32_directives_have_character_coordinates() {
 
 #[test]
 fn c_splices_inside_directive_tokens() {
-    for splice in ["\\\r", "\\ \n", "??/\t\r\n"] {
+    for splice in [
+        "\\\r",
+        "\\ \n",
+        "??/\t\r\n",
+        "\\\u{c}\n",
+        "\\\u{b}\n",
+        "\\\0\n",
+        "\\\n\r",
+    ] {
         for text in [
             format!("#pragma GCC diagnostic ign{splice}ored \"-Wunused-variable\""),
             format!("#pragma GCC /* note *{splice}/ diagnostic ignored \"-Wunused-variable\""),
@@ -173,6 +181,7 @@ fn env_options_can_name_multiple_interpreters() {
         "--split-string=python3",
         "-S -u /bin/bash python3",
         "-iSpython3",
+        "-S /opt/bin/python3-S -I",
     ]
     .map(|options| format!("#!/usr/bin/env {options}\n# noqa\n"));
     let lines = scripts.map(|text| {
@@ -181,7 +190,7 @@ fn env_options_can_name_multiple_interpreters() {
             .map(|f| f.line)
             .collect::<Vec<_>>()
     });
-    assert_eq!(lines, [vec![2], vec![2], vec![2], vec![2]]);
+    assert_eq!(lines, [(); 5].map(|()| vec![2]));
     // An interpreter's own name can hold the letter that ends the options.
     for options in ["-S BASH -e", "-iSBASH"] {
         let text = format!("#!/usr/bin/env {options}\n# shellcheck disable=SC2086\n");
