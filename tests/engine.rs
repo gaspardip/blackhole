@@ -329,6 +329,17 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn already_broad_source_stays_broad_with_an_aliased_dictionary_key() {
+    for key in ["string", "Key"] {
+        let source = format!(
+            "type Key = string;\ndeclare const source: Record<{key}, unknown>;\nconst wide: Record<string, unknown> = source;\nconst picked = wide as {{ id: number }};"
+        );
+        let hits = run_rule("ts/no-widen-then-assert", "nested.ts", &source);
+        assert!(hits.is_empty(), "{key}: {:?}", locations(&hits));
+    }
+}
+
+#[test]
 fn widening_through_aliases_matches_the_spelled_out_annotation() {
     let id = "ts/no-widen-then-assert";
     for annotation in ["Wide", "Record<string, unknown>"] {

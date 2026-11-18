@@ -4,14 +4,6 @@ use oxc::ast::{
     AstKind,
     ast::{BindingPattern, Expression, TSType, TSTypeAnnotation, TSTypePredicateName},
 };
-pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSUnknownKeyword(_) => true,
-        TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
-        _ => false,
-    }
-}
-
 pub(super) struct DirectBinding<'a> {
     pub annotation: Option<&'a TSTypeAnnotation<'a>>,
     pub initializer: Option<&'a Expression<'a>>,

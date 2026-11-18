@@ -1,4 +1,5 @@
-use super::function_types::{contains_unknown, parameter, predicate_subject, returns};
+use super::dictionary_types::{Resolution, report};
+use super::function_types::{parameter, predicate_subject, returns};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
@@ -11,12 +12,14 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let resolution = Resolution::default();
     let nodes = ctx.semantic.nodes();
     for (id, n) in nodes.iter_enumerated() {
         let Some((name, ty)) = parameter(n.kind()) else {
             continue;
         };
-        if !contains_unknown(ty) || name == Some("cause") {
+        let unknown = resolution.unknown_parameter(ctx, ty);
+        if matches!(unknown, Ok(false)) || name == Some("cause") {
             continue;
         }
         let owner = nodes.parent_kind(nodes.parent_id(id));
@@ -26,6 +29,6 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
-        findings.report(ty.span().start as usize, None);
+        report(findings, ty.span().start as usize, unknown);
     }
 }

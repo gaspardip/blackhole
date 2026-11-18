@@ -1,4 +1,4 @@
-use super::dictionary_types::Resolution;
+use super::dictionary_types::{Query, Resolution};
 use super::function_types::{
     bindings::{ConstBindings, symbol},
     expressions::{assertion, known_value},
@@ -7,7 +7,7 @@ use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
-        ast::{Expression, TSSignature, TSType, TSTypeName, TSTypeOperatorOperator},
+        ast::{Expression, TSType},
     },
     span::GetSpan,
     syntax::node::NodeId,
@@ -22,80 +22,6 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-fn reference<'a>(ctx: &TsCtx<'_>, ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
-    let TSType::TSTypeReference(r) = ty.without_parenthesized() else {
-        return None;
-    };
-    let TSTypeName::IdentifierReference(id) = &r.type_name else {
-        return None;
-    };
-    if symbol(ctx, id).is_some() {
-        return None;
-    }
-    Some((
-        id.name.as_str(),
-        r.type_arguments
-            .as_ref()
-            .map_or(&[], |a| a.params.as_slice()),
-    ))
-}
-
-fn top(ty: &TSType<'_>) -> bool {
-    matches!(
-        ty.without_parenthesized(),
-        TSType::TSUnknownKeyword(_) | TSType::TSAnyKeyword(_)
-    )
-}
-
-fn broad_key(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSSymbolKeyword(_) => {
-            true
-        }
-        TSType::TSUnionType(n) => n.types.iter().all(|ty| broad_key(ctx, ty)),
-        _ => matches!(reference(ctx, ty), Some(("PropertyKey", _))),
-    }
-}
-
-fn broad_index(ctx: &TsCtx<'_>, member: &TSSignature<'_>) -> bool {
-    let TSSignature::TSIndexSignature(index) = member else {
-        return false;
-    };
-    broad_key(ctx, &index.parameter.type_annotation.type_annotation)
-        && top(&index.type_annotation.type_annotation)
-}
-
-fn broad_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-    let mut ty = ty;
-    while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
-        ty = inner;
-    }
-    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
-        return matches!(n.members.as_slice(), [member] if broad_index(ctx, member));
-    }
-    match reference(ctx, ty) {
-        Some(("Record", [key, value])) => broad_key(ctx, key) && top(value),
-        _ => false,
-    }
-}
-
-fn narrow_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
-    let mut ty = ty;
-    while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
-        ty = inner;
-    }
-    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
-        return n
-            .members
-            .iter()
-            .any(|m| !matches!(m, TSSignature::TSIndexSignature(_)));
-    }
-    match reference(ctx, ty) {
-        Some(("Record", [_, value])) => !top(value),
-        _ => false,
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Broad {
     Top,
@@ -104,30 +30,14 @@ enum Broad {
 }
 
 fn broad<'a>(resolver: &Resolution, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Option<Broad> {
-    let ty = resolver.plain_alias(ctx, ty);
-    if top(ty) {
+    if resolver.assertion_shape(ctx, ty, Query::Top) {
         Some(Broad::Top)
-    } else if matches!(ty.without_parenthesized(), TSType::TSObjectKeyword(_)) {
+    } else if resolver.assertion_shape(ctx, ty, Query::WideObject) {
         Some(Broad::Object)
     } else {
-        broad_record(ctx, ty).then_some(Broad::Record)
-    }
-}
-
-fn object(ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSArrayType(_)
-        | TSType::TSConstructorType(_)
-        | TSType::TSFunctionType(_)
-        | TSType::TSMappedType(_)
-        | TSType::TSObjectKeyword(_)
-        | TSType::TSTupleType(_) => true,
-        TSType::TSTypeLiteral(n) => !n.members.is_empty(),
-        TSType::TSIntersectionType(n) => n.types.iter().all(object),
-        TSType::TSTypeOperatorType(n) => {
-            n.operator == TSTypeOperatorOperator::Readonly && object(&n.type_annotation)
-        }
-        _ => false,
+        resolver
+            .assertion_shape(ctx, ty, Query::WideRecord)
+            .then_some(Broad::Record)
     }
 }
 
@@ -215,8 +125,8 @@ fn narrower<'a>(
     }
     match kind {
         Broad::Top => true,
-        Broad::Object => object(target),
-        Broad::Record => narrow_record(ctx, target),
+        Broad::Object => resolver.assertion_shape(ctx, target, Query::IsObject),
+        Broad::Record => resolver.assertion_shape(ctx, target, Query::NarrowRecord),
     }
 }
 

@@ -2,7 +2,7 @@ use super::{
     dictionary_types::{Class, Judged, Resolution, report},
     function_types::{
         bindings::{ConstBindings, declaration},
-        contains_unknown, direct_binding,
+        direct_binding,
         expressions::{assertion, known_value, parent},
         predicate_subject,
     },
@@ -86,11 +86,16 @@ fn guard_argument<'a>(
 ) -> Option<(&'a Expression<'a>, Judged<()>)> {
     let (params, ret) = local_function(ctx, &call.callee)?;
     let subject = predicate_subject(ret?)?;
-    let index = params.items.iter().position(|p| {
-        super::function_types::parameter(AstKind::FormalParameter(p))
-            .is_some_and(|(name, a)| name == Some(subject) && contains_unknown(a))
+    let (index, annotation) = params.items.iter().enumerate().find_map(|(index, p)| {
+        let (name, ty) = super::function_types::parameter(AstKind::FormalParameter(p))?;
+        (name == Some(subject)).then_some((index, ty))
     })?;
     let arg = call.arguments.get(index)?.as_expression()?;
+    match resolution.unknown_parameter(ctx, annotation) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(e) => return Some((arg, Err(e))),
+    }
     let evidence = bindings.walk(
         ctx,
         arg,

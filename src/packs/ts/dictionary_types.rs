@@ -18,11 +18,20 @@ pub(super) enum Class {
     Any,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Query {
+pub(super) enum Query {
     Interface(SymbolId),
     PlainAlias,
     UnsafeDictionary,
     ObjectInput,
+    Top,
+    WideObject,
+    WideKey,
+    WideRecord,
+    NarrowRecord,
+    IsObject,
+    UnknownParameter,
+    Never,
+    Empty,
     UnknownAlias,
     UnknownReturn,
     Target,
@@ -62,15 +71,22 @@ struct Binding {
 
 #[derive(Default)]
 struct Environments {
+    syntax_only: bool,
     frames: Vec<Binding>,
     ids: HashMap<Binding, usize>,
     forwarded: HashMap<NodeId, Option<NodeId>>,
-    places: Vec<(usize, NodeId)>,
-    place_ids: HashMap<(usize, NodeId), usize>,
+    places: Vec<(usize, NodeId, Query)>,
+    place_ids: HashMap<(usize, NodeId, Query), usize>,
 }
 impl Environments {
-    fn enter(&mut self, place: usize, alias: NodeId, budget: &mut Budget) -> Option<usize> {
-        if let Some(&inner) = self.place_ids.get(&(place, alias)) {
+    fn enter(
+        &mut self,
+        place: usize,
+        alias: NodeId,
+        query: Query,
+        budget: &mut Budget,
+    ) -> Option<usize> {
+        if let Some(&inner) = self.place_ids.get(&(place, alias, query)) {
             return Some(inner);
         }
         let mut parent = place;
@@ -78,16 +94,21 @@ impl Environments {
             if !budget.take(1) {
                 return None;
             }
-            let (outer, id) = self.places[parent - 1];
-            if id == alias {
+            let (outer, id, active_query) = self.places[parent - 1];
+            if id == alias && active_query == query {
                 return None;
             }
             parent = outer;
         }
-        Some(*self.place_ids.entry((place, alias)).or_insert_with(|| {
-            self.places.push((place, alias));
-            self.places.len()
-        }))
+        Some(
+            *self
+                .place_ids
+                .entry((place, alias, query))
+                .or_insert_with(|| {
+                    self.places.push((place, alias, query));
+                    self.places.len()
+                }),
+        )
     }
     fn bind(&mut self, b: Binding) -> usize {
         *self.ids.entry(b).or_insert_with(|| {
@@ -116,6 +137,7 @@ enum Combine {
     All,
     Dictionary,
     OnlyDictionary,
+    Not,
 }
 impl Combine {
     fn apply(self, values: &[Class]) -> Class {
@@ -126,6 +148,7 @@ impl Combine {
             .unwrap_or(Class::None);
         match self {
             Self::First => first,
+            Self::Not if first == Class::None => Class::Broad,
             Self::Any if first != Class::None => Class::Broad,
             Self::Dictionary if first != Class::None => Class::Dictionary,
             Self::OnlyDictionary if first == Class::Dictionary => first,
@@ -304,7 +327,14 @@ impl Environments {
             let AstKind::TSInterfaceDeclaration(i) = ctx.semantic.nodes().kind(id) else {
                 return Plan::Done(Class::None);
             };
-            if !budget.take(1 + i.extends.len()) || !empty(&i.body.body, budget) {
+            if !budget.take(1 + i.extends.len())
+                || !empty_members(
+                    Self::interface_goal(ctx, sym),
+                    &i.body.body,
+                    budget,
+                    &mut parents,
+                )
+            {
                 return Plan::Done(Class::None);
             }
             for parent in &i.extends {
@@ -314,12 +344,21 @@ impl Environments {
                 let Some(base) = symbol(ctx, name) else {
                     return Plan::Done(Class::None);
                 };
-                if parent.type_arguments.is_some()
-                    || !ctx.semantic.scoping().symbol_flags(base).is_interface()
+                if ctx.semantic.scoping().symbol_flags(base).is_interface() {
+                    parents.push(Self::interface_goal(ctx, base));
+                } else if let Some(AstKind::TSTypeAliasDeclaration(alias)) =
+                    type_declarations(ctx, base)
+                        .next()
+                        .map(|id| ctx.semantic.nodes().kind(id))
+                    && alias.type_parameters.is_none()
+                    && parent.type_arguments.is_none()
                 {
+                    parents.push(
+                        Self::interface_goal(ctx, base).child(&alias.type_annotation, Query::Empty),
+                    );
+                } else {
                     return Plan::Done(Class::None);
                 }
-                parents.push(Self::interface_goal(ctx, base));
             }
         }
         if parents.is_empty() {
@@ -407,12 +446,17 @@ impl Environments {
             .map_or(&[][..], |a| a.params.as_slice());
         let scopes = ctx.semantic.scoping();
         if let Some(sym) = symbol(ctx, name) {
+            if self.syntax_only {
+                return Plan::Done(Class::None);
+            }
             if scopes.symbol_flags(sym).is_type_parameter()
                 && let Some(term) = self.lookup(g.term.env, sym, budget)
             {
                 return Plan::child(Combine::First, Goal { term, ..g });
             }
-            if g.query == Query::Value && scopes.symbol_flags(sym).is_interface() {
+            if matches!(g.query, Query::Value | Query::Empty)
+                && scopes.symbol_flags(sym).is_interface()
+            {
                 return Plan::child(Combine::First, Self::interface_goal(ctx, sym));
             }
             let Some(id) = type_declarations(ctx, sym)
@@ -428,19 +472,36 @@ impl Environments {
                 _ => return Plan::Done(Class::None),
             }
         }
+        if name.name == "Record"
+            && let [key, value] = args
+        {
+            match g.query {
+                Query::WideRecord => {
+                    return Plan::many(
+                        Combine::All,
+                        vec![g.child(key, Query::WideKey), g.child(value, Query::Top)],
+                    );
+                }
+                Query::NarrowRecord => {
+                    return Plan::child(Combine::Not, g.child(value, Query::Top));
+                }
+                _ => {}
+            }
+        }
         let (index, query, combine) = match (name.name.as_str(), g.query) {
             (
                 "Readonly" | "NonNullable" | "Partial" | "Required",
                 Query::Target | Query::AliasTarget | Query::Value | Query::UnsafeDictionary,
             )
             | ("Promise" | "PromiseLike", Query::UnknownReturn)
+            | ("Readonly", Query::WideRecord | Query::NarrowRecord)
             | ("Pick" | "Omit", Query::UnsafeDictionary) => (0, g.query, Combine::First),
             ("Record", Query::UnsafeDictionary) => (1, Query::Value, Combine::First),
             ("Record", Query::Target | Query::AliasTarget) if args.is_empty() => {
                 return Plan::Done(Class::Dictionary);
             }
             ("Record", Query::Target | Query::AliasTarget) => (0, Query::Key, Combine::Dictionary),
-            ("PropertyKey", Query::Key) => return Plan::Done(Class::Broad),
+            ("PropertyKey", Query::Key | Query::WideKey) => return Plan::Done(Class::Broad),
             _ => return Plan::Done(Class::None),
         };
         args.get(index).map_or(Plan::Done(Class::None), |t| {
@@ -461,7 +522,21 @@ impl Environments {
             place: 0,
         };
         if let Some(params) = &a.type_parameters {
-            let Some(inner) = self.enter(g.term.place, a.node_id.get(), budget) else {
+            if matches!(
+                g.query,
+                Query::UnknownParameter
+                    | Query::Never
+                    | Query::Empty
+                    | Query::Top
+                    | Query::WideObject
+                    | Query::WideKey
+                    | Query::WideRecord
+                    | Query::NarrowRecord
+                    | Query::IsObject
+            ) {
+                return Plan::Done(Class::None);
+            }
+            let Some(inner) = self.enter(g.term.place, a.node_id.get(), g.query, budget) else {
                 return Plan::Done(Class::None);
             };
             body.place = inner;
@@ -484,11 +559,7 @@ impl Environments {
                 });
             }
         }
-        let query = if g.query == Query::Target {
-            Query::AliasTarget
-        } else {
-            g.query
-        };
+        let query = annotation_query(g.query);
         let combine = if g.query == Query::Target && a.type_parameters.is_some() {
             Combine::OnlyDictionary
         } else {
@@ -566,10 +637,31 @@ impl Environments {
             (AstKind::TSParenthesizedType(p), _) => {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
-            (AstKind::TSTypeOperator(p), _) if p.operator == TSTypeOperatorOperator::Readonly => {
+            (AstKind::TSTypeOperator(p), _)
+                if p.operator == TSTypeOperatorOperator::Readonly
+                    && !matches!(
+                        q,
+                        Query::Top
+                            | Query::WideObject
+                            | Query::WideRecord
+                            | Query::WideKey
+                            | Query::NarrowRecord
+                            | Query::UnknownParameter
+                    ) =>
+            {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
-            (AstKind::TSUnknownKeyword(_), Query::UnknownReturn | Query::UnknownAlias)
+            _ => Self::classify(kind, g, budget),
+        }
+    }
+    fn classify(kind: AstKind<'_>, g: Goal, budget: &mut Budget) -> Plan {
+        let q = g.query;
+        match (kind, q) {
+            (
+                AstKind::TSUnknownKeyword(_),
+                Query::UnknownParameter | Query::UnknownReturn | Query::UnknownAlias,
+            )
+            | (AstKind::TSNeverKeyword(_), Query::Never)
             | (AstKind::TSObjectKeyword(_), Query::ObjectInput)
             | (
                 AstKind::TSObjectKeyword(_) | AstKind::TSUnknownKeyword(_),
@@ -586,6 +678,7 @@ impl Environments {
                 AstKind::TSUnionType(n),
                 Query::Value
                 | Query::Key
+                | Query::UnknownParameter
                 | Query::UnknownReturn
                 | Query::UnknownAlias
                 | Query::ObjectInput,
@@ -597,8 +690,15 @@ impl Environments {
                 Combine::All,
                 n.types.iter().map(|ty| g.child(ty, q)).collect(),
             ),
-            (AstKind::TSTypeLiteral(n), Query::Value) if empty(&n.members, budget) => {
-                Plan::Done(Class::Broad)
+            (AstKind::TSTypeLiteral(n), Query::Value | Query::Empty) => {
+                let mut children = Vec::new();
+                if !empty_members(g, &n.members, budget, &mut children) {
+                    Plan::Done(Class::None)
+                } else if children.is_empty() {
+                    Plan::Done(Class::Broad)
+                } else {
+                    Plan::many(Combine::All, children)
+                }
             }
             (AstKind::TSTypeLiteral(n), Query::UnsafeDictionary) => Plan::many(
                 Combine::First,
@@ -632,12 +732,69 @@ impl Environments {
                 .map_or(Plan::Done(Class::None), |ty| {
                     Plan::child(Combine::First, g.child(ty, Query::Value))
                 }),
+            _ => Self::assertion_shape(kind, g, budget),
+        }
+    }
+    fn assertion_shape(kind: AstKind<'_>, g: Goal, budget: &mut Budget) -> Plan {
+        let q = g.query;
+        match (kind, q) {
+            (AstKind::TSAnyKeyword(_) | AstKind::TSUnknownKeyword(_), Query::Top)
+            | (AstKind::TSObjectKeyword(_), Query::WideObject)
+            | (
+                AstKind::TSStringKeyword(_)
+                | AstKind::TSNumberKeyword(_)
+                | AstKind::TSSymbolKeyword(_),
+                Query::WideKey,
+            )
+            | (
+                AstKind::TSArrayType(_)
+                | AstKind::TSConstructorType(_)
+                | AstKind::TSFunctionType(_)
+                | AstKind::TSMappedType(_)
+                | AstKind::TSObjectKeyword(_)
+                | AstKind::TSTupleType(_),
+                Query::IsObject,
+            ) => Plan::Done(Class::Broad),
+            (AstKind::TSUnionType(n), Query::WideKey) => Plan::many(
+                Combine::All,
+                n.types.iter().map(|t| g.child(t, q)).collect(),
+            ),
+            (AstKind::TSIntersectionType(n), Query::IsObject) => Plan::many(
+                Combine::All,
+                n.types.iter().map(|t| g.child(t, q)).collect(),
+            ),
+            (AstKind::TSTypeLiteral(n), Query::IsObject) if !n.members.is_empty() => {
+                Plan::Done(Class::Broad)
+            }
+            (AstKind::TSTypeLiteral(n), Query::WideRecord) => match n.members.as_slice() {
+                [TSSignature::TSIndexSignature(i)] => Plan::many(
+                    Combine::All,
+                    vec![
+                        g.child(&i.parameter.type_annotation.type_annotation, Query::WideKey),
+                        g.child(&i.type_annotation.type_annotation, Query::Top),
+                    ],
+                ),
+                _ => Plan::Done(Class::None),
+            },
+            (AstKind::TSTypeLiteral(n), Query::NarrowRecord)
+                if budget.take(n.members.len())
+                    && n.members
+                        .iter()
+                        .any(|m| !matches!(m, TSSignature::TSIndexSignature(_))) =>
+            {
+                Plan::Done(Class::Broad)
+            }
             _ => Plan::Done(Class::None),
         }
     }
 }
 
-fn empty(members: &[TSSignature<'_>], budget: &mut Budget) -> bool {
+fn empty_members(
+    g: Goal,
+    members: &[TSSignature<'_>],
+    budget: &mut Budget,
+    children: &mut Vec<Goal>,
+) -> bool {
     members.iter().all(|m| {
         if !budget.take(1) {
             return false;
@@ -645,23 +802,21 @@ fn empty(members: &[TSSignature<'_>], budget: &mut Budget) -> bool {
         let TSSignature::TSPropertySignature(p) = m else {
             return false;
         };
+        let Some(annotation) = &p.type_annotation else {
+            return false;
+        };
+        children.push(g.child(&annotation.type_annotation, Query::Never));
         p.optional
-            && p.type_annotation.as_ref().is_some_and(|a| {
-                let Some(mut ty) = budget.unparen(&a.type_annotation) else {
-                    return false;
-                };
-                while let TSType::TSTypeOperatorType(op) = ty {
-                    if !budget.take(1) || op.operator != TSTypeOperatorOperator::Readonly {
-                        return false;
-                    }
-                    let Some(inner) = budget.unparen(&op.type_annotation) else {
-                        return false;
-                    };
-                    ty = inner;
-                }
-                matches!(ty, TSType::TSNeverKeyword(_))
-            })
     })
+}
+
+// Naming an object or mapped annotation changes its written-form widening verdict.
+fn annotation_query(query: Query) -> Query {
+    if query == Query::Target {
+        Query::AliasTarget
+    } else {
+        query
+    }
 }
 
 #[derive(Default)]
@@ -726,6 +881,35 @@ impl Resolution {
         self.query(ctx, ty.node_id(), Query::ObjectInput)
             .map(|v| v != Class::None)
     }
+    pub(super) fn assertion_shape(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>, query: Query) -> bool {
+        let value = self.query(ctx, ty.node_id(), query).unwrap_or_else(|_| {
+            // Exhaustion preserves the assertion rule's verdict on the finite written type.
+            let mut syntax = Environments {
+                syntax_only: true,
+                ..Environments::default()
+            };
+            let goal = Goal {
+                term: Term {
+                    node: ty.node_id(),
+                    env: 0,
+                    place: 0,
+                },
+                query,
+            };
+            evaluate(
+                &mut HashMap::new(),
+                goal,
+                &mut Budget(Some(usize::MAX)),
+                |g, b| syntax.plan(ctx, g, b),
+            )
+            .unwrap()
+        });
+        value != Class::None
+    }
+    pub(super) fn unknown_parameter(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+        self.query(ctx, ty.node_id(), Query::UnknownParameter)
+            .map(|v| v != Class::None)
+    }
     pub(super) fn unknown_alias(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
         self.query(ctx, ty.node_id(), Query::UnknownAlias)
             .map(|v| v != Class::None)
@@ -741,6 +925,108 @@ mod tests {
     use super::{Budget, Class, Combine, Goal, Plan, Query, Term, evaluate};
     use oxc::syntax::node::NodeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn one_question_cannot_guard_or_cache_another() {
+        use super::Solver;
+        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        use oxc::ast::AstKind;
+
+        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+            let nodes = ctx.semantic.nodes();
+            let interface = nodes
+                .iter()
+                .find_map(|n| match n.kind() {
+                    AstKind::TSInterfaceDeclaration(i) => i.id.symbol_id.get(),
+                    _ => None,
+                })
+                .unwrap();
+            let queries = [
+                Query::Interface(interface),
+                Query::PlainAlias,
+                Query::UnsafeDictionary,
+                Query::ObjectInput,
+                Query::UnknownParameter,
+                Query::UnknownAlias,
+                Query::UnknownReturn,
+                Query::Target,
+                Query::AliasTarget,
+                Query::Key,
+                Query::Value,
+                Query::Empty,
+                Query::Never,
+                Query::Top,
+                Query::WideObject,
+                Query::WideKey,
+                Query::WideRecord,
+                Query::NarrowRecord,
+                Query::IsObject,
+            ];
+            let declaration = |name: &str| {
+                nodes
+                    .iter()
+                    .find_map(|node| match node.kind() {
+                        AstKind::TSTypeAliasDeclaration(a) if a.id.name == name => Some(a),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let alias = declaration("Probe");
+            let alias_id = declaration("A").node_id.get();
+            for first in queries {
+                for second in queries.into_iter().filter(|q| *q != first) {
+                    let decl = alias.node_id.get();
+                    let goal = |query| Goal {
+                        query,
+                        term: Term {
+                            node: if query == Query::PlainAlias {
+                                decl
+                            } else {
+                                alias.type_annotation.node_id()
+                            },
+                            env: 0,
+                            place: 0,
+                        },
+                    };
+                    let mut shared = Solver::default();
+                    let places = &mut shared.envs;
+                    let mut budget = Budget(Some(100));
+                    let active = places.enter(0, alias_id, first, &mut budget).unwrap();
+                    assert!(places.enter(active, alias_id, first, &mut budget).is_none());
+                    assert!(
+                        places
+                            .enter(active, alias_id, second, &mut budget)
+                            .is_some()
+                    );
+                    assert!(shared.solve(ctx, goal(first)).is_ok());
+                    let alone = Solver::default().solve(ctx, goal(second)).ok().unwrap();
+                    assert!(shared.solve(ctx, goal(second)).ok() == Some(alone));
+                    let mut inside = goal(second);
+                    inside.term.place = active;
+                    assert!(shared.solve(ctx, inside).ok() == Some(alone));
+                }
+            }
+            findings.report(0, None);
+        }
+        let rule = Rule {
+            run: Run::Ts(check),
+            ..super::super::no_unsafe_dictionary_type::RULE
+        };
+        for source in [
+            "interface I {} type A = Record<string, unknown>; type Probe = A;",
+            "interface I {} type A<T> = T; type Probe = A<Record<string, unknown>>;",
+            "interface I {} type A<T=Record<string, unknown>> = T; type Probe = A;",
+        ] {
+            assert_eq!(
+                run(
+                    std::slice::from_ref(&rule),
+                    [("types.ts", source.as_bytes())]
+                )
+                .len(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn borderline_recursive_goals_have_reproducible_answers() {
