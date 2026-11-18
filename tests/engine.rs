@@ -7,6 +7,34 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn default_export_documentation_matches_the_expression_span() {
+    for (export, col) in [
+        ("export default /** docs */ (x);", Some(16)),
+        ("export default (/** docs */ x);", Some(17)),
+        ("export default /** docs */ ((x));", Some(16)),
+        ("export default /** docs */ (class {});", Some(16)),
+        ("export default /** docs */ (function () {});", Some(16)),
+        ("export default /** docs */ (() => {});", Some(16)),
+        ("export default /** docs */ x as T;", None),
+        ("export default /** docs */ (x as T);", Some(16)),
+        ("export default /** docs */ x satisfies T;", None),
+        ("export default /** docs */ x!;", None),
+        ("export default (/** docs */ class {});", None),
+        ("export default (/** docs */ (() => {}));", Some(17)),
+        ("export default /** docs */ ((x) as T)!;", None),
+        ("export = /** docs */ (x);", Some(10)),
+    ] {
+        let text = format!("type T = number; const x = 1;\n{export}");
+        let hits = run(registry(), [("a.ts", text.as_bytes())]);
+        assert_eq!(
+            locations(&hits),
+            col.map(|c| ("ts/no-comments", 2, c)).as_slice(),
+            "{export}"
+        );
+    }
+}
+
+#[test]
 fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
     for (open, close) in [("(", ")"), ("[", "]")] {
         let judge = |depth| {

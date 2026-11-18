@@ -6,8 +6,7 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            Comment, ExportDefaultDeclarationKind, IdentifierReference, ModuleExportName,
-            TSAccessibility, TSTypeName,
+            Comment, Expression, IdentifierReference, ModuleExportName, TSAccessibility, TSTypeName,
         },
     },
     span::GetSpan,
@@ -171,7 +170,11 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
                 }
             }
             AstKind::ExportDefaultDeclaration(n) => {
-                if let ExportDefaultDeclarationKind::Identifier(r) = &n.declaration {
+                if let Some(Expression::Identifier(r)) = n
+                    .declaration
+                    .as_expression()
+                    .map(Expression::without_parentheses)
+                {
                     local_export(ctx, r, &mut declarations);
                 }
             }
@@ -320,14 +323,29 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .semantic
         .nodes()
         .iter_enumerated()
-        .filter(|(id, n)| {
-            exposure.can_document(*id, n.kind())
+        .filter_map(|(id, n)| {
+            let parent = ctx.semantic.nodes().parent_kind(id);
+            let start = if let AstKind::ExportDefaultDeclaration(export) = parent
+                && let Some(expr) = export.declaration.as_expression()
+            {
+                // ESTree elides parentheses but keeps TypeScript assertions as expression nodes.
+                let inner = expr.without_parentheses();
+                if matches!(inner, Expression::Identifier(_)) {
+                    return None;
+                }
+                inner.span().start
+            } else if exposure.can_document(id, n.kind())
                 || matches!(
-                    ctx.semantic.nodes().parent_kind(*id),
+                    parent,
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
-                ) && !matches!(n.kind(), AstKind::IdentifierReference(_))
+                )
+            {
+                n.span().start
+            } else {
+                return None;
+            };
+            doc_before(ctx, start, &directives)
         })
-        .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
     for c in ctx.comments {
         if directives.contains(&c.span.start) {
