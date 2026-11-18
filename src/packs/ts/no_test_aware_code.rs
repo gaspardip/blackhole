@@ -102,14 +102,8 @@ fn runner_global(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
     };
     marker(id.name.as_str(), Marker::Runner) && ctx.semantic.is_reference_to_global_variable(id)
 }
-fn worker(key: &PropertyKey<'_>, computed: bool) -> bool {
-    match key {
-        PropertyKey::StaticIdentifier(i) if !computed => marker(i.name.as_str(), Marker::Worker),
-        PropertyKey::StringLiteral(s) => {
-            s.value.as_str().is_some_and(|s| marker(s, Marker::Worker))
-        }
-        _ => false,
-    }
+fn worker(ctx: &TsCtx<'_>, key: &PropertyKey<'_>, computed: bool) -> bool {
+    super::values::key(ctx, key, computed).map_or(computed, |name| marker(name, Marker::Worker))
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if test_file(ctx.path) {
@@ -163,7 +157,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             {
                 if let BindingPattern::ObjectPattern(p) = &v.id {
                     for prop in &p.properties {
-                        if worker(&prop.key, prop.computed) {
+                        if worker(ctx, &prop.key, prop.computed) {
                             findings.report(prop.key.span().start as usize, None);
                         }
                     }
@@ -182,7 +176,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                                 findings.report(p.span.start as usize, None);
                             }
                             AssignmentTargetProperty::AssignmentTargetPropertyProperty(p)
-                                if worker(&p.name, p.computed) =>
+                                if worker(ctx, &p.name, p.computed) =>
                             {
                                 findings.report(p.name.span().start as usize, None);
                             }

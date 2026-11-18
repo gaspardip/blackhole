@@ -67,8 +67,10 @@ fn defines(ctx: &TsCtx<'_>, initial: &Expression<'_>, owner: &str) -> bool {
                     match p {
                         ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
                         ObjectPropertyKind::ObjectProperty(p)
-                            if key(ctx, &p.key, p.computed)
-                                .is_some_and(|k| protected(owner, k)) =>
+                            if key(ctx, &p.key, p.computed).map_or_else(
+                                || super::native_properties::protected_owner(owner),
+                                |k| protected(owner, k),
+                            ) =>
                         {
                             return true;
                         }
@@ -201,9 +203,8 @@ fn observation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     let [ObjectPropertyKind::ObjectProperty(p)] = obj.properties.as_slice() else {
         return false;
     };
-    !p.computed
-        && !p.method
-        && key(ctx, &p.key, false) == Some("spy")
+    !p.method
+        && key(ctx, &p.key, p.computed) == Some("spy")
         && matches!(&p.value,Expression::BooleanLiteral(v) if v.value)
 }
 

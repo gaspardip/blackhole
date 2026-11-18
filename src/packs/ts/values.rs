@@ -114,7 +114,11 @@ pub(super) fn key<'a>(
     if !computed && let PropertyKey::StaticIdentifier(id) = key {
         return Some(id.name.as_str());
     }
-    literal(ctx, key.as_expression()?)
+    let expr = key.as_expression()?;
+    if let Expression::NumericLiteral(n) = expr {
+        return n.raw.as_ref().map(oxc::str::Str::as_str);
+    }
+    literal(ctx, expr)
 }
 
 pub(super) fn member_key<'a>(ctx: &TsCtx<'a>, member: &'a MemberExpression<'a>) -> Option<&'a str> {

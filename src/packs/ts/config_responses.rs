@@ -3,7 +3,7 @@ use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{ArrowFunctionBody, Expression, ObjectProperty, ObjectPropertyKind, PropertyKey},
+        ast::{ArrowFunctionBody, Expression, ObjectProperty, ObjectPropertyKind},
     },
     span::GetSpan,
     syntax::node::NodeId,
@@ -129,24 +129,12 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
 }
 
 pub(super) fn replacement(ctx: &TsCtx<'_>, property: &ObjectProperty<'_>) -> bool {
-    let key = if property.computed {
-        property
-            .key
-            .as_expression()
-            .and_then(|e| match resolve(ctx, e) {
-                Expression::StringLiteral(s) => s.value.as_str(),
-                _ => None,
-            })
-    } else {
-        match &property.key {
-            PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-            PropertyKey::StringLiteral(s) => s.value.as_str(),
-            _ => None,
-        }
-    };
+    let key = super::values::key(ctx, &property.key, property.computed);
+    if matches!(key, Some("outboundService") | None) && config_response(ctx, &property.value) {
+        return true;
+    }
     match key {
-        Some("outboundService") => config_response(ctx, &property.value),
-        Some("serviceBindings") => {
+        Some("serviceBindings") | None => {
             let mut pending = vec![&property.value];
             let mut seen = HashSet::new();
             while let Some(expr) = pending.pop() {

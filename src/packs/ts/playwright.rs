@@ -143,7 +143,7 @@ pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expressio
                         ObjectPropertyKind::ObjectProperty(p)
                             if matches!(
                                 key(ctx, &p.key, p.computed),
-                                Some("body" | "json" | "status" | "contentType")
+                                Some("body" | "json" | "status" | "contentType") | None
                             ) =>
                         {
                             pending.push((&p.value, true));

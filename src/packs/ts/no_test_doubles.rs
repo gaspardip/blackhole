@@ -123,7 +123,7 @@ fn check_bindings(
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
                     ObjectPropertyKind::ObjectProperty(p)
-                        if super::values::key(ctx, &p.key, p.computed).is_some_and(|k| {
+                        if super::values::key(ctx, &p.key, p.computed).is_none_or(|k| {
                             k.starts_with(|c: char| c.is_ascii_uppercase())
                                 && k.bytes().all(|b| {
                                     b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'

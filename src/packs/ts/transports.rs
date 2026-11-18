@@ -90,7 +90,9 @@ fn option<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Option<&'a Expres
                 }
             }
             Item::Field(f) => {
-                if key(ctx, &f.key, f.computed)? == "fetch" {
+                if key(ctx, &f.key, f.computed)
+                    .map_or_else(|| transport_response(ctx, &f.value), |name| name == "fetch")
+                {
                     return Some(&f.value);
                 }
             }

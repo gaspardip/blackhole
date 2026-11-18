@@ -2,7 +2,7 @@ use super::values::symbol;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{AssignmentTarget, Expression, ObjectPropertyKind, PropertyKey},
+    ast::{AssignmentTarget, Expression, ObjectPropertyKind},
 };
 use oxc::syntax::symbol::SymbolId;
 use std::collections::HashMap;
@@ -39,26 +39,29 @@ fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
         _ => None,
     }
 }
-fn strict_handler(p: &ObjectPropertyKind<'_>) -> bool {
-    let ObjectPropertyKind::ObjectProperty(p) = p else {
-        return false;
-    };
-    if p.computed
-        || !matches!(&p.key,PropertyKey::StaticIdentifier(k) if k.name=="onUnhandledRequest")
-    {
-        return false;
-    }
-    match &p.value {
-        Expression::StringLiteral(s) => s.value == "error",
-        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => true,
-        _ => false,
-    }
-}
-fn strict(opts: Option<&Expression<'_>>) -> bool {
+fn strict(ctx: &TsCtx<'_>, opts: Option<&Expression<'_>>) -> bool {
     let Some(Expression::ObjectExpression(o)) = opts else {
         return false;
     };
-    o.properties.iter().any(strict_handler)
+    for prop in o.properties.iter().rev() {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            return false;
+        };
+        match super::values::key(ctx, &p.key, p.computed) {
+            Some("onUnhandledRequest") => {
+                return match &p.value {
+                    Expression::StringLiteral(s) => s.value == "error",
+                    Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
+                        true
+                    }
+                    _ => false,
+                };
+            }
+            None => return false,
+            _ => (),
+        }
+    }
+    false
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut factories = HashMap::<SymbolId, Factory>::new();
@@ -106,7 +109,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 m.static_property_name().and_then(oxc::str::JSStr::as_str)
             ),
             (Some(Factory::Server), Some("listen")) | (Some(Factory::Worker), Some("start"))
-        ) && !strict(c.arguments.first().and_then(|a| a.as_expression()))
+        ) && !strict(ctx, c.arguments.first().and_then(|a| a.as_expression()))
         {
             findings.report(c.span.start as usize, None);
         }
