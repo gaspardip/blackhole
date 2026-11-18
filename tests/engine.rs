@@ -339,6 +339,27 @@ fn export_aliases_expand_each_root_binding_once() {
 }
 
 #[test]
+fn exported_bindings_share_the_walk_to_their_statement() {
+    use std::time::{Duration, Instant};
+    const COUNT: usize = 16_000;
+    let names: Vec<_> = (0..COUNT).map(|i| format!("a{i}")).collect();
+    let text = format!(
+        "/** docs */{}{{var {};}}{}export {{ {} }};",
+        "if (true)".repeat(COUNT),
+        names.join(","),
+        "\n",
+        names.join(",")
+    );
+    let start = Instant::now();
+    assert!(run(registry(), [("nested.js", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn a_gap_after_a_comment_is_scanned_once() {
     use std::{
         fmt::Write as _,

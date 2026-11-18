@@ -182,14 +182,22 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             declarations.insert(id);
         }
     }
+    if bindings.is_empty() {
+        return declarations;
+    }
+    // Semantic nodes are in preorder, so a node inherits its parent's top-level statement.
+    let mut tops: Vec<NodeId> = Vec::with_capacity(nodes.len());
+    for (id, _) in nodes.iter_enumerated() {
+        let parent = nodes.parent_id(id);
+        let top = match nodes.kind(parent) {
+            AstKind::Program(_) => id,
+            _ => tops[parent.index()],
+        };
+        tops.push(top);
+    }
     for symbol in bindings {
         for id in scoping.symbol_declarations(symbol) {
-            if let Some(top) = std::iter::once(id)
-                .chain(nodes.ancestor_ids(id))
-                .find(|n| matches!(nodes.parent_kind(*n), AstKind::Program(_)))
-            {
-                declarations.insert(top);
-            }
+            declarations.insert(tops[id.index()]);
         }
     }
     declarations
