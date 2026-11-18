@@ -232,6 +232,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
         };
     }
     let mut owners = vec![None; nodes.len()];
+    let mut references: HashMap<NodeId, HashSet<_>> = HashMap::new();
     let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
     for (id, node) in nodes.iter_enumerated() {
@@ -256,16 +257,25 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
                 .get()
                 .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
         {
-            edges.entry(owner).or_default().extend(
+            references.entry(owner).or_default().insert(symbol);
+        }
+    }
+    let mut expanded = HashSet::new();
+    let mut pending: Vec<_> = public.iter().copied().collect();
+    while let Some(owner) = pending.pop() {
+        for symbol in references
+            .remove(&owner)
+            .into_iter()
+            .flatten()
+            .filter(|s| expanded.insert(*s))
+        {
+            pending.extend(
                 ctx.semantic
                     .scoping()
                     .symbol_declarations(symbol)
-                    .filter(|id| type_declaration(nodes.kind(*id))),
+                    .filter(|id| type_declaration(nodes.kind(*id)) && public.insert(*id)),
             );
         }
-    }
-    let mut pending: Vec<_> = public.iter().copied().collect();
-    while let Some(owner) = pending.pop() {
         if let Some(targets) = edges.remove(&owner) {
             pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
         }

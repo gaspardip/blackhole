@@ -72,6 +72,23 @@ fn exported_alias_chain_is_judged_in_linear_time() {
 }
 
 #[test]
+fn merged_interfaces_are_expanded_once() {
+    use std::time::{Duration, Instant};
+    let text = format!(
+        "/** Public tuple. */\nexport type Tuple = [{}];\n{}",
+        "Merge,".repeat(8000),
+        "interface Merge {}\n".repeat(8000)
+    );
+    let start = Instant::now();
+    assert!(run(registry(), [("merge.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn diagnostic_points_to_the_offending_token() {
     for (path, text, line, col) in [
         (
