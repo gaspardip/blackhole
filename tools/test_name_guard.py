@@ -281,25 +281,25 @@ class Push(Repo):
         self.write("a.txt", "Quokka\n")
         head = self.commit("feat: add a")
         line = f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_clean_push_passes(self) -> None:
         self.write("a.txt", "fine\n")
         head = self.commit("feat: add a")
         line = f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
 
     def test_pushed_ref_name_is_caught(self) -> None:
         head = self.commit("chore: start")
         line = f"refs/heads/x {head} refs/heads/quokka-fix {'0' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_annotated_tag_message_is_caught(self) -> None:
         self.commit("chore: start")
         git(self.dir, "tag", "-a", "v1", "-m", "release for Quokka")
         tag = git(self.dir, "rev-parse", "refs/tags/v1")
         line = f"refs/tags/v1 {tag} refs/tags/v1 {'0' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_a_tag_inside_a_tag_is_caught(self) -> None:
         self.commit("chore: start")
@@ -307,21 +307,28 @@ class Push(Repo):
         git(self.dir, "tag", "-a", "outer", "-m", "fine", "refs/tags/inner")
         tag = git(self.dir, "rev-parse", "refs/tags/outer")
         line = f"refs/tags/outer {tag} refs/tags/outer {'0' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
-    def test_only_the_pushed_remote_counts_as_already_published(self) -> None:
+    def test_a_tracking_ref_is_not_proof_of_publication(self) -> None:
         self.write("a.txt", "Quokka\n")
         head = self.commit("feat: add a")
-        line = f"refs/heads/main {head} refs/heads/new {'0' * 40}\n"
-        git(self.dir, "update-ref", "refs/remotes/other/main", head)
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 1)
         git(self.dir, "update-ref", "refs/remotes/origin/main", head)
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
+        line = f"refs/heads/main {head} refs/heads/new {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
+    def test_a_tagged_tree_is_caught(self) -> None:
+        self.commit("chore: start")
+        self.write("a.txt", "Quokka\n")
+        git(self.dir, "add", "a.txt")
+        tree = git(self.dir, "write-tree")
+        git(self.dir, "reset", "-q")
+        line = f"refs/tags/t {tree} refs/tags/t {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_branch_delete_is_skipped(self) -> None:
         self.commit("chore: start")
         line = f"(delete) {'0' * 40} refs/heads/old {'1' * 40}\n"
-        self.assertEqual(run(["push", "origin"], self.dir, stdin=line).returncode, 0)
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
 
 
 class Event(Repo):
@@ -386,8 +393,11 @@ class Event(Repo):
         head = self.commit("feat: add a")
         for head_repo in ["stranger/r", None]:
             with self.subTest(head_repo=head_repo):
-                done = self.pull_request(title="Quokka", head_repo=head_repo, head=head)
+                done = self.pull_request(head_repo=head_repo, head=head)
                 self.assertEqual(done.returncode, 0)
+
+    def test_a_writers_title_is_caught_whatever_the_head(self) -> None:
+        self.assertEqual(self.pull_request(title="Quokka", head_repo="stranger/r").returncode, 1)
 
     def test_issue_text_is_caught_for_a_trusted_author_only(self) -> None:
         for association, expected in [("OWNER", 1), ("COLLABORATOR", 1), ("NONE", 0)]:
@@ -439,6 +449,43 @@ class Event(Repo):
         git(self.dir, "checkout", "-q", "-")
         self.assertEqual(self.event("workflow_dispatch", {}).returncode, 1)
 
+    def test_a_scheduled_run_scans_tagged_trees_and_blobs(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        git(self.dir, "add", "a.txt")
+        tree = git(self.dir, "write-tree")
+        git(self.dir, "reset", "-q")
+        blob = git(self.dir, "hash-object", "-w", "a.txt")
+        for target in [tree, blob]:
+            with self.subTest(target=target):
+                git(self.dir, "tag", "-f", "odd", target)
+                self.assertEqual(self.event("schedule", {}).returncode, 1)
+
+    def edit(self, text: str, before: str, editor: str = "owner") -> int:
+        said = {"body": text, "author_association": "NONE", "user": {"login": "visitor"}}
+        payload = {
+            "action": "edited",
+            "sender": {"login": editor},
+            "changes": {"body": {"from": before}},
+            "issue": {"title": "Quokka?", "body": None, "author_association": "NONE"},
+            "comment": said,
+        }
+        return self.event("issue_comment", payload).returncode
+
+    def test_a_writers_edit_of_a_strangers_text_is_caught(self) -> None:
+        self.assertEqual(self.edit("thanks, fixed", before="thanks"), 0)
+        self.assertEqual(self.edit("thanks, see Quokka", before="thanks"), 1)
+
+    def test_a_strangers_own_text_gives_no_signal_after_an_edit(self) -> None:
+        self.assertEqual(self.edit("is it Quokka? (edited)", before="is it Quokka?"), 0)
+        self.assertEqual(self.edit("is it Quokka?", before="is it", editor="visitor"), 0)
+
+    def test_a_writers_edit_of_a_strangers_issue_title_is_caught(self) -> None:
+        issue = {"title": "Quokka bug", "body": "x", "author_association": "NONE", "user": {"login": "v"}}
+        payload = {"action": "edited", "sender": {"login": "owner"}, "issue": issue}
+        changed = {"changes": {"title": {"from": "bug"}}}
+        self.assertEqual(self.event("issues", payload | changed).returncode, 1)
+        self.assertEqual(self.event("issues", payload | {"changes": {"body": {"from": "y"}}}).returncode, 0)
+
     def test_an_organization_repository_fails_closed(self) -> None:
         issue = {"title": "bug", "body": None, "author_association": "MEMBER"}
         payload = {"repository": {"full_name": "o/r", "owner": {"type": "Organization"}}}
@@ -446,11 +493,13 @@ class Event(Repo):
 
     def test_a_field_of_the_wrong_type_fails_closed(self) -> None:
         owner = {"title": "bug", "body": None, "author_association": "OWNER"}
-        for issue in [owner | {"author_association": None}, owner | {"body": []}, owner | {"title": 1}]:
+        unknown = owner | {"author_association": "UNRECOGNIZED", "body": "Quokka"}
+        for issue in [owner | {"author_association": None}, owner | {"body": []}, owner | {"title": 1}, unknown]:
             with self.subTest(issue=issue):
                 self.assertEqual(self.event("issues", {"issue": issue}).returncode, 2)
         push = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
-        for payload in [push | {"after": "main"}, push | {"before": None}, {"ref": push["ref"], "after": push["after"]}]:
+        newline = push | {"after": "0" * 40 + "\n"}
+        for payload in [push | {"after": "main"}, push | {"before": None}, {"ref": push["ref"], "after": push["after"]}, newline]:
             with self.subTest(payload=payload):
                 self.assertEqual(self.event("push", payload).returncode, 2)
 
@@ -476,7 +525,7 @@ class Errors(Repo):
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
 
     def test_an_unexpected_failure_is_not_reported_as_a_found_name(self) -> None:
-        done = run(["push", "origin"], self.dir, stdin="quokka\n")
+        done = run(["push"], self.dir, stdin="quokka\n")
         self.assertEqual(done.returncode, 2)
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
 

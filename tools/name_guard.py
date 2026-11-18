@@ -21,12 +21,15 @@ from typing import Any
 
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
-ZERO = re.compile(r"^0+$")
-SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+ZERO = re.compile(r"0+")
+SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 GITLINK = "160000"
 RAW = ("--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
 WRITERS = frozenset({"OWNER", "COLLABORATOR"})
-USAGE = "usage: name_guard.py staged | message <file> | push <remote> | range <base> <head> | tree | text | event"
+STRANGERS = frozenset(
+    {"CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "MEMBER", "NONE"}
+)
+USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event"
 
 
 class CannotRun(Exception):
@@ -86,7 +89,7 @@ def optional(value: object) -> str:
 
 
 def object_id(value: object) -> str:
-    if not SHA.match(string(value)):
+    if not SHA.fullmatch(string(value)):
         raise CannotRun("the event payload is not what GitHub documents")
     return string(value)
 
@@ -96,7 +99,16 @@ def by_writer(payload: dict[str, Any], item: dict[str, Any]) -> bool:
     # else's text. An organization's roles break both, so the guard refuses to guess there.
     if string(payload["repository"]["owner"]["type"]) != "User":
         raise CannotRun("the trust rule only holds for a repository owned by a user")
-    return string(item["author_association"]) in WRITERS
+    association = string(item["author_association"])
+    if association not in WRITERS | STRANGERS:
+        raise CannotRun("the event payload is not what GitHub documents")
+    return association in WRITERS
+
+
+def edited_by_another(payload: dict[str, Any], item: dict[str, Any]) -> bool:
+    return payload.get("action") == "edited" and string(payload["sender"]["login"]) != string(
+        item["user"]["login"]
+    )
 
 
 def load_event() -> tuple[str, dict[str, Any]]:
@@ -153,11 +165,15 @@ class Guard:
                 line = body.count("\n", 0, match.start()) + 1
                 self.hits.append(f"{self.redact(label)}:{line} banned name #{number}")
 
+    def matches(self, text: str) -> bool:
+        body = normalize(text)
+        return any(pattern.search(body) for pattern in self.patterns)
+
     def name(self, kind: str, value: str) -> None:
         self.scan(f"{kind} {value}", value)
 
     def entry(self, entry: Entry, origin: str = "") -> None:
-        if ZERO.match(entry.blob):  # a deletion adds nothing
+        if ZERO.fullmatch(entry.blob):  # a deletion adds nothing
             return
         self.name(f"{origin}file name", entry.path)
         if entry.mode == GITLINK or entry.blob in self.seen:
@@ -196,28 +212,50 @@ class Guard:
         for entry in tree_entries(git("ls-tree", "-r", "-z", "HEAD")):
             self.entry(entry)
 
-    def range(self, base: str, head: str, *fallback: str) -> None:
-        # An all-zero or unknown base (new ref, force push) means every commit is new,
-        # except those the fallback names.
-        if ZERO.match(base) or not known(base):
-            self.commits(head, *fallback)
+    def range(self, base: str, head: str) -> None:
+        # An all-zero or unknown base (new ref, force push) means every commit is new.
+        # A local tracking ref is no proof the destination has a commit, so nothing is excluded.
+        if ZERO.fullmatch(base) or not known(base):
+            self.commits(head)
         else:
             self.commits(head, base)
 
-    def tag(self, ref: str, target: str) -> None:
+    def target(self, ref: str, target: str) -> bool:
+        """Scans what a ref points at short of a commit, and says whether it ends at one."""
         # A tag can point at another tag, and each one carries its own message.
-        while git("cat-file", "-t", target).strip() == b"tag":
+        while (kind := git("cat-file", "-t", target).strip()) == b"tag":
             body = decode(git("cat-file", "tag", target))
             self.scan(f"tag {ref}", body)
             target = body.split("\n", 1)[0].removeprefix("object ")
+        if kind == b"tree":
+            for entry in tree_entries(git("ls-tree", "-r", "-z", target)):
+                self.entry(entry, f"{ref} ")
+        elif kind == b"blob":
+            self.entry(Entry("100644", target, ref))
+        return kind == b"commit"
 
     def everything(self) -> None:
         listed = decode(git("for-each-ref", "--format=%(objectname) %(refname)"))
         for line in listed.splitlines():
             target, ref = line.split(" ", 1)
             self.name("ref", ref)
-            self.tag(ref, target)
+            self.target(ref, target)
         self.commits("--all")
+
+    def written(self, payload: dict[str, Any], item: dict[str, Any], **labels: str) -> bool:
+        """Scans the fields of an item that a writer wrote; says whether its author is one."""
+        if by_writer(payload, item):
+            for key, label in labels.items():
+                self.scan(label, optional(item[key]))
+            return True
+        # Only a writer can edit a stranger's text. The edit is scanned unless the stranger's
+        # version already matched, because then a failure would confirm their guess.
+        if edited_by_another(payload, item):
+            for key, label in labels.items():
+                change = payload["changes"].get(key)
+                if change is not None and not self.matches(optional(change["from"])):
+                    self.scan(label, optional(item[key]))
+        return False
 
     def event(self, name: str, payload: dict[str, Any]) -> None:
         """Scans a GitHub event, and only what someone with write access wrote or pushed.
@@ -229,8 +267,7 @@ class Guard:
                 ref = string(payload["ref"])
                 before, after = object_id(payload["before"]), object_id(payload["after"])
                 self.name("ref", ref)
-                if not ZERO.match(after):
-                    self.tag(ref, after)
+                if not ZERO.fullmatch(after) and self.target(ref, after):
                     self.range(before, f"{after}^{{commit}}")
             case "pull_request_target":
                 pull = payload["pull_request"]
@@ -240,21 +277,15 @@ class Guard:
                 local = source is not None and string(source["full_name"]) == string(
                     payload["repository"]["full_name"]
                 )
-                if by_writer(payload, pull) and local:
-                    self.scan("pull request title", string(pull["title"]))
-                    self.scan("pull request body", optional(pull["body"]))
+                labels = {"title": "pull request title", "body": "pull request body"}
+                if self.written(payload, pull, **labels) and local:
                     self.name("ref", string(head["ref"]))
                     self.range(object_id(pull["base"]["sha"]), object_id(head["sha"]))
             case "issues":
-                issue = payload["issue"]
-                if by_writer(payload, issue):
-                    self.scan("issue title", string(issue["title"]))
-                    self.scan("issue body", optional(issue["body"]))
+                self.written(payload, payload["issue"], title="issue title", body="issue body")
             case "issue_comment":
                 # The issue a comment sits on can be a stranger's, so only the comment is scanned.
-                comment = payload["comment"]
-                if by_writer(payload, comment):
-                    self.scan("comment", string(comment["body"]))
+                self.written(payload, payload["comment"], body="comment")
             case "release":
                 release = payload["release"]
                 self.scan("release name", optional(release["name"]))
@@ -267,16 +298,15 @@ class Guard:
             case _:
                 raise CannotRun("no scan is defined for this event")
 
-    def push(self, remote: str, lines: str) -> None:
+    def push(self, lines: str) -> None:
         for line in lines.splitlines():
             local_ref, local_sha, remote_ref, remote_sha = line.split()
             self.name("ref", remote_ref)
-            if ZERO.match(local_sha):
+            if ZERO.fullmatch(local_sha):
                 continue
             self.name("ref", local_ref)
-            self.tag(remote_ref, local_sha)
-            # Only what this remote already has is published there; another remote's refs are not.
-            self.range(remote_sha, f"{local_sha}^{{commit}}", f"--remotes={remote}")
+            if self.target(remote_ref, local_sha):
+                self.range(remote_sha, f"{local_sha}^{{commit}}")
 
 
 def run(argv: list[str]) -> int:
@@ -286,8 +316,8 @@ def run(argv: list[str]) -> int:
             guard.staged()
         case ["message", path]:
             guard.scan("commit message", Path(path).read_text(encoding="utf-8", errors="replace"))
-        case ["push", remote]:
-            guard.push(remote, sys.stdin.read())
+        case ["push"]:
+            guard.push(sys.stdin.read())
         case ["range", base, head]:
             guard.range(base, head)
         case ["tree"]:
