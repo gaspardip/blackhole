@@ -14,6 +14,7 @@ mod packs {
         pub(crate) mod no_comments;
         pub(crate) mod no_fixed_sleep;
         pub(crate) mod no_test_doubles;
+        pub(crate) mod no_unsignaled_poll;
         mod playwright;
         mod saved_methods;
         pub(crate) mod strict_msw;
