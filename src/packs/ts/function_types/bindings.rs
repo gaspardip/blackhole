@@ -96,7 +96,7 @@ impl<T: Copy> ConstBindings<T> {
         inspect: impl Fn(&'a Expression<'a>) -> ControlFlow<Option<T>, &'a IdentifierReference<'a>>,
         binding: impl Fn(NodeId, AstKind<'a>) -> ControlFlow<Option<T>>,
     ) -> Option<T> {
-        let mut path = Vec::new();
+        let mut path = std::collections::HashSet::new();
         let end = loop {
             let ident = match inspect(expr) {
                 ControlFlow::Break(end) => break end,
@@ -112,8 +112,9 @@ impl<T: Copy> ConstBindings<T> {
             if let Some(end) = self.origins.get(&key) {
                 break *end;
             }
-            self.origins.insert(key, None);
-            path.push(key);
+            if !path.insert(key) {
+                break None;
+            }
             let kind = ctx.semantic.nodes().kind(id);
             if let ControlFlow::Break(end) = binding(id, kind) {
                 break end;

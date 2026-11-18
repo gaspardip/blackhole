@@ -219,6 +219,34 @@ const QUESTIONS: &[Question] = &[
         &["E"],
         &["F"],
     ),
+    (
+        "no-widen-then-assert",
+        "interface Model {id:number} interface Other {name:string} declare const original: Model; const wide: object = original; const picked = @wide as POS;",
+        "TYPE",
+        &["Model"],
+        &["Other"],
+    ),
+    (
+        "no-widen-then-assert",
+        "interface Model {id:number} interface Other {name:string} declare const original: POS; const wide: object = original; const picked = @wide as Model;",
+        "TYPE",
+        &["Model"],
+        &["Other"],
+    ),
+    (
+        "no-widen-then-assert",
+        "interface Model {id:number} declare const original: POS; const wide: object = original; const picked = @wide as POS;",
+        "TYPE",
+        &["Model"],
+        &[],
+    ),
+    (
+        "no-unsafe-dictionary-type",
+        "interface Base<T> { id?: T } interface Model extends Base<POS> {} type D = @Record<string, Model>;",
+        "TYPE",
+        &["never"],
+        &["number"],
+    ),
 ];
 
 fn cell(
@@ -253,7 +281,11 @@ fn semantic_questions_follow_type_spellings() {
             .map(|t| (*t, true))
             .chain(accepts.iter().map(|t| (*t, false)))
         {
-            let (direct, at) = cell(rule, template, position, ty, "", "");
+            let inline = template.replace(
+                "interface Model extends Base<POS> {}",
+                "interface Model { id?: POS }",
+            );
+            let (direct, at) = cell(rule, &inline, position, ty, "", "");
             assert_eq!(
                 direct,
                 if rejects { vec![at] } else { vec![] },
@@ -271,6 +303,24 @@ fn semantic_questions_follow_type_spellings() {
                     "named application",
                     "type Y<T> = T; type X = Y<TY>;",
                     "X",
+                    "",
+                ),
+                (
+                    "namespace",
+                    "namespace N { export type X = TY; }",
+                    "N.X",
+                    "",
+                ),
+                (
+                    "nested namespace",
+                    "namespace N { export namespace M { export type X = TY; } }",
+                    "N.M.X",
+                    "",
+                ),
+                (
+                    "namespace import",
+                    "namespace N { export namespace M { export type X = TY; } } import M = N.M;",
+                    "M.X",
                     "",
                 ),
                 ("forwarder", "type Y<T> = T; type X<T> = Y<T>;", "X<TY>", ""),
@@ -334,5 +384,218 @@ fn default_can_name_its_own_instantiation() {
                 .collect::<Vec<_>>(),
             [(2, 6, None)]
         );
+    }
+}
+
+#[test]
+fn assertion_back_to_a_declaration_follows_its_binding() {
+    for (origin, local, target, expected) in [
+        ("Model", "", "Model", true),
+        ("Model", "type Alias = Model;", "Alias", true),
+        ("Model", "type Id<T> = T;", "Id<Model>", true),
+        ("Model", "type Id<T = Model> = T;", "Id", true),
+        ("Model & Tag", "type Id<T> = T;", "Id<Model> & Tag", true),
+        ("Model", "interface Model { name: string }", "Model", false),
+        ("Model", "interface Other { name: string }", "Other", false),
+        ("Model", "type Same = Model;", "Same", true),
+        ("Model", "interface Other { id: number }", "Other", false),
+        ("Model", "", "{ id: number }", true),
+    ] {
+        let source = format!(
+            "interface Model {{ id: number }} interface Tag {{ tag: string }}\ndeclare const original: {origin};\nconst wide: object = original;\n{{ {local}\nconst picked = wide as {target};\n}}"
+        );
+        let hits = single::run_rule("ts/no-widen-then-assert", "binding.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+                .then_some((5, 16, None))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn qualified_object_source_is_already_broad() {
+    for source_type in ["Types.Wide", "object"] {
+        let text = format!(
+            "namespace Types {{ export type Wide = object; }}\ndeclare const original: {source_type};\nconst wide: object = original;\nconst picked = wide as {{ id: number }};"
+        );
+        assert!(
+            single::run_rule("ts/no-widen-then-assert", "source.ts", &text).is_empty(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn dictionary_in_a_generic_container_reports_at_its_use() {
+    for (container, inline_col, named_col) in [
+        ("string | T", 24, 17),
+        ("[T]", 16, 17),
+        ("T[]", 15, 17),
+        ("Readonly<T>", 15, 15),
+        ("Record<string, T>", 30, 17),
+        ("T & {}", 15, 17),
+    ] {
+        for (value, reports) in [
+            ("Record<string, unknown>", true),
+            ("Record<string, number>", false),
+        ] {
+            let direct = format!("type Result = {};", container.replace('T', value));
+            let named = format!("type W<T> = {container};\ntype Result = W<{value}>;");
+            for (source, position) in [
+                (direct, (1, inline_col, None)),
+                (named, (2, named_col, None)),
+            ] {
+                let hits =
+                    single::run_rule("ts/no-unsafe-dictionary-type", "container.ts", &source);
+                assert_eq!(
+                    hits.iter()
+                        .map(|h| (h.line, h.col, h.note.as_deref()))
+                        .collect::<Vec<_>>(),
+                    reports.then_some(position).into_iter().collect::<Vec<_>>(),
+                    "{source}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_dictionary_reports_at_the_node_that_makes_it() {
+    let declarations = "type Shared<T> = Record<string, T>;\ntype Wrap<T> = { a: Record<string, T> };\ntype Slot<T> = T;";
+    for (named, named_col, twin, twin_col) in [
+        (
+            "Shared<Shared<unknown>>",
+            21,
+            "Record<string, Record<string, unknown>>",
+            29,
+        ),
+        (
+            "Wrap<Shared<unknown>>",
+            19,
+            "{ a: Record<string, Record<string, unknown>> }",
+            34,
+        ),
+        ("Wrap<unknown>", 14, "{ a: Record<string, unknown> }", 19),
+        ("Slot<Shared<unknown>>", 14, "Record<string, unknown>", 14),
+    ] {
+        for (body, col) in [(named, named_col), (twin, twin_col)] {
+            let source = format!("{declarations}\ntype Plain = {body};");
+            let hits = single::run_rule("ts/no-unsafe-dictionary-type", "types.ts", &source);
+            assert_eq!(
+                hits.iter()
+                    .map(|h| (h.line, h.col, h.note.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(4, col, None)],
+                "{body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_discarded_dictionary_argument_still_reports_where_it_is_written() {
+    for (body, expected) in [
+        ("First<number, Shared<unknown>>", vec![(3, 29, None)]),
+        (
+            "First<number, Record<string, unknown>>",
+            vec![(3, 29, None)],
+        ),
+        ("number", vec![]),
+    ] {
+        let source = format!(
+            "type Shared<T> = Record<string, T>;\ntype First<T, U> = T;\ntype Result = {body};"
+        );
+        let hits = single::run_rule("ts/no-unsafe-dictionary-type", "argument.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_binding_only_reports_dictionaries_missing_from_the_written_declaration() {
+    let source =
+        "type Box<T> = { fixed: Record<string, unknown>; value: T };\ntype Result = Box<number>;";
+    let hits = single::run_rule("ts/no-unsafe-dictionary-type", "written.ts", source);
+    assert_eq!(
+        hits.iter().map(|h| (h.line, h.col)).collect::<Vec<_>>(),
+        [(1, 24)]
+    );
+}
+
+#[test]
+fn generic_index_interfaces_bind_the_written_value() {
+    for (ty, expected) in [("unknown", vec![13]), ("number", vec![])] {
+        for body in [format!("Index<{ty}>"), format!("{{[key: string]: {ty}}}")] {
+            let source = format!("interface Index<T> {{ [key: string]: T }}\ntype Dict = {body};");
+            let hits = single::run_rule("ts/no-unsafe-dictionary-type", "index.ts", &source);
+            assert_eq!(
+                hits.iter().map(|h| h.col).collect::<Vec<_>>(),
+                expected,
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn qualified_names_only_resolve_through_local_exports() {
+    for (prefix, name, reports) in [
+        (
+            "namespace A { export type Other = string } namespace A { export type T = unknown }",
+            "A.T",
+            true,
+        ),
+        ("namespace A { type T = unknown }", "A.T", false),
+        (
+            "import * as External from './external'",
+            "External.T",
+            false,
+        ),
+        (
+            "declare module 'external' { export type T = unknown } import * as External from 'external'",
+            "External.T",
+            false,
+        ),
+    ] {
+        let source = format!("{prefix}\nfunction f(v: {name}) {{}}");
+        let hits = single::run_rule("ts/no-unknown-parameters", "qualified.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            reports
+                .then_some((2, 15, None))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn generic_declaration_identity_includes_bound_arguments() {
+    for (local, target, expected) in [
+        ("type Pass<T> = Owner<T>;", "Pass<Item>", true),
+        ("type Alias = Item;", "Owner<Alias>", true),
+        ("interface Owner<T> { name: T }", "Owner<Item>", false),
+        ("interface Other {}", "Owner<Other>", false),
+        ("", "Owner", true),
+    ] {
+        let source = format!(
+            "interface Item {{}} interface Owner<T = Item> {{ id: T }}\ndeclare const origin: Owner<Item>;\nconst v: object = origin;\n{{ {local} const picked = v as {target}; }}"
+        );
+        let hits = single::run_rule("ts/no-widen-then-assert", "owner.ts", &source);
+        assert_eq!(hits.len(), usize::from(expected), "{source}");
     }
 }

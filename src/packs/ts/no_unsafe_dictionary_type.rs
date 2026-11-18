@@ -38,7 +38,14 @@ fn inside_constraint(parent: AstKind<'_>, span: oxc::span::Span) -> bool {
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let resolution = Resolution::default();
+    check_with_resolution(ctx, findings, &Resolution::default());
+}
+
+pub(super) fn check_with_resolution(
+    ctx: &TsCtx<'_>,
+    findings: &mut Findings,
+    resolution: &Resolution,
+) {
     let nodes = ctx.semantic.nodes();
     let mut dictionaries = std::collections::HashSet::new();
     for (id, node) in nodes.iter_enumerated() {

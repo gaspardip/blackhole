@@ -1,4 +1,4 @@
-use super::dictionary_types::{Query, Resolution};
+use super::dictionary_types::{Judged, Query, Resolution, report};
 use super::function_types::{
     bindings::{ConstBindings, symbol},
     expressions::{assertion, known_value},
@@ -29,16 +29,16 @@ enum Broad {
     Record,
 }
 
-fn broad<'a>(resolver: &Resolution, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Option<Broad> {
-    if resolver.assertion_shape(ctx, ty, Query::Top) {
+fn broad<'a>(resolver: &Resolution, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Judged<Option<Broad>> {
+    Ok(if resolver.assertion_shape(ctx, ty, Query::Top)? {
         Some(Broad::Top)
-    } else if resolver.assertion_shape(ctx, ty, Query::WideObject) {
+    } else if resolver.assertion_shape(ctx, ty, Query::WideObject)? {
         Some(Broad::Object)
     } else {
         resolver
-            .assertion_shape(ctx, ty, Query::WideRecord)
+            .assertion_shape(ctx, ty, Query::WideRecord)?
             .then_some(Broad::Record)
-    }
+    })
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
@@ -62,42 +62,48 @@ fn evidence<'a>(
     ctx: &'a TsCtx<'a>,
     expr: &'a Expression<'a>,
     owner: Option<NodeId>,
-    bindings: &mut ConstBindings<Evidence<'a>>,
-) -> Option<Evidence<'a>> {
-    bindings.walk(
-        ctx,
-        expr,
-        owner,
-        |expr| {
-            let value = expr.without_parentheses();
-            if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
-                return Break(
-                    broad(resolver, ctx, ty)
-                        .is_none()
-                        .then_some(Evidence::Annotated(ty)),
-                );
-            }
-            if let Expression::Identifier(i) = value {
-                Continue(i)
-            } else {
-                Break(known_value(value).then_some(Evidence::Value))
-            }
-        },
-        |id, kind| {
-            if boundary(ctx, id) != owner {
-                return Break(None);
-            }
-            let annotation = super::function_types::direct_binding(kind).and_then(|b| b.annotation);
-            match annotation {
-                Some(a) => Break(
-                    broad(resolver, ctx, &a.type_annotation)
-                        .is_none()
-                        .then_some(Evidence::Annotated(&a.type_annotation)),
-                ),
-                None => Continue(()),
-            }
-        },
-    )
+    bindings: &mut ConstBindings<Judged<Evidence<'a>>>,
+) -> Judged<Option<Evidence<'a>>> {
+    bindings
+        .walk(
+            ctx,
+            expr,
+            owner,
+            |expr| {
+                let value = expr.without_parentheses();
+                if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
+                    return Break(
+                        broad(resolver, ctx, ty)
+                            .map(|b| b.is_none().then_some(Evidence::Annotated(ty)))
+                            .transpose(),
+                    );
+                }
+                if let Expression::Identifier(i) = value {
+                    Continue(i)
+                } else {
+                    Break(known_value(value).then_some(Ok(Evidence::Value)))
+                }
+            },
+            |id, kind| {
+                if boundary(ctx, id) != owner {
+                    return Break(None);
+                }
+                let annotation =
+                    super::function_types::direct_binding(kind).and_then(|b| b.annotation);
+                match annotation {
+                    Some(a) => Break(
+                        broad(resolver, ctx, &a.type_annotation)
+                            .map(|b| {
+                                b.is_none()
+                                    .then_some(Evidence::Annotated(&a.type_annotation))
+                            })
+                            .transpose(),
+                    ),
+                    None => Continue(()),
+                }
+            },
+        )
+        .transpose()
 }
 
 fn narrower<'a>(
@@ -106,25 +112,18 @@ fn narrower<'a>(
     kind: Broad,
     original: Evidence<'a>,
     target: &'a TSType<'a>,
-) -> bool {
-    let target = resolver.plain_alias(ctx, target);
-    if broad(resolver, ctx, target).is_some() {
-        return false;
+) -> Judged<bool> {
+    let target = resolver.plain_alias(ctx, target)?;
+    if broad(resolver, ctx, target)?.is_some() {
+        return Ok(false);
     }
-    if let Evidence::Annotated(old) = original {
-        let normalized = |ty: &TSType<'_>| {
-            ty.without_parenthesized()
-                .span()
-                .source_text(ctx.text)
-                .split_whitespace()
-                .collect::<String>()
-        };
-        if normalized(resolver.plain_alias(ctx, old)) == normalized(target) {
-            return true;
-        }
+    if let Evidence::Annotated(old) = original
+        && resolver.same_type(ctx, old, target)?
+    {
+        return Ok(true);
     }
     match kind {
-        Broad::Top => true,
+        Broad::Top => Ok(true),
         Broad::Object => resolver.assertion_shape(ctx, target, Query::IsObject),
         Broad::Record => resolver.assertion_shape(ctx, target, Query::NarrowRecord),
     }
@@ -171,25 +170,38 @@ pub(super) fn check_with_resolution(
         let Some(init) = direct.initializer else {
             continue;
         };
-        let asserted = assertion(nodes.kind(init.without_parentheses().node_id()))
-            .and_then(|(e, t)| Some((e, broad(resolver, ctx, t)?)));
-        let Some(kind) = direct
-            .annotation
-            .and_then(|a| broad(resolver, ctx, &a.type_annotation))
-            .or_else(|| asserted.map(|(_, k)| k))
-        else {
-            continue;
-        };
-        if let Some(original) = evidence(
-            resolver,
-            ctx,
-            asserted.map_or(init, |(e, _)| e),
-            owner,
-            &mut bindings,
-        ) && !matches!(original,Evidence::Annotated(t) if direct.annotation.is_some_and(|a|a.type_annotation.node_id()==t.node_id()))
-            && narrower(resolver, ctx, kind, original, target)
-        {
-            findings.report(node.span().start as usize, None);
-        }
+        let verdict = (|| {
+            let asserted = if let Some((value, ty)) =
+                assertion(nodes.kind(init.without_parentheses().node_id()))
+            {
+                broad(resolver, ctx, ty)?.map(|kind| (value, kind))
+            } else {
+                None
+            };
+            let annotated = direct
+                .annotation
+                .map(|a| broad(resolver, ctx, &a.type_annotation))
+                .transpose()?
+                .flatten();
+            let Some(kind) = annotated.or_else(|| asserted.map(|(_, kind)| kind)) else {
+                return Ok(false);
+            };
+            let Some(original) = evidence(
+                resolver,
+                ctx,
+                asserted.map_or(init, |(value, _)| value),
+                owner,
+                &mut bindings,
+            )?
+            else {
+                return Ok(false);
+            };
+            if matches!(original,Evidence::Annotated(t) if direct.annotation.is_some_and(|a|a.type_annotation.node_id()==t.node_id()))
+            {
+                return Ok(false);
+            }
+            narrower(resolver, ctx, kind, original, target)
+        })();
+        report(findings, node.span().start as usize, verdict);
     }
 }
