@@ -1,0 +1,5 @@
+[System.Diagnostics.CodeAnalysis.Suppress‌Message("x", "y")]
+[System.Diagnostics.CodeAnalysis.Suppress\u200cMessage("x", "y")]
+[System.Diagnostics.CodeAnalysis.Suppress󠀁Message("x", "y")]
+[System.Diagnostics.CodeAnalysis.Suppress\U000E0001Message("x", "y")]
+‌  [System.Diagnostics.CodeAnalysis.SuppressMessage("x", "y")]

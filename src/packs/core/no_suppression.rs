@@ -234,7 +234,7 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     }
 }
 
-fn matches(text: &str, pattern: &str) -> Result<bool, End> {
+fn matches(text: &str, pattern: &str, kind: &str) -> Result<bool, End> {
     if pattern == "//~nolint" {
         return Ok(text.strip_prefix("//").is_some_and(|tail| {
             tail.trim_start_matches(|c: char| c == '/' || c.is_whitespace())
@@ -248,7 +248,7 @@ fn matches(text: &str, pattern: &str) -> Result<bool, End> {
             let window = reach(rest);
             let line = window.split('\n').next().unwrap_or(window);
             for (at, _) in line.char_indices() {
-                if matches(&rest[at..], tokens.as_str())? {
+                if matches(&rest[at..], tokens.as_str(), kind)? {
                     return Ok(true);
                 }
             }
@@ -266,6 +266,9 @@ fn matches(text: &str, pattern: &str) -> Result<bool, End> {
         }
         rest = after;
         if !gaps {
+            if matches!(kind, "java" | "cs") && token.is_ascii_alphanumeric() {
+                rest = rest.trim_start_matches(|c| ignorable(c, kind));
+            }
             let Some(after) = rest.strip_prefix(token) else {
                 return Ok(false);
             };
@@ -450,8 +453,18 @@ fn encoding(text: &str, hits: &mut Findings) {
     }
 }
 
+// Unicode General_Category=Cf and the additional ISO controls ignored by Java identifiers.
+fn ignorable(c: char, kind: &str) -> bool {
+    matches!(u32::from(c), 0xad | 0x600..=0x605 | 0x61c | 0x6dd | 0x70f | 0x890..=0x891 |
+        0x8e2 | 0x180e | 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 |
+        0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd |
+        0x13430..=0x1343f | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a |
+        0xe0001 | 0xe0020..=0xe007f)
+        || kind == "java" && matches!(u32::from(c), 0..=8 | 14..=27 | 127..=159)
+}
+
 // The character a Java or C# Unicode escape stands for, and the escape's length.
-fn escape(text: &str) -> Option<(char, usize)> {
+fn escape_unit(text: &str) -> Option<(u32, usize)> {
     let tail = text.strip_prefix('\\')?;
     let (digits, width) = match tail.strip_prefix('U') {
         Some(long) => (long, 8),
@@ -461,8 +474,21 @@ fn escape(text: &str) -> Option<(char, usize)> {
     if !code.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let ch = char::from_u32(u32::from_str_radix(code, 16).ok()?)?;
+    let ch = u32::from_str_radix(code, 16).ok()?;
     Some((ch, text.len() - digits.len() + width))
+}
+
+fn escape(text: &str) -> Option<(char, usize)> {
+    let (first, len) = escape_unit(text)?;
+    if let Some(ch) = char::from_u32(first) {
+        return Some((ch, len));
+    }
+    let (second, next) = escape_unit(&text[len..])?;
+    if !(0xd800..=0xdbff).contains(&first) || !(0xdc00..=0xdfff).contains(&second) {
+        return None;
+    }
+    let scalar = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+    Some((char::from_u32(scalar)?, len + next))
 }
 
 // Java and C# read an escape as the character itself before they read an annotation.
@@ -551,7 +577,7 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
     for (offset, first) in text.char_indices() {
         let mut found = None;
         for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
-            match matches(&text[offset..], pattern) {
+            match matches(&text[offset..], pattern, kind) {
                 Ok(true) => {
                     found = Some(None);
                     break;
