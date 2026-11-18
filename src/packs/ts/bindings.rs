@@ -1,5 +1,5 @@
 use super::{
-    double_mutations::{Invocation, invoked},
+    double_mutations::{Invocation, Mutation, invoked},
     values::{declaration, member_key, path, resolve},
 };
 use crate::engine::TsCtx;
@@ -84,27 +84,21 @@ fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
     }
 }
 pub(super) fn mutation(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
-    let Some(p) = &call.path else {
-        return false;
-    };
-    if p.as_slice() == ["cloudflare:workers", "withEnv"] {
+    if call.path.as_deref() == Some(&["cloudflare:workers", "withEnv"]) {
         return call.arg(0).is_some_and(|arg| contains_function(ctx, arg));
     }
     if !call.arg(0).is_some_and(|e| binding(ctx, e)) {
         return false;
     }
-    let p = p.join(".");
-    match p.as_str() {
-        "Object.assign" => call
+    match call.mutation() {
+        Some(Mutation::Assign) => call
             .args
             .iter()
             .skip(1)
             .flatten()
             .any(|e| contains_function(ctx, e)),
-        "Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set" => {
-            call.arg(2).is_some_and(|e| contains_function(ctx, e))
-        }
-        "Object.defineProperties" => call.arg(1).is_some_and(|e| contains_function(ctx, e)),
+        Some(Mutation::SetProperty) => call.arg(2).is_some_and(|e| contains_function(ctx, e)),
+        Some(Mutation::DefineMany) => call.arg(1).is_some_and(|e| contains_function(ctx, e)),
         _ => false,
     }
 }

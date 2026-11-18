@@ -75,17 +75,7 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
             .callee
             .get_member_expr()
             .is_some_and(|m| arg_id(m.object()))
-            || (inv.path.as_ref().is_some_and(|p| {
-                matches!(
-                    p.join(".").as_str(),
-                    "Reflect.set"
-                        | "Reflect.defineProperty"
-                        | "Reflect.deleteProperty"
-                        | "Object.assign"
-                        | "Object.defineProperty"
-                        | "Object.defineProperties"
-                )
-            }) && inv.arg(0).is_some_and(arg_id))
+            || (inv.mutation().is_some() && inv.arg(0).is_some_and(arg_id))
         {
             return false;
         }

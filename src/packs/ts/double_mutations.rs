@@ -84,6 +84,13 @@ fn defines(ctx: &TsCtx<'_>, initial: &Expression<'_>, owner: &str) -> bool {
     false
 }
 
+pub(super) enum Mutation {
+    Assign,
+    DefineMany,
+    SetProperty,
+    Delete,
+}
+
 pub(super) struct Invocation<'a> {
     pub(super) callee: &'a Expression<'a>,
     pub(super) path: Option<Vec<&'a str>>,
@@ -91,6 +98,17 @@ pub(super) struct Invocation<'a> {
     pub(super) args: Vec<Option<&'a Expression<'a>>>,
 }
 impl<'a> Invocation<'a> {
+    pub(super) fn mutation(&self) -> Option<Mutation> {
+        match self.native_path.as_deref()? {
+            "Object.assign" => Some(Mutation::Assign),
+            "Object.defineProperties" => Some(Mutation::DefineMany),
+            "Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set" => {
+                Some(Mutation::SetProperty)
+            }
+            "Reflect.deleteProperty" => Some(Mutation::Delete),
+            _ => None,
+        }
+    }
     pub(super) fn arg(&self, i: usize) -> Option<&'a Expression<'a>> {
         self.args.get(i).copied().flatten()
     }
@@ -154,18 +172,13 @@ pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
     let Some(owner) = call.arg(0).and_then(|e| native(ctx, e)) else {
         return false;
     };
-    match call.native_path.as_deref() {
-        Some(
-            "Object.defineProperty"
-            | "Reflect.defineProperty"
-            | "Reflect.set"
-            | "Reflect.deleteProperty",
-        ) => call
+    match call.mutation() {
+        Some(Mutation::SetProperty | Mutation::Delete) => call
             .arg(1)
             .and_then(|e| literal(ctx, e))
             .is_some_and(|k| protected(&owner, k)),
-        Some("Object.defineProperties") => call.arg(1).is_some_and(|e| defines(ctx, e, &owner)),
-        Some("Object.assign") => call
+        Some(Mutation::DefineMany) => call.arg(1).is_some_and(|e| defines(ctx, e, &owner)),
+        Some(Mutation::Assign) => call
             .args
             .iter()
             .skip(1)
