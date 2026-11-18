@@ -1,0 +1,1 @@
+use(globalThis["jest"]);

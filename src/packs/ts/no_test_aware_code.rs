@@ -1,0 +1,198 @@
+use super::test_context::test_file;
+use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use oxc::{
+    ast::{
+        AstKind,
+        ast::{
+            AssignmentTarget, AssignmentTargetProperty, BindingPattern, Expression,
+            MemberExpression, PropertyKey,
+        },
+    },
+    span::{GetSpan, Span},
+    syntax::node::NodeId,
+};
+
+pub(crate) const RULE: Rule = Rule {
+    id: "ts/no-test-aware-code",
+    family: Family::Tests,
+    provenance: "ImpossibleBench and similar reports observed agents special-casing a test run in production code.",
+    fix: "Production code must not know it is under test. Inject the dependency or the configuration instead.",
+    run: Run::Ts(check),
+};
+#[derive(Clone, Copy, PartialEq)]
+enum Marker {
+    Worker,
+    Runner,
+    Mode,
+}
+const NAMES: &[(&str, Marker)] = &[
+    ("JEST_WORKER_ID", Marker::Worker),
+    ("VITEST", Marker::Worker),
+    ("VITEST_WORKER_ID", Marker::Worker),
+    ("VITEST_POOL_ID", Marker::Worker),
+    ("PLAYWRIGHT_TEST", Marker::Worker),
+    ("CYPRESS", Marker::Worker),
+    ("jest", Marker::Runner),
+    ("vi", Marker::Runner),
+    ("vitest", Marker::Runner),
+    ("describe", Marker::Runner),
+    ("it", Marker::Runner),
+    ("expect", Marker::Runner),
+    ("Cypress", Marker::Runner),
+    ("NODE_ENV", Marker::Mode),
+    ("MODE", Marker::Mode),
+];
+fn marker(key: &str, kind: Marker) -> bool {
+    NAMES.contains(&(key, kind))
+}
+fn meta(e: &Expression<'_>) -> bool {
+    matches!(e.get_inner_expression(), Expression::ImportMeta(_))
+}
+fn global(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
+    matches!(e.get_inner_expression(),Expression::Identifier(id) if names.contains(&id.name.as_str())&&ctx.semantic.is_reference_to_global_variable(id))
+}
+fn member<'a>(e: &'a Expression<'a>) -> Option<&'a MemberExpression<'a>> {
+    let e = e.get_inner_expression();
+    if let Expression::ChainExpression(c) = e {
+        c.expression.as_member_expression()
+    } else {
+        e.as_member_expression()
+    }
+}
+fn env<'a>(e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    let m = member(e)?;
+    (m.static_property_name()? == "env").then(|| m.object())
+}
+fn mode(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Span> {
+    let e = e.get_inner_expression();
+    let m = member(e)?;
+    let owner = env(m.object())?;
+    let name = m.static_property_name()?.as_str()?;
+    (marker(name, Marker::Mode)
+        && (meta(owner) || name == "NODE_ENV" && global(ctx, owner, &["process"])))
+    .then_some(e.span())
+}
+fn comparison(ctx: &TsCtx<'_>, left: &Expression<'_>, right: &Expression<'_>) -> Option<Span> {
+    let test = |e: &Expression<'_>| matches!(e.get_inner_expression(),Expression::StringLiteral(s) if s.value=="test");
+    if test(right) {
+        mode(ctx, left)
+    } else if test(left) {
+        mode(ctx, right)
+    } else {
+        None
+    }
+}
+fn read(ctx: &TsCtx<'_>, id: NodeId, span: Span) -> bool {
+    let parent = ctx.semantic.nodes().ancestors(id).find(|n| {
+        !matches!(
+            n.kind(),
+            AstKind::ParenthesizedExpression(_) | AstKind::ChainExpression(_)
+        )
+    });
+    !matches!(parent.map(oxc::semantic::AstNode::kind),Some(AstKind::AssignmentExpression(a)) if a.operator.is_assign() && a.left.span()==span)
+        && !matches!(parent.map(oxc::semantic::AstNode::kind),Some(AstKind::UnaryExpression(u)) if u.operator.is_delete())
+}
+fn test_member(ctx: &TsCtx<'_>, object: &Expression<'_>, name: &str) -> bool {
+    (marker(name, Marker::Worker) && env(object).is_some_and(|e| global(ctx, e, &["process"])))
+        || (name == "vitest" && meta(object))
+        || (marker(name, Marker::Runner)
+            && global(ctx, object, &["window", "globalThis", "global"]))
+}
+fn worker(key: &PropertyKey<'_>, computed: bool) -> bool {
+    match key {
+        PropertyKey::StaticIdentifier(i) if !computed => marker(i.name.as_str(), Marker::Worker),
+        PropertyKey::StringLiteral(s) => {
+            s.value.as_str().is_some_and(|s| marker(s, Marker::Worker))
+        }
+        _ => false,
+    }
+}
+fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    if test_file(ctx.path) {
+        return;
+    }
+    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+        let span = match node.kind() {
+            AstKind::StaticMemberExpression(m)
+                if test_member(ctx, &m.object, m.property.name.as_str())
+                    && read(ctx, id, m.span) =>
+            {
+                Some(m.span)
+            }
+            AstKind::ComputedMemberExpression(m)
+                if m.static_property_name()
+                    .and_then(oxc::str::JSStr::as_str)
+                    .is_some_and(|key| test_member(ctx, &m.object, key))
+                    && read(ctx, id, m.span) =>
+            {
+                Some(m.span)
+            }
+            AstKind::UnaryExpression(u)
+                if u.operator.is_typeof()
+                    && matches!(u.argument.get_inner_expression(),Expression::Identifier(i) if marker(i.name.as_str(),Marker::Runner)&&ctx.semantic.is_reference_to_global_variable(i)) =>
+            {
+                Some(u.span)
+            }
+            AstKind::BinaryExpression(b) if b.operator.is_equality() => {
+                comparison(ctx, &b.left, &b.right)
+            }
+            AstKind::SwitchStatement(s) => {
+                let mut found = std::collections::BTreeSet::new();
+                for c in &s.cases {
+                    if let Some(at) = c
+                        .test
+                        .as_ref()
+                        .and_then(|e| comparison(ctx, &s.discriminant, e))
+                    {
+                        found.insert(at.start);
+                    }
+                }
+                for at in found {
+                    findings.report(at as usize, None);
+                }
+                None
+            }
+            AstKind::VariableDeclarator(v)
+                if v.init
+                    .as_ref()
+                    .and_then(env)
+                    .is_some_and(|e| global(ctx, e, &["process"])) =>
+            {
+                if let BindingPattern::ObjectPattern(p) = &v.id {
+                    for prop in &p.properties {
+                        if worker(&prop.key, prop.computed) {
+                            findings.report(prop.key.span().start as usize, None);
+                        }
+                    }
+                }
+                None
+            }
+            AstKind::AssignmentExpression(a)
+                if env(&a.right).is_some_and(|e| global(ctx, e, &["process"])) =>
+            {
+                if let AssignmentTarget::ObjectAssignmentTarget(o) = &a.left {
+                    for p in &o.properties {
+                        match p {
+                            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p)
+                                if marker(p.binding.name.as_str(), Marker::Worker) =>
+                            {
+                                findings.report(p.span.start as usize, None);
+                            }
+                            AssignmentTargetProperty::AssignmentTargetPropertyProperty(p)
+                                if worker(&p.name, p.computed) =>
+                            {
+                                findings.report(p.name.span().start as usize, None);
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(span) = span {
+            findings.report(span.start as usize, None);
+        }
+    }
+}
