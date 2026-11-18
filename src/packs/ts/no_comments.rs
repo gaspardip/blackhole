@@ -56,15 +56,12 @@ fn directive(raw: &str) -> bool {
             | "oxfmt-ignore"
             | "oxfmt-ignore-start"
             | "oxfmt-ignore-end"
-            | "nosemgrep"
-    ) || value.starts_with("nosemgrep:")
-        || value.strip_prefix(['@', '#']).is_some_and(|v| {
-            matches!(
-                v,
-                "__PURE__" | "__NO_SIDE_EFFECTS__" | "__INLINE__" | "__NOINLINE__"
-            )
-        })
-        || value == "@vite-ignore"
+    ) || value.strip_prefix(['@', '#']).is_some_and(|v| {
+        matches!(
+            v,
+            "__PURE__" | "__NO_SIDE_EFFECTS__" | "__INLINE__" | "__NOINLINE__"
+        )
+    }) || value == "@vite-ignore"
         || value.split_once(':').is_some_and(|(v, _)| {
             matches!(
                 v,

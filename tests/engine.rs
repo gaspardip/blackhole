@@ -129,3 +129,18 @@ fn regexp_syntax_and_extension_only_names_are_judged() {
         );
     }
 }
+
+#[test]
+fn jsx_is_read_in_every_javascript_kind() {
+    for path in ["view.js", "view.mjs", "view.cjs", "view.jsx"] {
+        let found = run(
+            registry(),
+            [(path, b"const view = <div>{1}</div>;".as_slice())],
+        );
+        assert_eq!(
+            found.iter().map(|f| f.rule).collect::<Vec<_>>(),
+            [""; 0],
+            "{path}"
+        );
+    }
+}

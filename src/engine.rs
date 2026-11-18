@@ -181,9 +181,11 @@ fn collect(
 
 fn source_type(path: &str) -> Option<SourceType> {
     let name = path.rsplit('/').next()?.to_ascii_lowercase();
-    SourceType::from_path(&name)
+    let kind = SourceType::from_path(&name)
         .ok()
-        .or_else(|| SourceType::from_extension(name.strip_prefix('.')?).ok())
+        .or_else(|| SourceType::from_extension(name.strip_prefix('.')?).ok())?;
+    // The TypeScript compiler reads JSX in every JavaScript file, whatever its extension.
+    Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
 }
 
 pub fn run<'a>(
