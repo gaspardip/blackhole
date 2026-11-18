@@ -1,4 +1,4 @@
-use super::function_types::bindings::{is_type_declaration, symbol};
+use super::function_types::bindings::{symbol, type_declarations};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -316,22 +316,15 @@ impl Environments {
             {
                 return Plan::child(Combine::First, Goal { term, ..g });
             }
-            let Some(id) = scopes
-                .symbol_declarations(sym)
-                .take_while(|_| budget.take(1))
-                .find(|id| is_type_declaration(ctx.semantic.nodes().kind(*id)))
-            else {
+            let Some(id) = type_declarations(ctx, sym).next() else {
                 return Plan::Done(Class::None);
             };
             match ctx.semantic.nodes().kind(id) {
                 AstKind::TSInterfaceDeclaration(_)
                     if g.query == Query::Value
-                        && scopes.symbol_declarations(sym).all(|id| {
+                        && type_declarations(ctx, sym).all(|id| {
                             budget.take(1)
                                 && match ctx.semantic.nodes().kind(id) {
-                                    AstKind::VariableDeclarator(_)
-                                    | AstKind::Function(_)
-                                    | AstKind::TSNamespaceDeclaration(_) => true,
                                     AstKind::TSInterfaceDeclaration(i) => {
                                         i.extends.is_empty() && empty(&i.body.body, budget)
                                     }

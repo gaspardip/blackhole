@@ -443,6 +443,7 @@ fn type_only_imports_leave_local_value_evidence_visible() {
     };
     for declaration in [
         "import type { value } from './types';",
+        "import type value = require('./types');",
         "import type value from './types';",
         "import type * as value from './types';",
         "import { type X as value } from './types';",

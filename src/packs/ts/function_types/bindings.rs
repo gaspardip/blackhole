@@ -4,7 +4,10 @@ use oxc::{
         AstKind,
         ast::{Expression, IdentifierReference, VariableDeclarationKind},
     },
-    syntax::{node::NodeId, symbol::SymbolId},
+    syntax::{
+        node::NodeId,
+        symbol::{SymbolFlags, SymbolId},
+    },
 };
 use std::{collections::HashMap, ops::ControlFlow};
 
@@ -18,29 +21,38 @@ pub(crate) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> O
     value_declarations(ctx, symbol(ctx, ident)?).next()
 }
 
-pub(crate) fn is_type_declaration(kind: AstKind<'_>) -> bool {
-    matches!(
-        kind,
-        AstKind::TSTypeAliasDeclaration(_) | AstKind::TSInterfaceDeclaration(_)
-    )
+pub(crate) fn declarations<'a>(
+    ctx: &'a TsCtx<'_>,
+    symbol: SymbolId,
+) -> impl Iterator<Item = (NodeId, SymbolFlags)> + 'a {
+    let scopes = ctx.semantic.scoping();
+    let merged = scopes.symbol_redeclarations(symbol);
+    merged.is_empty().then(|| (scopes.symbol_declaration(symbol), scopes.symbol_flags(symbol))).into_iter()
+        .chain(merged.iter().map(|d| (d.declaration, d.flags)))
+        .map(|(id, flags)| {
+            // The binder marks import-equals as a value import even for the type-only spelling.
+            if flags.contains(SymbolFlags::Import) && matches!(ctx.semantic.nodes().kind(id), AstKind::TSImportEqualsDeclaration(i) if i.import_kind.is_type()) {
+                (id, SymbolFlags::TypeImport)
+            } else { (id, flags) }
+        })
+}
+
+pub(crate) fn type_declarations<'a>(
+    ctx: &'a TsCtx<'_>,
+    symbol: SymbolId,
+) -> impl Iterator<Item = NodeId> + 'a {
+    declarations(ctx, symbol).filter_map(|(id, flags)| {
+        flags
+            .intersects(SymbolFlags::Type | SymbolFlags::Import | SymbolFlags::TypeImport)
+            .then_some(id)
+    })
 }
 
 pub(crate) fn value_declarations<'a>(
     ctx: &'a TsCtx<'_>,
     symbol: SymbolId,
 ) -> impl Iterator<Item = NodeId> + 'a {
-    ctx.semantic
-        .scoping()
-        .symbol_declarations(symbol)
-        .filter(|&id| {
-            let nodes = ctx.semantic.nodes();
-            match nodes.kind(id) {
-                AstKind::ImportSpecifier(s) if s.import_kind.is_type() => false,
-                AstKind::ImportSpecifier(_) | AstKind::ImportNamespaceSpecifier(_) | AstKind::ImportDefaultSpecifier(_) =>
-                    !matches!(nodes.parent_kind(id), AstKind::ImportDeclaration(i) if i.import_kind.is_type()),
-                kind => !is_type_declaration(kind),
-            }
-        })
+    declarations(ctx, symbol).filter_map(|(id, flags)| flags.is_value().then_some(id))
 }
 
 pub(crate) struct ConstBindings<T> {
