@@ -82,3 +82,25 @@ fn an_attribute_too_long_to_read_is_reported() {
     let short = format!("{}[/*{}*/allow(dead_code)]", '#', "y".repeat(50));
     assert_eq!(run(registry(), [("a.rs", short.as_bytes())])[0].note, None);
 }
+
+#[test]
+fn a_directive_too_long_to_read_is_reported() {
+    let pad = "y".repeat(5000);
+    for (path, text) in [
+        (
+            "a.c",
+            format!("#pragma GCC /*{pad}*/ diagnostic ignored \"-Wunused\"\n"),
+        ),
+        ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
+    ] {
+        let found = run(registry(), [(path, text.as_bytes())]);
+        assert_eq!(found.len(), 1, "{path}");
+        assert_eq!(
+            found[0].note.as_deref(),
+            Some("directive too long to read"),
+            "{path}"
+        );
+    }
+    // A comment that never closes before the end of the file hides nothing.
+    assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
+}

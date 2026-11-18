@@ -201,8 +201,11 @@ fn reach(text: &str) -> &str {
     &text[..text.floor_char_boundary(4096)]
 }
 
+// The text ran out, or ran past the window, before it could be read.
+struct End;
+
 // A C compiler joins a line ending in a backslash to the next one, and reads a comment as a space, before it reads a pragma.
-fn skip(mut text: &str, gaps: bool) -> &str {
+fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
     loop {
         let mut rest = ["\\\n", "\\\r\n", "??/\n", "??/\r\n"]
             .iter()
@@ -211,47 +214,57 @@ fn skip(mut text: &str, gaps: bool) -> &str {
         if gaps {
             // The tools read a byte order mark as whitespace too.
             rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-            if let Some(inner) = rest.strip_prefix("/*")
-                && let Some(end) = reach(inner).find("*/")
-            {
-                rest = &inner[end + 2..];
+            if let Some(inner) = rest.strip_prefix("/*") {
+                let window = reach(inner);
+                match window.find("*/") {
+                    Some(end) => rest = &inner[end + 2..],
+                    // A comment that closes past the window could hide the rest of a directive.
+                    None if window.len() < inner.len() => return Err(End),
+                    None => {}
+                }
             }
         }
         if rest.len() == text.len() {
-            return text;
+            return Ok(text);
         }
         text = rest;
     }
 }
 
-fn matches(text: &str, pattern: &str) -> bool {
+fn matches(text: &str, pattern: &str) -> Result<bool, End> {
     let mut rest = text;
     let mut tokens = pattern.chars();
     while let Some(token) = tokens.next() {
         if token == '*' {
-            let line = reach(rest).split('\n').next().unwrap_or(rest);
-            return line
-                .char_indices()
-                .any(|(at, _)| matches(&rest[at..], tokens.as_str()));
+            let window = reach(rest);
+            let line = window.split('\n').next().unwrap_or(window);
+            for (at, _) in line.char_indices() {
+                if matches(&rest[at..], tokens.as_str())? {
+                    return Ok(true);
+                }
+            }
+            // A line that runs past the window could hold the rest of a directive.
+            return if line.len() < rest.len() && line.len() == window.len() {
+                Err(End)
+            } else {
+                Ok(false)
+            };
         }
         let gaps = matches!(token, '~' | ' ');
-        let after = skip(rest, gaps);
+        let after = skip(rest, gaps)?;
         if token == ' ' && after.len() == rest.len() {
-            return false;
+            return Ok(false);
         }
         rest = after;
         if !gaps {
             let Some(after) = rest.strip_prefix(token) else {
-                return false;
+                return Ok(false);
             };
             rest = after;
         }
     }
-    true
+    Ok(true)
 }
-
-// The text ran out before the attribute could be read.
-struct End;
 
 // Whitespace and comments may sit between any two tokens of an attribute.
 fn trivia(mut text: &str) -> Result<&str, End> {
@@ -507,11 +520,19 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
     }
     let patterns: Vec<_> = listed(kind).collect();
     for (offset, first) in text.char_indices() {
-        if patterns
-            .iter()
-            .any(|p| p.starts_with(first) && matches(&text[offset..], p))
-        {
-            hits.report(origin.get(offset).copied().unwrap_or(offset), None);
+        let mut found = None;
+        for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
+            match matches(&text[offset..], pattern) {
+                Ok(true) => {
+                    found = Some(None);
+                    break;
+                }
+                Ok(false) => {}
+                Err(End) => found = Some(Some("directive too long to read")),
+            }
+        }
+        if let Some(note) = found {
+            hits.report(origin.get(offset).copied().unwrap_or(offset), note);
         }
     }
 }
