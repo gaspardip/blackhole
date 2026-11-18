@@ -43,7 +43,14 @@ fn signature(kind: AstKind<'_>) -> Option<Signature<'_>> {
 fn local_function<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Signature<'a>> {
     let mut callee = expr.get_inner_expression();
     if let Expression::Identifier(id) = callee {
-        let kind = ctx.semantic.nodes().kind(declaration(ctx, id)?);
+        let scoping = ctx.semantic.scoping();
+        let symbol = super::function_types::bindings::symbol(ctx, id)?;
+        let mut declarations = scoping.symbol_declarations(symbol);
+        let declaration = declarations.next()?;
+        if declarations.next().is_some() {
+            return None;
+        }
+        let kind = ctx.semantic.nodes().kind(declaration);
         if let AstKind::VariableDeclarator(v) = kind {
             callee = v.init.as_ref()?.get_inner_expression();
         } else {
@@ -124,6 +131,7 @@ fn guard_argument<'a>(
                     v.type_annotation.as_ref()
                 }
                 AstKind::FormalParameter(p) => p.type_annotation.as_ref(),
+                AstKind::FormalParameterRest(p) => p.type_annotation.as_ref(),
                 _ => None,
             };
             annotation.map_or(Continue(()), |a| {

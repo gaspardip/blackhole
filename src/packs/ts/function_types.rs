@@ -2,23 +2,41 @@ pub(super) mod bindings;
 pub(super) mod expressions;
 use oxc::ast::{
     AstKind,
-    ast::{BindingPattern, TSType, TSTypeAnnotation, TSTypePredicateName},
+    ast::{TSType, TSTypeAnnotation, TSTypePredicateName},
 };
 pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSUnknownKeyword(_) => true,
-        TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
-        _ => false,
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match unparen(ty) {
+            TSType::TSUnknownKeyword(_) => return true,
+            TSType::TSUnionType(n) => pending.extend(&n.types),
+            _ => {}
+        }
     }
+    false
 }
 
-pub(super) fn parameter(kind: AstKind<'_>) -> Option<(&BindingPattern<'_>, &TSType<'_>)> {
-    let (p, a) = match kind {
-        AstKind::FormalParameter(p) => (&p.pattern, p.type_annotation.as_ref()?),
-        AstKind::FormalParameterRest(p) => (&p.rest.argument, p.type_annotation.as_ref()?),
+pub(super) fn unparen<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
+    while let TSType::TSParenthesizedType(p) = ty {
+        ty = &p.type_annotation;
+    }
+    ty
+}
+
+pub(super) fn parameter(kind: AstKind<'_>) -> Option<(Option<&str>, &TSType<'_>)> {
+    let (name, a) = match kind {
+        AstKind::FormalParameter(p) => (
+            p.pattern.get_identifier_name().map(|i| i.as_str()),
+            p.type_annotation.as_ref()?,
+        ),
+        AstKind::FormalParameterRest(p) => (
+            p.rest.argument.get_identifier_name().map(|i| i.as_str()),
+            p.type_annotation.as_ref()?,
+        ),
+        AstKind::TSThisParameter(p) => (Some("this"), p.type_annotation.as_ref()?),
         _ => return None,
     };
-    Some((p, &a.type_annotation))
+    Some((name, unparen(&a.type_annotation)))
 }
 
 pub(super) fn returns(kind: AstKind<'_>) -> Option<&TSTypeAnnotation<'_>> {

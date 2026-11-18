@@ -13,11 +13,10 @@ pub(crate) const RULE: Rule = Rule {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
     for (id, n) in nodes.iter_enumerated() {
-        let Some((pattern, ty)) = parameter(n.kind()) else {
+        let Some((name, ty)) = parameter(n.kind()) else {
             continue;
         };
-        let name = pattern.get_identifier_name();
-        if !contains_unknown(ty) || name.is_some_and(|n| n == "cause") {
+        if !contains_unknown(ty) || name == Some("cause") {
             continue;
         }
         let owner = nodes.parent_kind(nodes.parent_id(id));

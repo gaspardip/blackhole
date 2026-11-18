@@ -15,7 +15,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if let Some(a) = returns(n.kind())
             && unknown_return(ctx, &a.type_annotation)
         {
-            findings.report(a.type_annotation.span().start as usize, None);
+            findings.report(
+                super::function_types::unparen(&a.type_annotation)
+                    .span()
+                    .start as usize,
+                None,
+            );
         }
     }
 }

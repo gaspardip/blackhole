@@ -158,6 +158,12 @@ const CASES: &[Case] = &[
         snippet: "function run<T extends Record<string, unknown>>(input: T): T { return input; }",
         reporting: "ts/no-explicit-return-types",
     },
+    Case {
+        silent: "ts/no-known-value-widening",
+        path: "overload.ts",
+        snippet: "function guard(value: unknown): value is string;\nfunction guard(value: unknown, mode: 'boolean'): boolean;\nfunction guard(value: unknown, mode?: 'boolean') { return true; }\nguard('x', 'boolean');",
+        reporting: "ts/no-unknown-parameters",
+    },
 ];
 
 #[test]

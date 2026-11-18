@@ -69,7 +69,7 @@ fn optional_never_property(member: &TSSignature<'_>) -> bool {
 
 fn transparent<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
     loop {
-        ty = ty.without_parenthesized();
+        ty = super::function_types::unparen(ty);
         ty = match ty {
             TSType::TSTypeOperatorType(n) if n.operator == TSTypeOperatorOperator::Readonly => {
                 &n.type_annotation
@@ -144,7 +144,8 @@ impl<'a> Resolution<'a> {
             .map_or(&[][..], |p| p.params.as_slice());
         let scopes = ctx.semantic.scoping();
         if let Some(symbol) = super::function_types::bindings::symbol(ctx, name) {
-            let id = scopes.symbol_declaration(symbol);
+            let id = super::function_types::bindings::type_declaration(ctx, symbol)
+                .unwrap_or_else(|| scopes.symbol_declaration(symbol));
             if !self.visiting.insert(id) {
                 return Class::None;
             }
@@ -154,7 +155,16 @@ impl<'a> Resolution<'a> {
                 match ctx.semantic.nodes().kind(id) {
                     AstKind::TSInterfaceDeclaration(i)
                         if query == Query::Value
-                            && scopes.symbol_declarations(symbol).count() == 1
+                            && scopes
+                                .symbol_declarations(symbol)
+                                .filter(|id| {
+                                    matches!(
+                                        ctx.semantic.nodes().kind(*id),
+                                        AstKind::TSInterfaceDeclaration(_)
+                                    )
+                                })
+                                .count()
+                                == 1
                             && i.extends.is_empty()
                             && empty(&i.body.body) =>
                     {

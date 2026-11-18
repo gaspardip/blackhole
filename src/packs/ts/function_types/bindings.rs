@@ -25,6 +25,18 @@ pub(crate) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> O
     )
 }
 
+pub(crate) fn type_declaration(ctx: &TsCtx<'_>, symbol: SymbolId) -> Option<NodeId> {
+    ctx.semantic
+        .scoping()
+        .symbol_declarations(symbol)
+        .find(|id| {
+            matches!(
+                ctx.semantic.nodes().kind(*id),
+                AstKind::TSTypeAliasDeclaration(_) | AstKind::TSInterfaceDeclaration(_)
+            )
+        })
+}
+
 #[derive(Default)]
 pub(crate) struct ConstBindings(HashMap<SymbolId, bool>);
 impl ConstBindings {

@@ -26,13 +26,16 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-fn reference<'a>(ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
-    let TSType::TSTypeReference(r) = ty.without_parenthesized() else {
+fn reference<'a>(ctx: &TsCtx<'_>, ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
+    let TSType::TSTypeReference(r) = super::function_types::unparen(ty) else {
         return None;
     };
     let TSTypeName::IdentifierReference(id) = &r.type_name else {
         return None;
     };
+    if symbol(ctx, id).is_some() {
+        return None;
+    }
     Some((
         id.name.as_str(),
         r.type_arguments
@@ -43,49 +46,60 @@ fn reference<'a>(ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
 
 fn top(ty: &TSType<'_>) -> bool {
     matches!(
-        ty.without_parenthesized(),
+        super::function_types::unparen(ty),
         TSType::TSUnknownKeyword(_) | TSType::TSAnyKeyword(_)
     )
 }
 
-fn broad_key(ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSSymbolKeyword(_) => {
-            true
+fn broad_key(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
+    let mut pending = vec![ty];
+    while let Some(key) = pending.pop() {
+        match super::function_types::unparen(key) {
+            TSType::TSStringKeyword(_)
+            | TSType::TSNumberKeyword(_)
+            | TSType::TSSymbolKeyword(_) => {}
+            TSType::TSUnionType(n) => pending.extend(&n.types),
+            _ if matches!(reference(ctx, key), Some(("PropertyKey", _))) => {}
+            _ => return false,
         }
-        TSType::TSUnionType(n) => n.types.iter().all(broad_key),
-        _ => matches!(reference(ty), Some(("PropertyKey", _))),
     }
+    true
 }
 
-fn broad_index(member: &TSSignature<'_>) -> bool {
+fn broad_index(ctx: &TsCtx<'_>, member: &TSSignature<'_>) -> bool {
     let TSSignature::TSIndexSignature(index) = member else {
         return false;
     };
-    broad_key(&index.parameter.type_annotation.type_annotation)
+    broad_key(ctx, &index.parameter.type_annotation.type_annotation)
         && top(&index.type_annotation.type_annotation)
 }
 
-fn broad_record(ty: &TSType<'_>) -> bool {
-    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
-        return matches!(n.members.as_slice(), [member] if broad_index(member));
+fn broad_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
+    let mut ty = ty;
+    while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
+        ty = inner;
     }
-    match reference(ty) {
-        Some(("Readonly", [inner, ..])) => broad_record(inner),
-        Some(("Record", [key, value])) => broad_key(key) && top(value),
+    if let TSType::TSTypeLiteral(n) = super::function_types::unparen(ty) {
+        return matches!(n.members.as_slice(), [member] if broad_index(ctx, member));
+    }
+    match reference(ctx, ty) {
+        Some(("Record", [key, value])) => broad_key(ctx, key) && top(value),
         _ => false,
     }
 }
 
-fn narrow_record(ty: &TSType<'_>) -> bool {
-    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
+fn narrow_record(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> bool {
+    let mut ty = ty;
+    while let Some(("Readonly", [inner, ..])) = reference(ctx, ty) {
+        ty = inner;
+    }
+    if let TSType::TSTypeLiteral(n) = super::function_types::unparen(ty) {
         return n
             .members
             .iter()
             .any(|m| !matches!(m, TSSignature::TSIndexSignature(_)));
     }
-    match reference(ty) {
-        Some(("Readonly", [inner, ..])) => narrow_record(inner),
+    match reference(ctx, ty) {
         Some(("Record", [_, value])) => !top(value),
         _ => false,
     }
@@ -98,31 +112,38 @@ enum Broad {
     Record,
 }
 
-fn broad(ty: &TSType<'_>) -> Option<Broad> {
+fn broad(ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Option<Broad> {
     if top(ty) {
         Some(Broad::Top)
-    } else if matches!(ty.without_parenthesized(), TSType::TSObjectKeyword(_)) {
+    } else if matches!(
+        super::function_types::unparen(ty),
+        TSType::TSObjectKeyword(_)
+    ) {
         Some(Broad::Object)
     } else {
-        broad_record(ty).then_some(Broad::Record)
+        broad_record(ctx, ty).then_some(Broad::Record)
     }
 }
 
 fn object(ty: &TSType<'_>) -> bool {
-    match ty.without_parenthesized() {
-        TSType::TSArrayType(_)
-        | TSType::TSConstructorType(_)
-        | TSType::TSFunctionType(_)
-        | TSType::TSMappedType(_)
-        | TSType::TSObjectKeyword(_)
-        | TSType::TSTupleType(_) => true,
-        TSType::TSTypeLiteral(n) => !n.members.is_empty(),
-        TSType::TSIntersectionType(n) => n.types.iter().all(object),
-        TSType::TSTypeOperatorType(n) => {
-            n.operator == TSTypeOperatorOperator::Readonly && object(&n.type_annotation)
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match super::function_types::unparen(ty) {
+            TSType::TSArrayType(_)
+            | TSType::TSConstructorType(_)
+            | TSType::TSFunctionType(_)
+            | TSType::TSMappedType(_)
+            | TSType::TSObjectKeyword(_)
+            | TSType::TSTupleType(_) => {}
+            TSType::TSTypeLiteral(n) if !n.members.is_empty() => {}
+            TSType::TSIntersectionType(n) => pending.extend(&n.types),
+            TSType::TSTypeOperatorType(n) if n.operator == TSTypeOperatorOperator::Readonly => {
+                pending.push(&n.type_annotation);
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    true
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
@@ -155,7 +176,7 @@ fn evidence<'a>(
         |expr| {
             let value = expr.without_parentheses();
             if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
-                return Break(broad(ty).is_none().then_some(Evidence::Annotated(ty)));
+                return Break(broad(ctx, ty).is_none().then_some(Evidence::Annotated(ty)));
             }
             if let Expression::Identifier(i) = value {
                 Continue(i)
@@ -182,7 +203,7 @@ fn evidence<'a>(
             };
             match annotation {
                 Some(a) => Break(
-                    broad(&a.type_annotation)
+                    broad(ctx, &a.type_annotation)
                         .is_none()
                         .then_some(Evidence::Annotated(&a.type_annotation)),
                 ),
@@ -193,12 +214,12 @@ fn evidence<'a>(
 }
 
 fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSType<'_>) -> bool {
-    if broad(target).is_some() {
+    if broad(ctx, target).is_some() {
         return false;
     }
     if let Evidence::Annotated(old) = original {
         let normalized = |ty: &TSType<'_>| {
-            ty.without_parenthesized()
+            super::function_types::unparen(ty)
                 .span()
                 .source_text(ctx.text)
                 .split_whitespace()
@@ -211,7 +232,7 @@ fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSTyp
     match kind {
         Broad::Top => true,
         Broad::Object => object(target),
-        Broad::Record => narrow_record(target),
+        Broad::Record => narrow_record(ctx, target),
     }
 }
 
@@ -244,11 +265,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             continue;
         };
         let asserted = assertion(nodes.kind(init.without_parentheses().node_id()))
-            .and_then(|(e, t)| Some((e, broad(t)?)));
+            .and_then(|(e, t)| Some((e, broad(ctx, t)?)));
         let Some(kind) = v
             .type_annotation
             .as_ref()
-            .and_then(|a| broad(&a.type_annotation))
+            .and_then(|a| broad(ctx, &a.type_annotation))
             .or_else(|| asserted.map(|(_, k)| k))
         else {
             continue;
