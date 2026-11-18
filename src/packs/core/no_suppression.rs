@@ -177,8 +177,6 @@ const ATTRIBUTES: &[&[&str]] = &[
     // Warn lowers a lint that the manifest denies; levels belong in the manifest.
     &["warn", "("],
     &["coverage", "(", "off"],
-    &["tarpaulin", "::", "skip"],
-    &["cfg", "(", "not", "(", "tarpaulin"],
 ];
 
 // The codecs that read ASCII text as it is written.
@@ -397,6 +395,19 @@ fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End>
                         }
                     }
                 }
+            }
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                let tail = chars
+                    .as_str()
+                    .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+                if matches!(
+                    &rest[..rest.len() - tail.len()],
+                    "tarpaulin" | "tarpaulin_include"
+                ) && !positions.contains(&start)
+                {
+                    positions.push(start);
+                }
+                chars = tail.chars();
             }
             _ => {}
         }
