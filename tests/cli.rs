@@ -14,6 +14,11 @@ fn repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    let out = git_output(dir, args);
+    assert!(out.status.success(), "{out:?}");
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new("git");
     // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
     for (name, _) in env::vars_os() {
@@ -21,14 +26,7 @@ fn git(dir: &Path, args: &[&str]) {
             command.env_remove(name);
         }
     }
-    assert!(
-        command
-            .current_dir(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success()
-    );
+    command.current_dir(dir).args(args).output().unwrap()
 }
 
 fn commit(root: &Path) {
@@ -820,10 +818,12 @@ fn configured_worktree_must_resolve_to_the_checkout() {
 #[cfg(unix)]
 fn program(root: &Path, marker: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
+    // Git hands the configured value to a shell, as the script does the marker.
+    let quoted = |path: &Path| format!("'{}'", path.to_str().unwrap().replace('\'', r"'\''"));
     let path = root.join(".git/program.sh");
-    fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    fs::write(&path, format!("#!/bin/sh\ntouch {}\n", quoted(marker))).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_str().unwrap().to_owned()
+    quoted(&path)
 }
 
 #[cfg(unix)]
@@ -836,6 +836,9 @@ fn a_configured_monitor_does_not_run() {
     fs::write(root.join("a.py"), "#noqa").unwrap();
     git(root, &["add", "a.py"]);
     git(root, &["config", "core.fsmonitor", &program(root, &marker)]);
+    // Plain git runs the program here, so a fixture that names it wrongly fails instead of passing.
+    git(root, &["ls-files", "-co", "--exclude-standard"]);
+    fs::remove_file(&marker).unwrap();
     check(root, &[], 1);
     assert!(!marker.exists());
 }
@@ -858,10 +861,16 @@ fn a_missing_object_is_not_fetched() {
     ] {
         git(root, &["config", key, value]);
     }
-    run(
+    // An id of the repository's own length, or git takes it for an abbreviation and never looks the object up.
+    let head = git_output(root, &["rev-parse", "HEAD"]).stdout;
+    let missing = "1".repeat(head.trim_ascii_end().len());
+    // Plain git runs the program here, so a fixture that names it wrongly fails instead of passing.
+    let fetched = git_output(
         root,
-        &["ci", "--base", &"1".repeat(40), "--head", "HEAD"],
-        2,
+        &["rev-parse", "--verify", &format!("{missing}^{{commit}}")],
     );
+    assert!(!fetched.status.success());
+    fs::remove_file(&marker).unwrap();
+    run(root, &["ci", "--base", &missing, "--head", "HEAD"], 2);
     assert!(!marker.exists());
 }
