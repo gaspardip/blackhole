@@ -32,3 +32,6 @@ A private list of names must never appear in this repository: file contents, fil
 
 Each rule needs a unique id, reject and accept fixtures, a root-cause fix and provenance.
 Run `BLACKHOLE_BLESS=1 ~/.agents/bin/heavy run -- cargo test --test fixtures` to update expectations, then review the diff.
+
+The ledger at `.blackhole/ledger` records existing findings by rule and path.
+Only `blackhole ledger` writes it. Allowances can only shrink.

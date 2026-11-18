@@ -142,3 +142,95 @@ fn invalid_path_is_an_error() {
     let message = check(dir.path(), &[], 2).stderr;
     assert_eq!(message, b"blackhole: path is not valid UTF-8: bad\\xff\n");
 }
+
+const HEADER: &str = "blackhole-ledger 1\n";
+const RULE: &str = "core/no-suppression";
+
+fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
+    fs::create_dir_all(dir.join(".blackhole")).unwrap();
+    let mut data = HEADER.to_owned();
+    for (path, n) in rows {
+        use std::fmt::Write;
+        writeln!(data, "{RULE}\t{n}\t{path}").unwrap();
+    }
+    fs::write(dir.join(".blackhole/ledger"), &data).unwrap();
+    data.into_bytes()
+}
+
+fn regenerate(dir: &Path, code: i32) -> Vec<u8> {
+    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(dir)
+        .arg("ledger")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(code), "{out:?}");
+    assert_eq!(out.stderr, b"");
+    out.stdout
+}
+
+#[test]
+fn ledger_exact_and_over() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    let expected = check(root, &[], 1).stdout;
+    baseline(root, &[("a.py", 2)]);
+    assert_eq!(check(root, &[], 0).stdout, b"");
+    let before = baseline(root, &[("a.py", 1)]);
+    assert_eq!(check(root, &[], 1).stdout, expected);
+    assert_eq!(regenerate(root, 1), expected);
+    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+}
+
+#[test]
+fn stale_and_deleted_entries_shrink() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::write(root.join("b.py"), "").unwrap();
+    baseline(root, &[("a.py", 2), ("gone.py", 1)]);
+    assert_eq!(check(root,&[],1).stdout,format!("a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\ngone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n").as_bytes());
+    assert_eq!(check(root, &["b.py"], 0).stdout, b"");
+    assert_eq!(regenerate(root, 0), b"");
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
+    );
+    assert_eq!(check(root, &[], 0).stdout, b"");
+}
+
+#[test]
+fn absent_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    assert_eq!(regenerate(root, 0), b"");
+    for path in ["a\tb.py", "a\nb.py"] {
+        fs::write(root.join(path), "#noqa").unwrap();
+    }
+    assert_eq!(regenerate(root, 1), check(root, &[], 1).stdout);
+    assert!(!root.join(".blackhole/ledger").exists());
+}
+
+#[test]
+fn invalid_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    baseline(root, &[]);
+    let path = root.join(".blackhole/ledger");
+    fs::write(&path, b"invalid").unwrap();
+    check(root, &[], 2);
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    check(root, &[], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    fs::write(root.join("target"), HEADER).unwrap();
+    std::os::unix::fs::symlink("../target", root.join(".blackhole/ledger")).unwrap();
+    check(root, &[], 2);
+}
