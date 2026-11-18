@@ -31,8 +31,8 @@ fn same(ctx: &TsCtx<'_>, left: &MemberExpression<'_>, right: &MemberExpression<'
             return first.name == second.name && symbol(ctx, first) == symbol(ctx, second);
         }
         let (Some(first), Some(second)) = (
-            left_object.as_member_expression(),
-            right_object.as_member_expression(),
+            left_object.get_member_expr(),
+            right_object.get_member_expr(),
         ) else {
             return false;
         };
@@ -73,7 +73,7 @@ fn delegates(ctx: &TsCtx<'_>, f: &Function<'_>, original: SymbolId) -> bool {
         let inv = invoked(ctx, call);
         if inv
             .callee
-            .as_member_expression()
+            .get_member_expr()
             .is_some_and(|m| arg_id(m.object()))
             || (inv.path.as_ref().is_some_and(|p| {
                 matches!(
@@ -113,7 +113,7 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for node in ctx.semantic.nodes().iter() {
         match node.kind() {
             AstKind::VariableDeclarator(v) => {
-                if let Some(m) = v.init.as_ref().and_then(Expression::as_member_expression)
+                if let Some(m) = v.init.as_ref().and_then(Expression::get_member_expr)
                     && let Some(id) =
                         v.id.get_binding_identifier()
                             .and_then(|b| b.symbol_id.get())

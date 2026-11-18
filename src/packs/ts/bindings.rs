@@ -30,7 +30,7 @@ pub(super) fn contains_function(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bo
                 return true;
             }
             Expression::CallExpression(c) => {
-                if let Some(m) = resolve(ctx, &c.callee).as_member_expression()
+                if let Some(m) = resolve(ctx, &c.callee).get_member_expr()
                     && member_key(ctx, m) == Some("bind")
                     && !matches!(resolve(ctx, m.object()), Expression::ObjectExpression(_))
                 {
@@ -64,7 +64,7 @@ fn binding(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
         if !seen.insert(e.span()) {
             return false;
         }
-        if let Some(m) = e.as_member_expression() {
+        if let Some(m) = e.get_member_expr() {
             e = m.object();
             continue;
         }

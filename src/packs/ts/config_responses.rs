@@ -75,7 +75,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                     pending.extend(invocation.arg(0));
                 }
                 if matches!(kinds, ResponseKinds::WithMsw)
-                    && let Some(m) = callee.as_member_expression()
+                    && let Some(m) = callee.get_member_expr()
                     && super::values::path(ctx, m.object())
                         .is_some_and(|p| p == ["msw", "HttpResponse"])
                     && matches!(
@@ -95,7 +95,7 @@ fn raw_response(ctx: &TsCtx<'_>, value: &Expression<'_>, kinds: ResponseKinds) -
                 {
                     return true;
                 }
-                if let Some(member) = callee.as_member_expression()
+                if let Some(member) = callee.get_member_expr()
                     && matches!(
                         member
                             .static_property_name()

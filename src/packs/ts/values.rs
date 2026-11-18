@@ -134,7 +134,7 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
         if !seen.insert(expr.span()) {
             return None;
         }
-        if let Some(member) = expr.as_member_expression() {
+        if let Some(member) = expr.get_member_expr() {
             parts.push(member_key(ctx, member)?);
             expr = member.object();
             continue;

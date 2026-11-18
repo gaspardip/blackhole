@@ -93,16 +93,19 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = node.kind() else {
             continue;
         };
-        let Expression::StaticMemberExpression(m) = &c.callee else {
+        let Some(m) = c.callee.get_member_expr() else {
             continue;
         };
-        let kind = match &m.object {
+        let kind = match m.object().get_inner_expression() {
             Expression::Identifier(id) => symbol(ctx, id).and_then(|s| factories.get(&s).copied()),
             other => factory(ctx, other),
         };
         if matches!(
-            (kind, m.property.name.as_str()),
-            (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
+            (
+                kind,
+                m.static_property_name().and_then(oxc::str::JSStr::as_str)
+            ),
+            (Some(Factory::Server), Some("listen")) | (Some(Factory::Worker), Some("start"))
         ) && !strict(c.arguments.first().and_then(|a| a.as_expression()))
         {
             findings.report(c.span.start as usize, None);

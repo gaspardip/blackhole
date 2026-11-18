@@ -68,7 +68,7 @@ fn page(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
             Expression::AwaitExpression(a) => pending.push(&a.argument),
             Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
             Expression::CallExpression(c) => {
-                if let Some(m) = invoked(ctx, c).callee.as_member_expression()
+                if let Some(m) = invoked(ctx, c).callee.get_member_expr()
                     && matches!(
                         member_key(ctx, m),
                         Some(
@@ -104,7 +104,7 @@ fn route(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
         return false;
     };
     call.callee
-        .as_member_expression()
+        .get_member_expr()
         .is_some_and(|m| member_key(ctx, m) == Some("route") && page(ctx, m.object()))
 }
 pub(super) fn canned(ctx: &TsCtx<'_>, receiver: &Expression<'_>, arg: &Expression<'_>) -> bool {

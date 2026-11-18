@@ -75,7 +75,7 @@ fn hono(ctx: &TsCtx<'_>, initial: &Expression<'_>) -> bool {
                 Expression::CallExpression(c) => {
                     if let Some(m) = super::double_mutations::invoked(ctx, c)
                         .callee
-                        .as_member_expression()
+                        .get_member_expr()
                         && matches!(
                             super::values::member_key(ctx, m),
                             Some(
@@ -193,14 +193,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             continue;
         }
         if test_code
-            && let Some(m) = invocation.callee.as_member_expression()
+            && let Some(m) = invocation.callee.get_member_expr()
             && super::values::member_key(ctx, m) == Some("fulfill")
             && let Some(arg) = invocation.arg(0)
             && super::playwright::canned(ctx, m.object(), arg)
         {
             findings.report(call.span.start as usize, None);
         }
-        let Some(member) = call.callee.as_member_expression() else {
+        let Some(member) = call.callee.get_member_expr() else {
             continue;
         };
         let Some(method) = member
@@ -217,7 +217,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             check_bindings(ctx, value, &mut reported, findings);
         }
         if matches!(method, "mock" | "doMock" | "unstable_mockModule")
-            && let Expression::Identifier(id) = member.object()
+            && let Expression::Identifier(id) = member.object().get_inner_expression()
             && framework(ctx, id)
         {
             findings.report(call.span.start as usize, None);

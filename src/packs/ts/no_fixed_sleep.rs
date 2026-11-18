@@ -1,4 +1,4 @@
-use super::test_context::{direct_member, is_test, root, single_effect};
+use super::test_context::{is_test, root, single_effect};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
@@ -41,8 +41,9 @@ fn promise(n: &NewExpression<'_>) -> bool {
         return false;
     };
     if !(matches!(&c.callee,Expression::Identifier(id) if id.name=="setTimeout")
-        || direct_member(&c.callee, "window", "setTimeout")
-        || direct_member(&c.callee, "globalThis", "setTimeout"))
+        || c.callee.is_specific_member_access("window", "setTimeout")
+        || c.callee
+            .is_specific_member_access("globalThis", "setTimeout"))
     {
         return false;
     }
@@ -59,7 +60,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut timers = HashSet::new();
     for n in nodes.iter() {
         match n.kind() {
-            AstKind::CallExpression(c) if direct_member(&c.callee, "vi", "useFakeTimers") => return,
+            AstKind::CallExpression(c)
+                if c.callee.is_specific_member_access("vi", "useFakeTimers") =>
+            {
+                return;
+            }
             AstKind::ImportDeclaration(i)
                 if matches!(
                     i.source.value.as_str(),
@@ -84,8 +89,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let sleep = match &a.argument {
             Expression::NewExpression(n) => promise(n),
             Expression::CallExpression(c) => {
-                direct_member(&c.callee, "scheduler", "wait")
-                    || direct_member(&c.callee, "Bun", "sleep")
+                c.callee.is_specific_member_access("scheduler", "wait")
+                    || c.callee.is_specific_member_access("Bun", "sleep")
                     || matches!(&c.callee,Expression::Identifier(i) if timers.contains(i.name.as_str()))
             }
             _ => false,

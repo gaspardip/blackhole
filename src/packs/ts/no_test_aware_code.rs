@@ -4,8 +4,7 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            AssignmentTarget, AssignmentTargetProperty, BindingPattern, Expression,
-            MemberExpression, PropertyKey,
+            AssignmentTarget, AssignmentTargetProperty, BindingPattern, Expression, PropertyKey,
         },
     },
     span::{GetSpan, Span},
@@ -54,21 +53,13 @@ fn unbound_name(ctx: &TsCtx<'_>, e: &Expression<'_>, names: &[&str]) -> bool {
     };
     names.contains(&id.name.as_str()) && ctx.semantic.is_reference_to_global_variable(id)
 }
-fn member_through_chain<'a>(e: &'a Expression<'a>) -> Option<&'a MemberExpression<'a>> {
-    let e = e.get_inner_expression();
-    if let Expression::ChainExpression(c) = e {
-        c.expression.as_member_expression()
-    } else {
-        e.as_member_expression()
-    }
-}
 fn env<'a>(e: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    let m = member_through_chain(e)?;
+    let m = e.get_member_expr()?;
     (m.static_property_name()? == "env").then(|| m.object())
 }
 fn mode(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Span> {
     let e = e.get_inner_expression();
-    let m = member_through_chain(e)?;
+    let m = e.get_member_expr()?;
     let owner = env(m.object())?;
     let name = m.static_property_name()?.as_str()?;
     (marker(name, Marker::Mode)

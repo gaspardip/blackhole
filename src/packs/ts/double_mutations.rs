@@ -47,7 +47,7 @@ pub(super) fn writes(ctx: &TsCtx<'_>, node: AstKind<'_>) -> bool {
         },
         AstKind::UnaryExpression(u) if u.operator.is_delete() => u
             .argument
-            .as_member_expression()
+            .get_member_expr()
             .is_some_and(|m| protected_member(ctx, m)),
         _ => false,
     }
@@ -117,7 +117,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
             break (parts, native_path);
         }
         if let Expression::CallExpression(c) = callee
-            && let Some(m) = resolve(ctx, &c.callee).as_member_expression()
+            && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
             && member_key(ctx, m) == Some("bind")
         {
             args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
@@ -131,7 +131,7 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Invo
             callee = resolve(ctx, target);
             continue;
         }
-        let Some(m) = callee.as_member_expression() else {
+        let Some(m) = callee.get_member_expr() else {
             break (parts, native_path);
         };
         match member_key(ctx, m) {
@@ -177,7 +177,7 @@ pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
 }
 
 fn method<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<&'a str> {
-    if let Some(m) = callee.as_member_expression() {
+    if let Some(m) = callee.get_member_expr() {
         return member_key(ctx, m);
     }
     let Expression::Identifier(id) = callee else {

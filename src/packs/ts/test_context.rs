@@ -19,7 +19,7 @@ use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
 pub(super) fn root<'a>(mut e: &'a Expression<'a>) -> Option<&'a str> {
     loop {
         e = e.get_inner_expression();
-        if let Some(m) = e.as_member_expression() {
+        if let Some(m) = e.get_member_expr() {
             e = m.object();
             continue;
         }
@@ -34,17 +34,10 @@ pub(super) fn root<'a>(mut e: &'a Expression<'a>) -> Option<&'a str> {
 pub(super) fn is_test(name: &str) -> bool {
     matches!(name, "it" | "test" | "specify")
 }
-pub(super) fn direct_member(e: &Expression<'_>, receiver: &str, key: &str) -> bool {
-    let Expression::StaticMemberExpression(m) = e else {
-        return false;
-    };
-    m.property.name == key && matches!(&m.object,Expression::Identifier(id) if id.name==receiver)
-}
 pub(super) fn static_method(e: &Expression<'_>, names: &[&str]) -> bool {
-    let Expression::StaticMemberExpression(m) = e else {
-        return false;
-    };
-    names.contains(&m.property.name.as_str())
+    e.get_member_expr()
+        .and_then(oxc::ast::ast::MemberExpression::static_property_name)
+        .is_some_and(|key| names.iter().any(|name| key == *name))
 }
 fn single_statement<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Statement<'a>> {
     if !body.directives.is_empty() {
@@ -92,7 +85,7 @@ pub(super) fn chain_property(e: &Expression<'_>, wanted: impl Fn(&str) -> bool) 
     let mut current = e;
     loop {
         current = current.get_inner_expression();
-        if let Some(m) = current.as_member_expression() {
+        if let Some(m) = current.get_member_expr() {
             if let Some((span, key)) = m.static_property_info()
                 && key.as_str().is_some_and(&wanted)
             {

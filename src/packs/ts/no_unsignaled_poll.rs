@@ -1,4 +1,4 @@
-use super::test_context::{direct_member, single_value};
+use super::test_context::single_value;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{AstKind, ast::Expression};
 pub(crate) const RULE: Rule = Rule {
@@ -12,30 +12,16 @@ fn recorder(mut e: &Expression<'_>) -> Option<bool> {
     let mut first = true;
     let mut reads = false;
     loop {
-        if let Expression::ChainExpression(c) = e
-            && let Some(m) = c.expression.as_member_expression()
-        {
-            let name = m.static_property_name();
-            if name.is_some_and(|s| s == "current") {
+        if let Some(m) = e.get_member_expr() {
+            let name = m.static_property_name().and_then(oxc::str::JSStr::as_str);
+            if name == Some("current") {
                 return None;
             }
-            reads |= name.is_some_and(|s| s == "mock" || first && (s == "length" || s == "size"));
-            e = m.object();
-            first = false;
-            continue;
-        }
-        if let Some(m) = e.as_member_expression() {
-            if let Expression::StaticMemberExpression(p) = e {
-                let name = p.property.name.as_str();
-                if name == "current" {
-                    return None;
-                }
-                reads |= name == "mock" || first && matches!(name, "length" | "size");
-            }
+            reads |= name == Some("mock") || first && matches!(name, Some("length" | "size"));
             e = m.object();
             first = false;
         } else {
-            return match e {
+            return match e.get_inner_expression() {
                 Expression::Identifier(id) if id.name != "current" => {
                     Some(reads || id.name == "mock")
                 }
@@ -48,13 +34,14 @@ fn assertion(e: &Expression<'_>) -> bool {
     let Expression::CallExpression(c) = e else {
         return false;
     };
-    let Expression::StaticMemberExpression(m) = &c.callee else {
+    let Some(m) = c.callee.get_member_expr() else {
         return false;
     };
-    let subject = match &m.object {
-        Expression::StaticMemberExpression(n) if n.property.name == "not" => &n.object,
-        other => other,
-    };
+    let object = m.object().get_inner_expression();
+    let subject = object
+        .get_member_expr()
+        .filter(|n| n.static_property_name().is_some_and(|s| s == "not"))
+        .map_or(object, |n| n.object().get_inner_expression());
     let Expression::CallExpression(call) = subject else {
         return false;
     };
@@ -68,7 +55,9 @@ fn assertion(e: &Expression<'_>) -> bool {
         .is_some_and(|reads| {
             reads
                 || matches!(
-                    m.property.name.as_str(),
+                    m.static_property_name()
+                        .and_then(oxc::str::JSStr::as_str)
+                        .unwrap_or(""),
                     "toHaveLength"
                         | "toHaveBeenCalled"
                         | "toHaveBeenCalledOnce"
@@ -96,8 +85,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let AstKind::CallExpression(c) = n.kind() else {
             continue;
         };
-        let poll = direct_member(&c.callee, "expect", "poll");
-        if !poll && !direct_member(&c.callee, "vi", "waitFor") {
+        let poll = c.callee.is_specific_member_access("expect", "poll");
+        if !poll && !c.callee.is_specific_member_access("vi", "waitFor") {
             continue;
         }
         let Some(value) = c
@@ -112,7 +101,26 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if reads == Some(true)
             || poll
                 && reads.is_some()
-                && matches!(nodes.parent_kind(id),AstKind::StaticMemberExpression(m) if m.property.name=="toHaveLength")
+                && nodes
+                    .ancestors(id)
+                    .find(|n| {
+                        !matches!(
+                            n.kind(),
+                            AstKind::ParenthesizedExpression(_)
+                                | AstKind::ChainExpression(_)
+                                | AstKind::TSAsExpression(_)
+                                | AstKind::TSSatisfiesExpression(_)
+                                | AstKind::TSNonNullExpression(_)
+                                | AstKind::TSTypeAssertion(_)
+                        )
+                    })
+                    .is_some_and(|n| match n.kind() {
+                        AstKind::StaticMemberExpression(m) => m.property.name == "toHaveLength",
+                        AstKind::ComputedMemberExpression(m) => m
+                            .static_property_name()
+                            .is_some_and(|s| s == "toHaveLength"),
+                        _ => false,
+                    })
             || !poll && assertion(value)
         {
             findings.report(c.span.start as usize, None);

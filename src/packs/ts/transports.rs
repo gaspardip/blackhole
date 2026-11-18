@@ -181,7 +181,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             }
             arguments(ctx, symbol, &mut next);
         }
-        if let Some(m) = e.as_member_expression()
+        if let Some(m) = e.get_member_expr()
             && let Some(k) = super::values::member_key(ctx, m)
         {
             pending.push(Step::Visit(m.object(), Some(paths.push(fields, k))));

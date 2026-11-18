@@ -28,12 +28,17 @@ fn focused_or_skipped(e: &Expression<'_>) -> bool {
     )
 }
 fn body_skip(e: &Expression<'_>) -> Option<usize> {
-    match e {
-        Expression::StaticMemberExpression(m)
-            if matches!(&m.object, Expression::ThisExpression(_)) && m.property.name == "skip" =>
-        {
-            Some(m.property.span.start as usize)
-        }
+    if let Some(member) = e.get_member_expr()
+        && matches!(
+            member.object().get_inner_expression(),
+            Expression::ThisExpression(_)
+        )
+        && let Some((span, name)) = member.static_property_info()
+        && name == "skip"
+    {
+        return Some(span.start as usize);
+    }
+    match e.get_inner_expression() {
         Expression::Identifier(i) if i.name == "pending" => Some(i.span.start as usize),
         _ => None,
     }
