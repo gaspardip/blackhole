@@ -336,7 +336,7 @@ fn rust(text: &str, hits: &mut Findings) {
         let rest = &text[start + 1..];
         let window = reach(rest);
         if attribute(start, window, hits).is_err() && window.len() < rest.len() {
-            hits.report(start, Some("attribute too long to read"));
+            hits.report(start, Some("directive too long to read"));
         }
     }
 }
@@ -346,28 +346,23 @@ fn attribute(start: usize, window: &str, hits: &mut Findings) -> Result<(), End>
     let Some(body) = tokens(after.strip_prefix('!').unwrap_or(after), &["["])? else {
         return Ok(());
     };
+    let conditional = tokens(body, &["cfg_attr", "("])?.is_some();
+    let mut positions = Vec::new();
     if suppresses(body)? {
-        hits.report(start, None);
-    } else if let Some(arguments) = tokens(body, &["cfg_attr", "("])? {
-        conditional(start + 1, window, arguments, hits)?;
+        positions.push(start);
     }
-    Ok(())
-}
-
-// `window` starts at byte `base` of the file and `arguments` is its tail after the opening parenthesis.
-fn conditional(base: usize, window: &str, arguments: &str, hits: &mut Findings) -> Result<(), End> {
     let mut depth = 1;
-    let mut rest = arguments;
+    let mut rest = body;
     while depth > 0 {
         rest = trivia(rest)?;
         let mut chars = rest.chars();
         match chars.next() {
-            Some('(') => depth += 1,
-            Some(')') => depth -= 1,
-            Some(',') => {
+            Some('[') => depth += 1,
+            Some(']') => depth -= 1,
+            Some(',') if conditional => {
                 let item = trivia(chars.as_str())?;
                 if suppresses(item)? {
-                    hits.report(base + window.len() - item.len(), None);
+                    positions.push(start + 1 + window.len() - item.len());
                 }
             }
             Some('\'') => {
@@ -406,6 +401,9 @@ fn conditional(base: usize, window: &str, arguments: &str, hits: &mut Findings) 
             _ => {}
         }
         rest = chars.as_str();
+    }
+    for position in positions {
+        hits.report(position, None);
     }
     Ok(())
 }

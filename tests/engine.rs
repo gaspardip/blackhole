@@ -78,7 +78,7 @@ fn an_attribute_too_long_to_read_is_reported() {
     let found = run(registry(), [("a.rs", text.as_bytes())]);
     assert_eq!(found.len(), 1);
     assert_eq!((found[0].line, found[0].col), (1, 1));
-    assert_eq!(found[0].note.as_deref(), Some("attribute too long to read"));
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
     let short = format!("{}[/*{}*/allow(dead_code)]", '#', "y".repeat(50));
     assert_eq!(run(registry(), [("a.rs", short.as_bytes())])[0].note, None);
 }
@@ -139,4 +139,12 @@ fn c_splices_inside_directive_tokens() {
             "{splice:?}"
         );
     }
+}
+
+#[test]
+fn window_cut_inside_attribute_token() {
+    let text = format!("{}[{}allow(dead_code)]", '#', " ".repeat(4091));
+    let found = run(registry(), [("x.rs", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
 }
