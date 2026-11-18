@@ -17,6 +17,7 @@ import traceback
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
@@ -24,7 +25,17 @@ MIN_LENGTH = 4
 ZERO = re.compile(r"0+")
 SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 GITLINK = "160000"
-RAW = ("--raw", "-z", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
+TREE = "040000"
+# `-t` lists directories as well, because an empty one has no file to carry its name.
+RAW = ("--raw", "-z", "-t", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
+LIST = ("ls-tree", "-r", "-t", "-z")
+# The `types` of the workflow. Any other action means the two files disagree.
+ACTIONS = {
+    "pull_request_target": {"opened", "edited", "reopened", "synchronize"},
+    "issues": {"opened", "edited"},
+    "issue_comment": {"created", "edited"},
+    "release": {"created", "edited", "published"},
+}
 WRITERS = frozenset({"OWNER", "COLLABORATOR"})
 STRANGERS = frozenset(
     {"CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "MEMBER", "NONE"}
@@ -105,12 +116,6 @@ def by_writer(payload: dict[str, Any], item: dict[str, Any]) -> bool:
     return association in WRITERS
 
 
-def edited_by_another(payload: dict[str, Any], item: dict[str, Any]) -> bool:
-    return payload.get("action") == "edited" and string(payload["sender"]["login"]) != string(
-        item["user"]["login"]
-    )
-
-
 def load_event() -> tuple[str, dict[str, Any]]:
     name = os.environ.get("GITHUB_EVENT_NAME")
     path = os.environ.get("GITHUB_EVENT_PATH")
@@ -137,7 +142,7 @@ def diff_entries(raw: bytes) -> list[Entry]:
 
 
 def tree_entries(raw: bytes) -> list[Entry]:
-    """Parses `ls-tree -r -z` output: `mode type id TAB path NUL`."""
+    """Parses LIST output: `mode type id TAB path NUL`."""
     entries = []
     for line in filter(None, raw.split(b"\x00")):
         meta, path = line.split(b"\t", 1)
@@ -165,10 +170,6 @@ class Guard:
                 line = body.count("\n", 0, match.start()) + 1
                 self.hits.append(f"{self.redact(label)}:{line} banned name #{number}")
 
-    def matches(self, text: str) -> bool:
-        body = normalize(text)
-        return any(pattern.search(body) for pattern in self.patterns)
-
     def name(self, kind: str, value: str) -> None:
         self.scan(f"{kind} {value}", value)
 
@@ -176,7 +177,7 @@ class Guard:
         if ZERO.fullmatch(entry.blob):  # a deletion adds nothing
             return
         self.name(f"{origin}file name", entry.path)
-        if entry.mode == GITLINK or entry.blob in self.seen:
+        if entry.mode in (GITLINK, TREE) or entry.blob in self.seen:
             return
         self.seen.add(entry.blob)
         # Blobs are read by id, so a path git prints differently than we decode it cannot hide one.
@@ -209,7 +210,7 @@ class Guard:
             self.entry(entry)
 
     def tree(self) -> None:
-        for entry in tree_entries(git("ls-tree", "-r", "-z", "HEAD")):
+        for entry in tree_entries(git(*LIST, "HEAD")):
             self.entry(entry)
 
     def range(self, base: str, head: str) -> None:
@@ -228,7 +229,7 @@ class Guard:
             self.scan(f"tag {ref}", body)
             target = body.split("\n", 1)[0].removeprefix("object ")
         if kind == b"tree":
-            for entry in tree_entries(git("ls-tree", "-r", "-z", target)):
+            for entry in tree_entries(git(*LIST, target)):
                 self.entry(entry, f"{ref} ")
         elif kind == b"blob":
             self.entry(Entry("100644", target, ref))
@@ -242,26 +243,25 @@ class Guard:
             self.target(ref, target)
         self.commits("--all")
 
-    def written(self, payload: dict[str, Any], item: dict[str, Any], **labels: str) -> bool:
-        """Scans the fields of an item that a writer wrote; says whether its author is one."""
-        if by_writer(payload, item):
-            for key, label in labels.items():
-                self.scan(label, optional(item[key]))
-            return True
-        # Only a writer can edit a stranger's text. The edit is scanned unless the stranger's
-        # version already matched, because then a failure would confirm their guess.
-        if edited_by_another(payload, item):
-            for key, label in labels.items():
-                change = payload["changes"].get(key)
-                if change is not None and not self.matches(optional(change["from"])):
-                    self.scan(label, optional(item[key]))
-        return False
+    def written(
+        self, payload: dict[str, Any], item: dict[str, Any], kind: str, **fields: Callable[[object], str]
+    ) -> bool:
+        """Scans an item's text if its author can write here, and says whether they can."""
+        # A writer's edit of a stranger's text is left alone too: whatever the scan compared,
+        # its public result would depend on what the stranger had written.
+        if not by_writer(payload, item):
+            return False
+        for key, read in fields.items():
+            self.scan(f"{kind} {key}", read(item[key]))
+        return True
 
     def event(self, name: str, payload: dict[str, Any]) -> None:
         """Scans a GitHub event, and only what someone with write access wrote or pushed.
 
         A public pass or fail on a stranger's text would tell them whether a guessed name is banned.
         """
+        if name in ACTIONS and string(payload["action"]) not in ACTIONS[name]:
+            raise CannotRun("the event payload is not what GitHub documents")
         match name:
             case "push":
                 ref = string(payload["ref"])
@@ -277,15 +277,14 @@ class Guard:
                 local = source is not None and string(source["full_name"]) == string(
                     payload["repository"]["full_name"]
                 )
-                labels = {"title": "pull request title", "body": "pull request body"}
-                if self.written(payload, pull, **labels) and local:
+                if self.written(payload, pull, "pull request", title=string, body=optional) and local:
                     self.name("ref", string(head["ref"]))
                     self.range(object_id(pull["base"]["sha"]), object_id(head["sha"]))
             case "issues":
-                self.written(payload, payload["issue"], title="issue title", body="issue body")
+                self.written(payload, payload["issue"], "issue", title=string, body=optional)
             case "issue_comment":
                 # The issue a comment sits on can be a stranger's, so only the comment is scanned.
-                self.written(payload, payload["comment"], body="comment")
+                self.written(payload, payload["comment"], "comment", body=string)
             case "release":
                 release = payload["release"]
                 self.scan("release name", optional(release["name"]))

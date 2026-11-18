@@ -40,10 +40,11 @@ def run(
     )
 
 
-def git(cwd: Path, *args: str) -> str:
+def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
     done = subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
         cwd=cwd,
+        input=stdin,
         capture_output=True,
         text=True,
         check=True,
@@ -57,7 +58,20 @@ def git(cwd: Path, *args: str) -> str:
     return done.stdout.strip()
 
 
+ACTIONS = {
+    "pull_request_target": "opened",
+    "issues": "opened",
+    "issue_comment": "created",
+    "release": "published",
+}
+
+
 class Repo(unittest.TestCase):
+    def empty_directory(self, name: str) -> str:
+        """A tree holding one empty directory, which only plumbing can build."""
+        empty = git(self.dir, "mktree", stdin="")
+        return git(self.dir, "mktree", stdin=f"040000 tree {empty}\t{name}\n")
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -258,6 +272,12 @@ class Range(Repo):
         head = self.commit("fix: clean a")
         self.assertEqual(run(["range", "1" * 40, head], self.dir).returncode, 1)
 
+    def test_an_empty_directory_name_is_caught(self) -> None:
+        base = self.commit("chore: start")
+        tree = self.empty_directory("quokka")
+        head = git(self.dir, "commit-tree", tree, "-p", base, "-m", "feat: add a directory")
+        self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
+
     def test_env_text_is_scanned_with_the_range(self) -> None:
         base = self.commit("chore: start")
         head = self.commit("feat: more")
@@ -325,6 +345,11 @@ class Push(Repo):
         line = f"refs/tags/t {tree} refs/tags/t {'0' * 40}\n"
         self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
+    def test_a_tagged_empty_directory_name_is_caught(self) -> None:
+        self.commit("chore: start")
+        line = f"refs/tags/t {self.empty_directory('quokka')} refs/tags/t {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
     def test_branch_delete_is_skipped(self) -> None:
         self.commit("chore: start")
         line = f"(delete) {'0' * 40} refs/heads/old {'1' * 40}\n"
@@ -341,13 +366,14 @@ class Event(Repo):
     ) -> subprocess.CompletedProcess[str]:
         path = self.dir / ".git" / "event.json"
         repository = {"full_name": "o/r", "owner": {"type": "User"}}
-        path.write_text(json.dumps({"repository": repository} | payload), encoding="utf-8")
+        known = {"repository": repository} | ({"action": ACTIONS[name]} if name in ACTIONS else {})
+        path.write_text(json.dumps(known | payload), encoding="utf-8")
         env |= {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
         return run(["event"], self.dir, env=env)
 
     def pull_request(
         self,
-        title: str = "fix: sync",
+        title: str | None = "fix: sync",
         body: str | None = None,
         association: str = "OWNER",
         head_repo: str | None = "o/r",
@@ -460,31 +486,41 @@ class Event(Repo):
                 git(self.dir, "tag", "-f", "odd", target)
                 self.assertEqual(self.event("schedule", {}).returncode, 1)
 
-    def edit(self, text: str, before: str, editor: str = "owner") -> int:
+    def edit(self, text: str, before: str) -> int:
         said = {"body": text, "author_association": "NONE", "user": {"login": "visitor"}}
         payload = {
             "action": "edited",
-            "sender": {"login": editor},
+            "sender": {"login": "owner"},
             "changes": {"body": {"from": before}},
             "issue": {"title": "Quokka?", "body": None, "author_association": "NONE"},
             "comment": said,
         }
         return self.event("issue_comment", payload).returncode
 
-    def test_a_writers_edit_of_a_strangers_text_is_caught(self) -> None:
-        self.assertEqual(self.edit("thanks, fixed", before="thanks"), 0)
-        self.assertEqual(self.edit("thanks, see Quokka", before="thanks"), 1)
-
-    def test_a_strangers_own_text_gives_no_signal_after_an_edit(self) -> None:
+    def test_a_writers_edit_of_a_strangers_text_gives_no_signal(self) -> None:
+        # The same edit must not pass or fail depending on what the stranger had written.
+        edited = "Please send logs from Zebrafish."
+        self.assertEqual(self.edit(edited, before="Could it be Quokka?"), 0)
+        self.assertEqual(self.edit(edited, before="Could it be Otter?"), 0)
         self.assertEqual(self.edit("is it Quokka? (edited)", before="is it Quokka?"), 0)
-        self.assertEqual(self.edit("is it Quokka?", before="is it", editor="visitor"), 0)
 
-    def test_a_writers_edit_of_a_strangers_issue_title_is_caught(self) -> None:
-        issue = {"title": "Quokka bug", "body": "x", "author_association": "NONE", "user": {"login": "v"}}
-        payload = {"action": "edited", "sender": {"login": "owner"}, "issue": issue}
-        changed = {"changes": {"title": {"from": "bug"}}}
-        self.assertEqual(self.event("issues", payload | changed).returncode, 1)
-        self.assertEqual(self.event("issues", payload | {"changes": {"body": {"from": "y"}}}).returncode, 0)
+    def test_a_tagged_empty_directory_is_caught_by_a_scheduled_run(self) -> None:
+        git(self.dir, "tag", "odd", self.empty_directory("quokka"))
+        self.assertEqual(self.event("schedule", {}).returncode, 1)
+
+    def test_an_action_the_workflow_does_not_send_fails_closed(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "NONE"}
+        for action in [1, None, "deleted"]:
+            with self.subTest(action=action):
+                payload = {"issue": issue, "action": action}
+                self.assertEqual(self.event("issues", payload).returncode, 2)
+
+    def test_a_missing_title_fails_closed(self) -> None:
+        issue = {"title": None, "body": "Quokka", "author_association": "OWNER"}
+        self.assertEqual(self.event("issues", {"issue": issue}).returncode, 2)
+        self.assertEqual(self.pull_request(title=None).returncode, 2)
+        comment = {"body": None, "author_association": "OWNER"}
+        self.assertEqual(self.event("issue_comment", {"comment": comment}).returncode, 2)
 
     def test_an_organization_repository_fails_closed(self) -> None:
         issue = {"title": "bug", "body": None, "author_association": "MEMBER"}

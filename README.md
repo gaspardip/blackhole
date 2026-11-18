@@ -30,6 +30,15 @@ bin/merge-outside <number>
 A squash merge copies the title and body into `main`. Text typed into the merge
 dialog is scanned only after it lands, so merge without editing the message.
 
+CI does not scan your edit of someone else's issue, pull request or comment
+either. Write the new text to a file and scan it before you save it:
+
+```sh
+python3 -I tools/name_guard.py message <file>
+```
+
+`bin/merge-outside` only merges pull requests that target `main`.
+
 The guard stops mistakes. It cannot stop someone with write access who sets out
 to publish a name: they could change the workflow on their own branch, or post
 the name anywhere else.

@@ -3,8 +3,14 @@
 set -eu
 number="$1"
 cd "$(dirname "$0")/.."
+# Only main is fetched and rescanned below, so a merge into any other branch would land unseen.
+if [ "$(gh pr view "${number}" --json baseRefName --jq .baseRefName)" != main ]; then
+  echo "merge-outside: pull request ${number} does not target main" >&2
+  exit 1
+fi
+# Full ref names throughout: a tag or branch called origin/main would win over the short one.
 git fetch -q origin main
-base="$(git rev-parse origin/main)"
+base="$(git rev-parse refs/remotes/origin/main)"
 git fetch -q origin "pull/${number}/head"
 head="$(git rev-parse FETCH_HEAD)"
 title="$(gh pr view "${number}" --json title --jq .title)"
@@ -15,4 +21,4 @@ GUARD_TEXT_SUBJECT="${subject}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_
 gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}"
 # GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
 git fetch -q origin main
-python3 -I tools/name_guard.py range "${base}" origin/main
+python3 -I tools/name_guard.py range "${base}" refs/remotes/origin/main

@@ -40,7 +40,8 @@ jobs:
           # The remote is asked which branch that is, because a scheduled event does not say.
           git remote set-head origin --auto > /dev/null
           guard="${RUNNER_TEMP}/name_guard.py"
-          git show "origin/HEAD:tools/name_guard.py" > "${guard}"
+          # The full ref name: a tag called origin/HEAD would win over the short one.
+          git show "refs/remotes/origin/HEAD:tools/name_guard.py" > "${guard}"
           # The guard reads the event file itself and decides whose text to scan. Event text
           # passed through `env:` would be printed in this public log before the guard ran.
           python3 -I "${guard}" event
