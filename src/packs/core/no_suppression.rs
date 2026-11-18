@@ -238,8 +238,10 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
                     Some((&window[at..window.len() - after.len()], after))
                 });
                 match close {
-                    // A compiler that leaves trigraphs alone reads on to a later end, so the text after this one has two readings.
-                    Some((closer, _)) if closer.contains("??/") => return Err(End),
+                    // Not every compiler reads a trigraph, or a line feed and a carriage return as one line break. One that does not reads on to a later end, so the text after this one has two readings.
+                    Some((closer, _)) if closer.contains("??/") || closer.contains("\n\r") => {
+                        return Err(End);
+                    }
                     Some((_, after)) => rest = &inner[window.len() - after.len()..],
                     // A comment that closes past the window could hide the rest of a directive.
                     None if window.len() < inner.len() => return Err(End),
