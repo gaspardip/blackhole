@@ -5,10 +5,19 @@ use std::{
     process::{Child, ChildStdout, Command, Output, Stdio},
 };
 
-fn cmd() -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("--no-replace-objects");
-    cmd
+// The caller's git variables must not point at another repository or index, and a replace ref must not swap an object.
+pub(crate) fn command() -> Command {
+    let mut command = Command::new("git");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        command.env_remove(name);
+    }
+    command.arg("--no-replace-objects");
+    command
 }
 fn failure(out: &Output) -> io::Error {
     io::Error::other(
@@ -19,13 +28,16 @@ fn failure(out: &Output) -> io::Error {
             .to_owned(),
     )
 }
-fn run(args: &[&str]) -> io::Result<Vec<u8>> {
-    let out = cmd().args(args).output()?;
+pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
+    let out = command.output()?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
         Err(failure(&out))
     }
+}
+fn run(args: &[&str]) -> io::Result<Vec<u8>> {
+    output(command().args(args))
 }
 pub(crate) fn commit(rev: &str) -> io::Result<String> {
     let bytes = run(&[
@@ -40,7 +52,7 @@ pub(crate) fn commit(rev: &str) -> io::Result<String> {
         .into())
 }
 pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
-    let out = cmd()
+    let out = command()
         .args(["merge-base", "--is-ancestor", base, head])
         .output()?;
     match out.status.code() {
@@ -50,7 +62,12 @@ pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
     }
 }
 
-pub(crate) struct Tree(BTreeMap<String, Option<String>>);
+enum Entry {
+    File(String),
+    Link(String),
+    Other,
+}
+pub(crate) struct Tree(BTreeMap<String, Entry>);
 impl Tree {
     pub(crate) fn load(sha: &str) -> io::Result<Self> {
         let mut entries = BTreeMap::new();
@@ -66,23 +83,67 @@ impl Tree {
             let &[mode, kind, id] = parts.as_slice() else {
                 return Err(io::Error::other("invalid tree entry"));
             };
-            let blob =
-                (kind == "blob" && matches!(mode, "100644" | "100755")).then(|| id.to_owned());
-            entries.insert(path.into(), blob);
+            let entry = match (kind, mode) {
+                ("blob", "100644" | "100755") => Entry::File(id.into()),
+                ("blob", "120000") => Entry::Link(id.into()),
+                _ => Entry::Other,
+            };
+            entries.insert(path.into(), entry);
         }
         Ok(Self(entries))
     }
     pub(crate) fn judge_file(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
         match self.0.get(path) {
             None => Ok(None),
-            Some(Some(id)) => batch.read(id).map(Some),
-            Some(None) => Err(io::Error::other(format!("{path} must be a regular blob"))),
+            Some(Entry::File(id)) => batch.read(id).map(Some),
+            Some(_) => Err(io::Error::other(format!("{path} must be a regular blob"))),
         }
     }
-    pub(crate) fn blobs(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.0
-            .iter()
-            .filter_map(|(path, id)| Some((path.as_str(), id.as_deref()?)))
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+    // A link to a file is read under the link's name, as a checkout reads it. A directory has nothing to read.
+    pub(crate) fn read(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
+        let id = match self.0.get(path) {
+            Some(Entry::File(id)) => Some(id.as_str()),
+            Some(Entry::Link(_)) => self.follow(path, batch)?,
+            _ => None,
+        };
+        id.map(|id| batch.read(id)).transpose()
+    }
+    // A target the commit does not hold could hide a file from the judge, so it is an error.
+    fn follow(&self, link: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
+        let lost = || io::Error::other("link target is not in the commit");
+        let mut pending: Vec<String> = link.rsplit('/').map(str::to_owned).collect();
+        let mut done: Vec<String> = Vec::new();
+        let mut hops = 0;
+        while let Some(part) = pending.pop() {
+            match part.as_str() {
+                "" | "." => continue,
+                ".." => {
+                    done.pop().ok_or_else(lost)?;
+                    continue;
+                }
+                _ => done.push(part),
+            }
+            match (self.0.get(&done.join("/")), pending.is_empty()) {
+                (Some(Entry::Link(id)), _) => {
+                    hops += 1;
+                    let target = String::from_utf8(batch.read(id)?).map_err(|_| lost())?;
+                    // Linux gives up after forty links too.
+                    if hops > 40 || target.starts_with('/') {
+                        return Err(lost());
+                    }
+                    done.pop();
+                    pending.extend(target.rsplit('/').map(str::to_owned));
+                }
+                (Some(Entry::File(id)), true) => return Ok(Some(id)),
+                (Some(Entry::Other), true) => return Ok(None),
+                (Some(Entry::Other), false) => {}
+                _ => return Err(lost()),
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -121,7 +182,7 @@ pub(crate) struct Batch {
 }
 impl Batch {
     pub(crate) fn start() -> io::Result<Self> {
-        let mut child = cmd()
+        let mut child = command()
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

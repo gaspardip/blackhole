@@ -1,6 +1,6 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
-use std::{fs, io, path::Path};
+use std::io;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,16 +17,4 @@ pub(crate) fn parse(bytes: &[u8]) -> io::Result<GlobSet> {
         globs.add(Glob::new(&pattern).map_err(io::Error::other)?);
     }
     globs.build().map_err(io::Error::other)
-}
-
-pub(crate) fn read_optional(path: &Path) -> io::Result<Vec<u8>> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => fs::read(path),
-        Ok(_) => Err(io::Error::other(format!(
-            "{} must be a regular file",
-            path.display()
-        ))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e),
-    }
 }
