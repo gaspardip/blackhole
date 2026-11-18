@@ -49,6 +49,7 @@ pub(super) fn check_with_resolution(
     let nodes = ctx.semantic.nodes();
     let mut dictionaries = std::collections::HashSet::new();
     for (id, node) in nodes.iter_enumerated() {
+        resolution.begin_candidate();
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
             if !matches!(nodes.parent_kind(id), AstKind::TSTypeLiteral(_)) {

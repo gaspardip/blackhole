@@ -141,6 +141,7 @@ pub(super) fn check_with_resolution(
     let nodes = ctx.semantic.nodes();
     let mut bindings = ConstBindings::default();
     for (id, node) in nodes.iter_enumerated() {
+        resolver.begin_candidate();
         let Some((expr, target)) = assertion(node.kind()) else {
             continue;
         };

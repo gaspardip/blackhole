@@ -222,10 +222,12 @@ struct Solver {
     envs: Environments,
     memo: HashMap<Goal, Class>,
     budget: Option<Budget>,
+    #[cfg(test)]
+    test_allowance: Option<usize>,
 }
 impl Solver {
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
-        // shortcut: one budget per rule per file leaves later child-dependent candidates unjudged after exhaustion; use per-candidate allowances when honest files reach it.
+        // shortcut: 128 steps per syntax node and a minimum of 128 per candidate; revisit if ordinary inputs exhaust both.
         let budget = self
             .budget
             .get_or_insert_with(|| Budget(Some(ctx.semantic.nodes().len().saturating_mul(128))));
@@ -1151,6 +1153,24 @@ pub(super) fn report(findings: &mut crate::engine::Findings, offset: usize, answ
     }
 }
 impl Resolution {
+    pub(super) fn begin_candidate(&self) {
+        let mut solver = self.0.borrow_mut();
+        let allowance = 128;
+        #[cfg(test)]
+        let allowance = solver.test_allowance.unwrap_or(allowance);
+        if let Some(budget) = &mut solver.budget {
+            budget.0 = Some(budget.0.unwrap_or(0).max(allowance));
+        }
+    }
+
+    #[cfg(test)]
+    fn with_budget(steps: usize, allowance: usize) -> Self {
+        Self(RefCell::new(Solver {
+            budget: Some(Budget(Some(steps))),
+            test_allowance: Some(allowance),
+            ..Solver::default()
+        }))
+    }
     fn query(&self, ctx: &TsCtx<'_>, node: NodeId, query: Query) -> Judged<Class> {
         self.0.borrow_mut().solve(ctx, Goal::root(node, query))
     }
@@ -1485,13 +1505,11 @@ mod tests {
         };
 
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(0)));
+            let resolution = super::Resolution::with_budget(0, 0);
             check_with_resolution(ctx, findings, &resolution);
         }
         fn unlimited(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(usize::MAX)));
+            let resolution = super::Resolution::with_budget(usize::MAX, 0);
             check_with_resolution(ctx, findings, &resolution);
         }
         for (origin, note) in [
@@ -1543,16 +1561,25 @@ mod tests {
         }
     }
 
+    fn default_parameters() -> String {
+        use std::fmt::Write as _;
+        let mut params = String::new();
+        for i in 0..128 {
+            write!(params, ", T{i} = string").unwrap();
+        }
+        params
+    }
+
     #[test]
     fn exhausted_dictionary_budget_keeps_the_later_record_red() {
         use super::super::no_unsafe_dictionary_type::{RULE, check_with_resolution};
         use crate::engine::{Findings, Rule, Run, TsCtx, run};
         fn check<const LIMIT: usize>(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(LIMIT)));
+            let resolution = super::Resolution::with_budget(LIMIT, 128);
             check_with_resolution(ctx, findings, &resolution);
         }
-        let text = "type Wrap<T> = T[];\ntype Stress = Wrap<string>;\nconst value: Record<string, unknown> = {id: 1};";
+        let defaults = default_parameters();
+        let text = "type Wrap<TDEFAULTS> = T[];\ntype Stress = Wrap<string>;\nconst value: Record<string, unknown> = {id: 1};".replace("DEFAULTS", &defaults);
         for (runner, note) in [
             (Run::Ts(check::<0>), Some("type too complex to judge")),
             (Run::Ts(check::<{ usize::MAX }>), None),
@@ -1569,7 +1596,7 @@ mod tests {
                 .map(|h| (h.line, h.col, h.note.as_deref()))
                 .collect();
             let expected = if note.is_some() {
-                vec![(2, 15, note), (3, 14, note)]
+                vec![(2, 15, note), (3, 14, None)]
             } else {
                 vec![(3, 14, None)]
             };
@@ -1581,13 +1608,11 @@ mod tests {
         use super::super::no_widen_then_assert::{RULE, check_with_resolution};
         use crate::engine::{Findings, Rule, Run, TsCtx, run};
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(0)));
+            let resolution = super::Resolution::with_budget(0, 0);
             check_with_resolution(ctx, findings, &resolution);
         }
         fn unlimited(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(usize::MAX)));
+            let resolution = super::Resolution::with_budget(usize::MAX, 0);
             check_with_resolution(ctx, findings, &resolution);
         }
         let source = "type Wide = Record<string, unknown>;\nconst value: Wide = { id: 1 };\nconst picked = value as { id: number };";
@@ -1612,15 +1637,15 @@ mod tests {
     }
 
     #[test]
-    fn an_exhausted_assertion_leaves_the_later_assertion_unjudged() {
+    fn an_exhausted_assertion_allows_the_later_plain_assertion() {
         use super::super::no_widen_then_assert::{RULE, check_with_resolution};
         use crate::engine::{Findings, Rule, Run, TsCtx, run};
         fn check<const LIMIT: usize>(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(LIMIT)));
+            let resolution = super::Resolution::with_budget(LIMIT, 128);
             check_with_resolution(ctx, findings, &resolution);
         }
-        let source = "type Key<T> = T;\nconst stress: Record<Key<string>, unknown> = {id: 1};\nconst first = stress as {id: number};\nconst plain: Record<string, unknown> = {id: 1};\nconst next = plain as {id: number};";
+        let defaults = default_parameters();
+        let source = "type Key<TDEFAULTS> = T;\nconst stress: Record<Key<string>, unknown> = {id: 1};\nconst first = stress as {id: number};\nconst plain: Record<string, unknown> = {id: 1};\nconst next = plain as {id: number};".replace("DEFAULTS", &defaults);
         for (runner, note) in [
             (Run::Ts(check::<1>), Some("type too complex to judge")),
             (Run::Ts(check::<{ usize::MAX }>), None),
@@ -1636,7 +1661,7 @@ mod tests {
                 hits.iter()
                     .map(|h| (h.rule, h.line, h.col, h.note.as_deref()))
                     .collect::<Vec<_>>(),
-                [(RULE.id, 3, 15, note), (RULE.id, 5, 14, note)]
+                [(RULE.id, 3, 15, note), (RULE.id, 5, 14, None)]
             );
         }
     }
@@ -1647,8 +1672,7 @@ mod tests {
         use crate::engine::{Findings, Rule, Run, TsCtx, run};
 
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget(Some(2)));
+            let resolution = super::Resolution::with_budget(2, 0);
             check_aliases(ctx, findings, &resolution);
         }
         let rules = [Rule {
@@ -1706,3 +1730,7 @@ mod tests {
         assert_eq!(calls, depth + 1);
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/resolution_time/allowance.rs"]
+mod allowance_time;

@@ -215,6 +215,7 @@ pub(super) fn check_with_resolution(
     // Guard calls use declared types as evidence, so their cached origins belong to a separate walk.
     let mut guard_bindings = ConstBindings::default();
     for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+        resolution.begin_candidate();
         let candidate = match node.kind() {
             AstKind::CallExpression(call) => {
                 guard_argument(resolution, ctx, &mut guard_bindings, call)

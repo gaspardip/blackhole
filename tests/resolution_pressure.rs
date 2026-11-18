@@ -102,12 +102,24 @@ fn each_semantic_question_preserves_its_answer_or_reports_exhaustion() {
             writeln!(source, "{{ {stress} }}").unwrap();
             let line = source.lines().count() + 1;
             source.push_str(&victim);
+            if column == "before" {
+                write!(source, "\n{{ {stress} }}").unwrap();
+            }
             let hits = single::run_rule(&id, "pressure.ts", &source);
             let got: Vec<_> = hits
                 .iter()
                 .filter(|h| h.line == line && h.col == marker)
                 .map(|h| h.note.as_deref())
                 .collect();
+            if column == "before" {
+                let ordinary: Vec<_> = expected.then_some(None).into_iter().collect();
+                assert_eq!(got, ordinary, "{rule} cheap candidate");
+                assert!(
+                    hits.iter().any(|h| h.line == line + 1
+                        && h.note.as_deref() == Some("type too complex to judge")),
+                    "{rule} expensive candidate"
+                );
+            }
             if got != [Some("type too complex to judge")]
                 && got != expected.then_some(None).into_iter().collect::<Vec<_>>()
             {
