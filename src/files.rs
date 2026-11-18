@@ -26,12 +26,22 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
 }
 
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
+// Directories that are gone stay as written too, so the ledger rows under them can still be selected.
 fn resolve(path: &Path) -> io::Result<PathBuf> {
-    let found = match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => fs::canonicalize(parent).map(|dir| dir.join(name)),
-        _ => fs::canonicalize(path),
-    };
-    found.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+    let mut dir = path;
+    let mut names = Vec::new();
+    loop {
+        let split = dir.parent().zip(dir.file_name());
+        if let Some((parent, name)) = split {
+            names.push(name);
+            dir = parent;
+        }
+        match fs::canonicalize(dir) {
+            Ok(found) => return Ok(names.iter().rev().fold(found, |path, name| path.join(name))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && split.is_some() => {}
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
+        }
+    }
 }
 
 fn locate(dir: &Path, what: &str) -> io::Result<PathBuf> {
@@ -50,18 +60,21 @@ pub(crate) fn root() -> io::Result<PathBuf> {
 pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
     // The lock follows the tree that holds the ledger, whichever repository the caller stands in.
     let path = locate(root, "--absolute-git-dir")?.join("blackhole.lock");
-    // Nothing is written through the handle, so a link swapped in after this look loses no data.
-    if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
-        return Err(io::Error::other(format!(
-            "{} must be a regular file",
-            path.display()
-        )));
-    }
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
+    let mut open = fs::OpenOptions::new();
+    // Creation never follows a link and an existing lock is opened without creating, so no file appears outside the repository.
+    let file = match open.write(true).create_new(true).open(&path) {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Nothing is written through the handle, so a link swapped in after this look loses no data.
+            if !fs::symlink_metadata(&path)?.is_file() {
+                return Err(io::Error::other(format!(
+                    "{} must be a regular file",
+                    path.display()
+                )));
+            }
+            open.create_new(false).open(&path)?
+        }
+        other => other?,
+    };
     file.lock()?;
     Ok(file)
 }

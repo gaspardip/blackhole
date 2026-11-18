@@ -222,6 +222,7 @@ fn a_selection_keeps_the_rows_of_files_that_are_gone() {
         &[
             ("empty/gone.py", 1),
             ("gone.py", 1),
+            ("gone/deep/file.py", 1),
             ("sub/gone.py", 1),
             ("subway/gone.py", 1),
         ],
@@ -232,7 +233,14 @@ fn a_selection_keeps_the_rows_of_files_that_are_gone() {
     assert_eq!(check(root, &["other.py"], 0).stdout, b"");
     let stale = format!("empty/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
     assert_eq!(check(root, &["empty"], 1).stdout, stale.as_bytes());
-    check(root, &["nowhere"], 2);
+    let stale =
+        format!("gone/deep/file.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    for path in ["gone", "gone/deep/file.py"] {
+        assert_eq!(check(root, &[path], 1).stdout, stale.as_bytes(), "{path}");
+    }
+    for path in ["nowhere", "nowhere/deep.py", "gone/../other.py", ".."] {
+        check(root, &[path], 2);
+    }
 }
 
 #[test]
@@ -349,6 +357,11 @@ fn a_linked_lock_is_refused() {
     run(root, &["ledger"], 2);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+    let absent = other.path().join("absent");
+    fs::remove_file(root.join(".git/blackhole.lock")).unwrap();
+    std::os::unix::fs::symlink(&absent, root.join(".git/blackhole.lock")).unwrap();
+    run(root, &["ledger"], 2);
+    assert!(!absent.try_exists().unwrap());
 }
 
 #[test]

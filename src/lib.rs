@@ -103,10 +103,10 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     let (names, selection) = files::list(root, paths)?;
     let base = read_ledger(&root.join(".blackhole"))?;
     let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
-    // A path with no file left is still a selection while the ledger has a row under it.
+    // A path with no file left is still a selection while the ledger has a row under it. A path that holds the repository is not one.
     for chosen in &selection {
         let rows = base.keys().map(|(_, path)| path);
-        if !names.iter().chain(rows).any(|path| under(path, chosen)) {
+        if !(chosen.starts_with(root) && names.iter().chain(rows).any(|path| under(path, chosen))) {
             return Err(io::Error::other(format!(
                 "no files match {}",
                 chosen.display().to_string().escape_default()
