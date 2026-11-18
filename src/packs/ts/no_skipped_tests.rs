@@ -19,7 +19,7 @@ fn modifier(name: &str) -> bool {
     )
 }
 fn focused_or_skipped(e: &Expression<'_>) -> bool {
-    let Expression::Identifier(id) = e else {
+    let Some(id) = e.get_identifier_reference() else {
         return false;
     };
     matches!(

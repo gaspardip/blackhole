@@ -229,3 +229,22 @@ pub(super) fn callback_call<'a>(
         .is_some_and(|e| e.span() == function.span())
         .then_some(call)
 }
+
+pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Option<AstKind<'a>> {
+    ctx.semantic
+        .nodes()
+        .ancestors(id)
+        .map(oxc::semantic::AstNode::kind)
+        .find(|kind| {
+            !matches!(
+                kind,
+                AstKind::ParenthesizedExpression(_)
+                    | AstKind::ChainExpression(_)
+                    | AstKind::TSAsExpression(_)
+                    | AstKind::TSSatisfiesExpression(_)
+                    | AstKind::TSInstantiationExpression(_)
+                    | AstKind::TSNonNullExpression(_)
+                    | AstKind::TSTypeAssertion(_)
+            )
+        })
+}

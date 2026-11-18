@@ -16,10 +16,10 @@ fn calls_resolver(body: Option<&Expression<'_>>, name: &str) -> bool {
     let Some(Expression::CallExpression(c)) = body else {
         return false;
     };
-    matches!(&c.callee,Expression::Identifier(id) if id.name==name)
+    c.callee.is_specific_id(name)
 }
 fn promise(n: &NewExpression<'_>) -> bool {
-    if !matches!(&n.callee,Expression::Identifier(id) if id.name=="Promise") {
+    if !n.callee.is_specific_id("Promise") {
         return false;
     }
     let Some(callback) = n.arguments.first().and_then(|a| a.as_expression()) else {
@@ -40,7 +40,7 @@ fn promise(n: &NewExpression<'_>) -> bool {
     let Some(Expression::CallExpression(c)) = single_effect(callback) else {
         return false;
     };
-    if !(matches!(&c.callee,Expression::Identifier(id) if id.name=="setTimeout")
+    if !(c.callee.is_specific_id("setTimeout")
         || c.callee.is_specific_member_access("window", "setTimeout")
         || c.callee
             .is_specific_member_access("globalThis", "setTimeout"))
@@ -91,7 +91,9 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             Expression::CallExpression(c) => {
                 c.callee.is_specific_member_access("scheduler", "wait")
                     || c.callee.is_specific_member_access("Bun", "sleep")
-                    || matches!(&c.callee,Expression::Identifier(i) if timers.contains(i.name.as_str()))
+                    || c.callee
+                        .get_identifier_reference()
+                        .is_some_and(|i| timers.contains(i.name.as_str()))
             }
             _ => false,
         };

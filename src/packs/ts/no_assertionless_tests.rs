@@ -35,7 +35,7 @@ fn same(ctx: &TsCtx<'_>, a: &Expression<'_>, b: &Expression<'_>) -> bool {
 }
 fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>) -> bool {
     let first = call.arguments.first().and_then(|a| a.as_expression());
-    if matches!(&call.callee,Expression::Identifier(id) if id.name=="assert") {
+    if call.callee.is_specific_id("assert") {
         return first.is_some_and(literal);
     }
     let Some(m) = call.callee.get_member_expr() else {
@@ -53,7 +53,7 @@ fn tautology(ctx: &TsCtx<'_>, call: &CallExpression<'_>) -> bool {
     let Expression::CallExpression(expect) = object else {
         return false;
     };
-    matches!(&expect.callee,Expression::Identifier(id) if id.name=="expect")
+    expect.callee.is_specific_id("expect")
         && expect
             .arguments
             .first()

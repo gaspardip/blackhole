@@ -173,10 +173,15 @@ pub(super) fn call_writes(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
         return false;
     };
     match call.mutation() {
-        Some(Mutation::SetProperty | Mutation::Delete) => call
-            .arg(1)
-            .and_then(|e| literal(ctx, e))
-            .is_some_and(|k| protected(&owner, k)),
+        Some(Mutation::SetProperty | Mutation::Delete) => call.arg(1).is_some_and(|e| {
+            literal(ctx, e).map_or_else(
+                || {
+                    !resolve(ctx, e).is_literal()
+                        && super::native_properties::protected_owner(&owner)
+                },
+                |k| protected(&owner, k),
+            )
+        }),
         Some(Mutation::DefineMany) => call.arg(1).is_some_and(|e| defines(ctx, e, &owner)),
         Some(Mutation::Assign) => call
             .args

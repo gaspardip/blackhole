@@ -45,7 +45,7 @@ fn assertion(e: &Expression<'_>) -> bool {
     let Expression::CallExpression(call) = subject else {
         return false;
     };
-    if !matches!(&call.callee,Expression::Identifier(id) if id.name=="expect") {
+    if !call.callee.is_specific_id("expect") {
         return false;
     }
     call.arguments
@@ -101,26 +101,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if reads == Some(true)
             || poll
                 && reads.is_some()
-                && nodes
-                    .ancestors(id)
-                    .find(|n| {
-                        !matches!(
-                            n.kind(),
-                            AstKind::ParenthesizedExpression(_)
-                                | AstKind::ChainExpression(_)
-                                | AstKind::TSAsExpression(_)
-                                | AstKind::TSSatisfiesExpression(_)
-                                | AstKind::TSNonNullExpression(_)
-                                | AstKind::TSTypeAssertion(_)
-                        )
-                    })
-                    .is_some_and(|n| match n.kind() {
-                        AstKind::StaticMemberExpression(m) => m.property.name == "toHaveLength",
-                        AstKind::ComputedMemberExpression(m) => m
-                            .static_property_name()
-                            .is_some_and(|s| s == "toHaveLength"),
-                        _ => false,
-                    })
+                && super::values::outer(ctx, id).is_some_and(|n| match n {
+                    AstKind::StaticMemberExpression(m) => m.property.name == "toHaveLength",
+                    AstKind::ComputedMemberExpression(m) => m
+                        .static_property_name()
+                        .is_some_and(|s| s == "toHaveLength"),
+                    _ => false,
+                })
             || !poll && assertion(value)
         {
             findings.report(c.span.start as usize, None);

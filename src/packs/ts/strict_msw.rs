@@ -24,9 +24,7 @@ fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
     let Expression::CallExpression(c) = e else {
         return None;
     };
-    let Expression::Identifier(id) = &c.callee else {
-        return None;
-    };
+    let id = c.callee.get_identifier_reference()?;
     let (source, super::values::Imported::Named(name)) = super::values::import_of(ctx, id)? else {
         return None;
     };
@@ -40,7 +38,7 @@ fn factory(ctx: &TsCtx<'_>, e: &Expression<'_>) -> Option<Factory> {
     }
 }
 fn strict(ctx: &TsCtx<'_>, opts: Option<&Expression<'_>>) -> bool {
-    let Some(Expression::ObjectExpression(o)) = opts else {
+    let Some(Expression::ObjectExpression(o)) = opts.map(Expression::get_inner_expression) else {
         return false;
     };
     for prop in o.properties.iter().rev() {

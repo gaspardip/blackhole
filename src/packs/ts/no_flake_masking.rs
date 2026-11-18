@@ -15,7 +15,7 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 fn inspect(ctx: &TsCtx<'_>, expr: Option<&Expression<'_>>, keys: &[&str], findings: &mut Findings) {
-    let Some(Expression::ObjectExpression(o)) = expr else {
+    let Some(Expression::ObjectExpression(o)) = expr.map(Expression::get_inner_expression) else {
         return;
     };
     let mut unreadable = false;
@@ -61,14 +61,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 inspect(ctx, second, &["timeout"], findings);
                 if let Some(third) = c.arguments.get(2) {
                     inspect(ctx, third.as_expression(), &["timeout"], findings);
-                    if !matches!(second, Some(Expression::ObjectExpression(_)))
-                        && !matches!(
-                            third,
-                            Argument::ObjectExpression(_)
-                                | Argument::ArrowFunctionExpression(_)
-                                | Argument::FunctionExpression(_)
+                    if !matches!(
+                        second.map(Expression::get_inner_expression),
+                        Some(Expression::ObjectExpression(_))
+                    ) && !matches!(
+                        third.as_expression().map(Expression::get_inner_expression),
+                        Some(
+                            Expression::ObjectExpression(_)
+                                | Expression::ArrowFunctionExpression(_)
+                                | Expression::FunctionExpression(_)
                         )
-                    {
+                    ) {
                         findings.report(third.span().start as usize, None);
                     }
                 }

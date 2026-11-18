@@ -77,13 +77,7 @@ fn comparison(ctx: &TsCtx<'_>, left: &Expression<'_>, right: &Expression<'_>) ->
     }
 }
 fn read(ctx: &TsCtx<'_>, id: NodeId, span: Span) -> bool {
-    let parent = ctx.semantic.nodes().ancestors(id).find(|n| {
-        !matches!(
-            n.kind(),
-            AstKind::ParenthesizedExpression(_) | AstKind::ChainExpression(_)
-        )
-    });
-    match parent.map(oxc::semantic::AstNode::kind) {
+    match super::values::outer(ctx, id) {
         Some(AstKind::AssignmentExpression(a)) => !a.operator.is_assign() || a.left.span() != span,
         Some(AstKind::UnaryExpression(u)) => !u.operator.is_delete(),
         _ => true,
