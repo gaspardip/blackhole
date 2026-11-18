@@ -7,6 +7,17 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn license_lines_use_ecmascript_line_terminators() {
+    for end in ["\n", "\r\n", "\r", "\u{2028}", "\u{2029}"] {
+        let text = format!("/* text{end} * @license MIT{end} */ const x = 1;");
+        assert!(
+            run(registry(), [("a.js", text.as_bytes())]).is_empty(),
+            "{end:?}"
+        );
+    }
+}
+
+#[test]
 fn default_export_identifier_cannot_carry_docs() {
     let hits = run(
         registry(),

@@ -31,7 +31,7 @@ fn directive(raw: &str) -> bool {
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
-        .lines()
+        .split(['\n', '\r', '\u{2028}', '\u{2029}'])
         .map(|line| {
             line.trim_start().strip_prefix('*').map_or(line, |rest| {
                 rest.strip_prefix(char::is_whitespace).unwrap_or(rest)
