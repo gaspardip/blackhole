@@ -78,6 +78,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_explicit_any::RULE,
         crate::packs::ts::no_known_value_widening::RULE,
         crate::packs::ts::no_non_null_assertion::RULE,
+        crate::packs::ts::no_object_parameters::RULE,
         crate::packs::ts::no_unknown_parameters::RULE,
         crate::packs::ts::no_unknown_returns::RULE,
         crate::packs::ts::no_unknown_type_aliases::RULE,

@@ -17,6 +17,7 @@ pub(super) enum Class {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Query {
+    ObjectInput,
     UnknownAlias,
     UnknownReturn,
     Target,
@@ -36,6 +37,9 @@ pub(super) fn informative<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::Value) == Class::None
 }
 
+pub(super) fn object_input<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
+    Resolution::default().classify(ctx, ty, Query::ObjectInput) != Class::None
+}
 pub(super) fn unknown_alias<'a>(ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> bool {
     Resolution::default().classify(ctx, ty, Query::UnknownAlias) != Class::None
 }
@@ -154,7 +158,8 @@ impl<'a> Resolution<'a> {
             return self.reference(ctx, r, query);
         }
         match (ty, query) {
-            (TSType::TSUnknownKeyword(_), Query::UnknownReturn | Query::UnknownAlias)
+            (TSType::TSObjectKeyword(_), Query::ObjectInput)
+            | (TSType::TSUnknownKeyword(_), Query::UnknownReturn | Query::UnknownAlias)
             | (
                 TSType::TSUnknownKeyword(_) | TSType::TSObjectKeyword(_),
                 Query::Value | Query::Target | Query::AliasTarget,
@@ -168,7 +173,11 @@ impl<'a> Resolution<'a> {
             (TSType::TSAnyKeyword(_), Query::Value) => Class::Any,
             (
                 TSType::TSUnionType(n),
-                Query::Value | Query::Key | Query::UnknownReturn | Query::UnknownAlias,
+                Query::Value
+                | Query::Key
+                | Query::UnknownReturn
+                | Query::UnknownAlias
+                | Query::ObjectInput,
             ) if n
                 .types
                 .iter()
