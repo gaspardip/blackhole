@@ -5,9 +5,7 @@ use crate::{
 use oxc::{
     ast::{
         AstKind,
-        ast::{
-            Comment, Expression, IdentifierReference, ModuleExportName, TSAccessibility, TSTypeName,
-        },
+        ast::{Comment, Expression, ModuleExportName, TSAccessibility, TSTypeName},
     },
     span::GetSpan,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
@@ -137,25 +135,6 @@ fn member(kind: AstKind<'_>) -> bool {
     )
 }
 
-fn local_export(
-    ctx: &TsCtx<'_>,
-    ident: &IdentifierReference<'_>,
-    declarations: &mut HashSet<NodeId>,
-) {
-    let scoping = ctx.semantic.scoping();
-    let nodes = ctx.semantic.nodes();
-    if let Some(symbol) = scoping.get_root_binding(ident.name) {
-        for id in scoping.symbol_declarations(symbol) {
-            if let Some(top) = std::iter::once(id)
-                .chain(nodes.ancestor_ids(id))
-                .find(|n| matches!(nodes.parent_kind(*n), AstKind::Program(_)))
-            {
-                declarations.insert(top);
-            }
-        }
-    }
-}
-
 fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     let nodes = ctx.semantic.nodes();
     let ambient = ctx.program.source_type.is_typescript_definition()
@@ -165,6 +144,8 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             .iter()
             .any(oxc::ast::ast::Statement::is_module_declaration);
     let mut declarations = HashSet::new();
+    let scoping = ctx.semantic.scoping();
+    let mut bindings = HashSet::new();
     for (id, node) in nodes
         .iter_enumerated()
         .filter(|(id, _)| matches!(nodes.parent_kind(*id), AstKind::Program(_)))
@@ -174,7 +155,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             AstKind::ExportNamedDeclaration(n) => {
                 for spec in &n.specifiers {
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
-                        local_export(ctx, r, &mut declarations);
+                        bindings.extend(scoping.get_root_binding(r.name));
                     }
                 }
             }
@@ -184,7 +165,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
                     .as_expression()
                     .map(Expression::without_parentheses)
                 {
-                    local_export(ctx, r, &mut declarations);
+                    bindings.extend(scoping.get_root_binding(r.name));
                 }
             }
             _ => {}
@@ -201,6 +182,16 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             || matches!(kind,AstKind::TSExternalModuleDeclaration(n) if n.declare);
         if public || (ambient && !matches!(kind, AstKind::Program(_))) {
             declarations.insert(id);
+        }
+    }
+    for symbol in bindings {
+        for id in scoping.symbol_declarations(symbol) {
+            if let Some(top) = std::iter::once(id)
+                .chain(nodes.ancestor_ids(id))
+                .find(|n| matches!(nodes.parent_kind(*n), AstKind::Program(_)))
+            {
+                declarations.insert(top);
+            }
         }
     }
     declarations

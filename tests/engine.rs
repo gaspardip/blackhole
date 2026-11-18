@@ -203,6 +203,26 @@ fn exported_alias_chain_is_judged_in_linear_time() {
 }
 
 #[test]
+fn export_aliases_expand_each_root_binding_once() {
+    use std::time::{Duration, Instant};
+    let aliases = (0..4000)
+        .map(|i| format!("M as A{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let text = format!(
+        "/** Public contract. */\n{}export {{ {aliases} }};",
+        "interface M {}\n".repeat(4000)
+    );
+    let start = Instant::now();
+    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn merged_interfaces_are_expanded_once() {
     use std::time::{Duration, Instant};
     let text = format!(
