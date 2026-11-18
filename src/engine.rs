@@ -114,7 +114,13 @@ pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
 }
 
 fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {
-    let at = error.labels.first().map_or(0, LabeledSpan::offset);
+    // Oxc marks primary spans explicitly or puts the offending span after related declarations.
+    let at = error
+        .labels
+        .iter()
+        .find(|label| label.primary())
+        .or_else(|| error.labels.last())
+        .map_or(0, LabeledSpan::offset);
     (at as usize, error.message.to_string())
 }
 

@@ -7,6 +7,26 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn diagnostic_points_to_the_offending_token() {
+    for (text, line, col) in [
+        ("let x;\nlet x;", 2, 5),
+        ("const x=1;export {x};\nexport {x};", 2, 9),
+        ("tag: {\ntag: {} }", 2, 1),
+        ("const x = [1", 1, 13),
+        ("break;", 1, 1),
+    ] {
+        let hits = run(registry(), [("a.mjs", text.as_bytes())]);
+        assert_eq!(
+            hits.iter()
+                .map(|f| (f.rule, f.line, f.col))
+                .collect::<Vec<_>>(),
+            [("core/unparseable", line, col)],
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn literal_nuls_are_parse_errors_across_encodings() {
     let text = "\u{feff}// 🌑\nconst \0x = 1;";
     let encodings = [
