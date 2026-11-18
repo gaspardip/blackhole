@@ -11,9 +11,9 @@ use oxc::{
         },
     },
     span::GetSpan,
-    syntax::node::NodeId,
+    syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-comments",
@@ -31,7 +31,7 @@ fn directive(raw: &str) -> bool {
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
-        .lines()
+        .split(is_line_terminator)
         .map(|line| {
             line.trim_start().strip_prefix('*').map_or(line, |rest| {
                 rest.strip_prefix(char::is_whitespace).unwrap_or(rest)
@@ -110,21 +110,6 @@ fn hidden(kind: AstKind<'_>) -> bool {
         access,
         Some(TSAccessibility::Private | TSAccessibility::Protected)
     ) || key.is_private_identifier()
-}
-
-fn exposed(ctx: &TsCtx<'_>, id: NodeId, declarations: &HashSet<NodeId>) -> bool {
-    let nodes = ctx.semantic.nodes();
-    for ancestor in std::iter::once(id).chain(nodes.ancestor_ids(id)) {
-        if declarations.contains(&ancestor) {
-            return true;
-        }
-        if hidden(nodes.kind(ancestor))
-            || matches!(nodes.parent_kind(ancestor), AstKind::ArrowFunctionExpression(n) if n.body.node_id() == ancestor)
-        {
-            return false;
-        }
-    }
-    false
 }
 
 fn member(kind: AstKind<'_>) -> bool {
@@ -206,31 +191,83 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             declarations.insert(id);
         }
     }
-    loop {
-        let size = declarations.len();
-        for (id, node) in nodes.iter_enumerated() {
-            if let AstKind::TSTypeReference(r) = node.kind()
-                && let TSTypeName::IdentifierReference(name) = &r.type_name
-                && exposed(ctx, id, &declarations)
-                && let Some(symbol) = name
-                    .reference_id
-                    .get()
-                    .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
-            {
-                declarations.extend(ctx.semantic.scoping().symbol_declarations(symbol).filter(
-                    |id| {
-                        matches!(
-                            nodes.kind(*id),
-                            AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
-                        )
-                    },
-                ));
+    declarations
+}
+
+struct Exposure {
+    owners: Vec<Option<NodeId>>,
+    public: HashSet<NodeId>,
+}
+
+impl Exposure {
+    fn can_document(&self, id: NodeId, kind: AstKind<'_>) -> bool {
+        self.public.contains(&id)
+            || member(kind)
+                && self
+                    .owners
+                    .get(id.index())
+                    .copied()
+                    .flatten()
+                    .is_some_and(|owner| self.public.contains(&owner))
+    }
+}
+
+fn type_declaration(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
+    )
+}
+
+fn exposure(ctx: &TsCtx<'_>) -> Exposure {
+    let nodes = ctx.semantic.nodes();
+    let mut public = public_declarations(ctx);
+    if public.is_empty() {
+        return Exposure {
+            owners: Vec::new(),
+            public,
+        };
+    }
+    let mut owners = vec![None; nodes.len()];
+    let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
+    for (id, node) in nodes.iter_enumerated() {
+        let kind = node.kind();
+        let parent = nodes.parent_id(id);
+        let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
+        let owner = if public.contains(&id) || type_declaration(kind) {
+            if let Some(parent_owner) = inherited {
+                edges.entry(parent_owner).or_default().push(id);
             }
-        }
-        if size == declarations.len() {
-            return declarations;
+            id
+        } else if let Some(owner) = inherited {
+            owner
+        } else {
+            continue;
+        };
+        owners[id.index()] = Some(owner);
+        if let AstKind::TSTypeReference(r) = kind
+            && let TSTypeName::IdentifierReference(name) = &r.type_name
+            && let Some(symbol) = name
+                .reference_id
+                .get()
+                .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
+        {
+            edges.entry(owner).or_default().extend(
+                ctx.semantic
+                    .scoping()
+                    .symbol_declarations(symbol)
+                    .filter(|id| type_declaration(nodes.kind(*id))),
+            );
         }
     }
+    let mut pending: Vec<_> = public.iter().copied().collect();
+    while let Some(owner) = pending.pop() {
+        if let Some(targets) = edges.remove(&owner) {
+            pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
+        }
+    }
+    Exposure { owners, public }
 }
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
@@ -278,26 +315,27 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         })
         .map(|c| c.span.start)
         .collect();
-    let declarations = public_declarations(ctx);
+    let exposure = exposure(ctx);
     let documented: HashSet<_> = ctx
         .semantic
         .nodes()
         .iter_enumerated()
         .filter(|(id, n)| {
-            declarations.contains(id)
-                || (member(n.kind()) && exposed(ctx, *id, &declarations))
+            exposure.can_document(*id, n.kind())
                 || matches!(
                     ctx.semantic.nodes().parent_kind(*id),
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
-                )
+                ) && !matches!(n.kind(), AstKind::IdentifierReference(_))
         })
         .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
     for c in ctx.comments {
-        if !directives.contains(&c.span.start)
-            && !documented.contains(&c.span.start)
-            && !warning(c, c.content_span().source_text(ctx.text))
-        {
+        if directives.contains(&c.span.start) {
+            continue;
+        }
+        let allowed = documented.contains(&c.span.start)
+            || warning(c, c.content_span().source_text(ctx.text));
+        if !allowed || suppressed_comment(c.span.source_text(ctx.text)) {
             findings.report(c.span.start as usize, None);
         }
     }

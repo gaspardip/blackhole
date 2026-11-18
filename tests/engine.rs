@@ -1,9 +1,107 @@
-use blackhole_check::engine::{Family, FileCtx, Findings, Rule, Run, registry, run};
+use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Rule, Run, registry, run};
 
 fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
     for (offset, _) in ctx.text.rmatch_indices('x') {
         findings.report(offset, Some("marker"));
     }
+}
+
+#[test]
+fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
+    for (open, close) in [("(", ")"), ("[", "]")] {
+        let judge = |depth| {
+            let text = format!(
+                "// ordinary comment\nconst x = {}0{};",
+                open.repeat(depth),
+                close.repeat(depth)
+            );
+            locations(&run(registry(), [("depth.ts", text.as_bytes())]))
+        };
+        let expected = judge(3);
+        assert_eq!(expected, [("ts/no-comments", 1, 1)]);
+        assert_eq!(judge(100_000), expected);
+    }
+}
+
+#[test]
+fn exported_alias_chain_is_judged_in_linear_time() {
+    use std::{
+        fmt::Write as _,
+        time::{Duration, Instant},
+    };
+    let mut text = String::from("/** Public value. */\ntype T0 = number;\n");
+    for i in 1..4000 {
+        writeln!(text, "type T{i} = T{};", i - 1).unwrap();
+    }
+    text.push_str("export type Last = T3999;");
+    let start = Instant::now();
+    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn diagnostic_points_to_the_offending_token() {
+    for (text, line, col) in [
+        ("let x;\nlet x;", 2, 5),
+        ("const x=1;export {x};\nexport {x};", 2, 9),
+        ("tag: {\ntag: {} }", 2, 1),
+        ("const x = [1", 1, 13),
+        ("break;", 1, 1),
+    ] {
+        let hits = run(registry(), [("a.mjs", text.as_bytes())]);
+        assert_eq!(
+            locations(&hits),
+            [("core/unparseable", line, col)],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn literal_nuls_are_parse_errors_across_encodings() {
+    let text = "\u{feff}// 🌑\nconst \0x = 1;";
+    let encodings = [
+        text.as_bytes()[3..].to_vec(),
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+        text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        text.chars()
+            .flat_map(|c| u32::from(c).to_le_bytes())
+            .collect(),
+        text.chars()
+            .flat_map(|c| u32::from(c).to_be_bytes())
+            .collect(),
+    ];
+    for bytes in encodings {
+        let hits = run(registry(), [("a.js", bytes.as_slice())]);
+        assert_eq!(locations(&hits), [("core/unparseable", 2, 7)]);
+    }
+}
+
+#[test]
+fn license_lines_use_ecmascript_line_terminators() {
+    for end in ["\n", "\r\n", "\r", "\u{2028}", "\u{2029}"] {
+        let text = format!("/* text{end} * @license MIT{end} */ const x = 1;");
+        assert!(
+            run(registry(), [("a.js", text.as_bytes())]).is_empty(),
+            "{end:?}"
+        );
+    }
+}
+
+#[test]
+fn default_export_identifier_cannot_carry_docs() {
+    let hits = run(
+        registry(),
+        [(
+            "a.ts",
+            b"const x = 42;\nexport default /** arbitrary */ x;".as_slice(),
+        )],
+    );
+    assert_eq!(locations(&hits), [("ts/no-comments", 2, 16)]);
 }
 
 #[test]
@@ -40,6 +138,10 @@ fn registry_sorted_and_unique() {
     let rules = registry();
     assert!(rules.iter().any(|r| r.id == "core/no-suppression"));
     assert!(rules.windows(2).all(|w| w[0].id < w[1].id));
+}
+
+fn locations(findings: &[Finding]) -> Vec<(&'static str, usize, usize)> {
+    findings.iter().map(|f| (f.rule, f.line, f.col)).collect()
 }
 
 fn places(text: &[u8]) -> Vec<(usize, usize)> {
@@ -138,13 +240,7 @@ fn parsed_kinds_share_the_decoded_source() {
             .flat_map(u16::to_le_bytes)
             .collect();
         let found = run(registry(), [(path.as_str(), bytes.as_slice())]);
-        assert_eq!(
-            found
-                .iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
-            [("ts/no-comments", 2, 6)]
-        );
+        assert_eq!(locations(&found), [("ts/no-comments", 2, 6)]);
         let broken = run(
             registry(),
             [(
@@ -153,10 +249,7 @@ fn parsed_kinds_share_the_decoded_source() {
             )],
         );
         assert_eq!(
-            broken
-                .iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
+            locations(&broken),
             [("core/no-suppression", 1, 2), ("core/unparseable", 2, 7)]
         );
         assert!(broken[1].note.as_ref().is_some_and(|n| !n.is_empty()));
@@ -206,7 +299,6 @@ fn a_directive_too_long_to_read_is_reported() {
         ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
         ("a.go", format!("//{}nolint\n", " ".repeat(4096))),
         ("cut.go", format!("//{}nolint\n", " ".repeat(4091))),
-        ("a.ts", format!("/** {pad} */\nexport const a = 1;\n")),
     ] {
         let found = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(found.len(), 1, "{path}");
@@ -216,6 +308,17 @@ fn a_directive_too_long_to_read_is_reported() {
             "{path}"
         );
     }
+    let text = format!("/** {pad} */\nexport const a = 1;\n");
+    let hits = run(registry(), [("a.ts", text.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|f| (f.rule, f.note.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("core/no-suppression", Some("directive too long to read")),
+            ("ts/no-comments", None)
+        ]
+    );
     // A comment that never closes before the end of the file hides nothing.
     assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
 }

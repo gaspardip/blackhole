@@ -5,6 +5,7 @@ use oxc::{
     parser::{ParseOptions, Parser},
     semantic::{Semantic, SemanticBuilder},
     span::SourceType,
+    syntax::line_terminator::is_line_terminator,
 };
 
 pub enum Family {
@@ -92,7 +93,7 @@ pub fn registry() -> &'static [Rule] {
 }
 
 // A UTF-32LE mark starts with the UTF-16LE mark.
-fn decode(bytes: &[u8]) -> String {
+fn decode(bytes: &[u8]) -> (String, Option<usize>) {
     let wide = |unit: fn([u8; 2]) -> u16| {
         let units: Vec<_> = bytes[2..].as_chunks().0.iter().copied().map(unit).collect();
         String::from_utf16_lossy(&units)
@@ -114,8 +115,11 @@ fn decode(bytes: &[u8]) -> String {
         [0xfe, 0xff, ..] => wide(u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     };
-    text.retain(|c| c != '\0');
-    text
+    let nul = text.find('\0');
+    if nul.is_some() {
+        text.retain(|c| c != '\0');
+    }
+    (text, nul)
 }
 
 pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
@@ -125,7 +129,13 @@ pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
 }
 
 fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {
-    let at = error.labels.first().map_or(0, LabeledSpan::offset);
+    // Oxc marks primary spans explicitly or puts the offending span after related declarations.
+    let at = error
+        .labels
+        .iter()
+        .find(|label| label.primary())
+        .or_else(|| error.labels.last())
+        .map_or(0, LabeledSpan::offset);
     (at as usize, error.message.to_string())
 }
 
@@ -173,52 +183,83 @@ fn source_type(path: &str) -> Option<SourceType> {
     Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
 }
 
+type Hit = (usize, &'static str, Option<String>);
+
+fn collect(
+    rules: &[Rule],
+    path: &str,
+    text: &str,
+    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
+) -> Vec<Hit> {
+    let ts = parsed.ok().flatten();
+    let ctx = FileCtx {
+        path,
+        text,
+        comments: ts.map(|ts| ts.comments),
+    };
+    let mut hits = Vec::new();
+    for rule in rules {
+        let mut findings = Findings::default();
+        match rule.run {
+            Run::File(check) => check(&ctx, &mut findings),
+            Run::Ts(check) => {
+                if let Some(ts) = ts {
+                    check(ts, &mut findings);
+                }
+            }
+            Run::ParseError => {
+                if let Err((at, message)) = parsed {
+                    findings.report(*at, Some(message));
+                }
+            }
+        }
+        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+    }
+    hits
+}
+
+fn parsed_hits(
+    rules: &[Rule],
+    path: &str,
+    text: &str,
+    kind: SourceType,
+) -> Result<Vec<Hit>, (usize, String)> {
+    // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
+    const STACK_BYTES: usize = 768 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn_scoped(scope, || {
+                let arena = Allocator::default();
+                let ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&ts))))
+            })
+            .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
+            .join()
+            .map_err(|_| (0, "Parser panicked".to_owned()))?
+    })
+}
+
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let text = decode(bytes);
-        let arena = Allocator::default();
-        // A parser that panics has not read the file, which is a finding like any other parse failure.
-        let parsed = source_type(path).map(|kind| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                parse(&arena, path, &text, kind)
-            }))
-            .unwrap_or_else(|_| Err((0, "Parser panicked".to_owned())))
-        });
-        let ts = parsed.as_ref().and_then(|parsed| parsed.as_ref().ok());
-        let ctx = FileCtx {
-            path,
-            text: &text,
-            comments: ts.map(|ts| ts.comments),
-        };
-        let mut hits = Vec::new();
-        for rule in rules {
-            let mut findings = Findings::default();
-            match rule.run {
-                Run::File(check) => check(&ctx, &mut findings),
-                Run::Ts(check) => {
-                    if let Some(ts) = ts {
-                        check(ts, &mut findings);
-                    }
-                }
-                Run::ParseError => {
-                    if let Some(Err((at, message))) = &parsed {
-                        findings.report(*at, Some(message));
-                    }
-                }
-            }
-            hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+        let (text, nul) = decode(bytes);
+        let mut hits = match (source_type(path), nul) {
+            (Some(_), Some(at)) => Err((at, "NUL in source text".to_owned())),
+            (Some(kind), None) => parsed_hits(rules, path, &text, kind),
+            (None, _) => Ok(collect(rules, path, &text, Ok(None))),
         }
+        .unwrap_or_else(|error| collect(rules, path, &text, Err(&error)));
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
             for (at, ch) in text[previous..offset].char_indices() {
                 // A carriage return before a line feed is the same break, counted at the line feed.
-                let alone = ch == '\r' && !text[previous + at + 1..].starts_with('\n');
-                if alone || matches!(ch, '\n' | '\u{2028}' | '\u{2029}') {
+                let crlf = ch == '\r' && text[previous + at + 1..].starts_with('\n');
+                if is_line_terminator(ch) && !crlf {
                     line += 1;
                     col = 1;
                 } else {
