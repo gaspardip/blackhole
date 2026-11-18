@@ -60,3 +60,6 @@ pub(super) fn single<'a>(
         _ => None,
     }
 }
+pub(super) fn suite(name: &str) -> bool {
+    matches!(name, "describe" | "suite" | "context")
+}

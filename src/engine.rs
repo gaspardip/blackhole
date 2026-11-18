@@ -75,6 +75,7 @@ pub fn registry() -> &'static [Rule] {
         },
         crate::packs::ts::no_comments::RULE,
         crate::packs::ts::no_fixed_sleep::RULE,
+        crate::packs::ts::no_flake_masking::RULE,
         crate::packs::ts::no_test_doubles::RULE,
         crate::packs::ts::no_unsignaled_poll::RULE,
         crate::packs::ts::strict_msw::RULE,
