@@ -142,6 +142,14 @@ fn c_splices_inside_directive_tokens() {
 }
 
 #[test]
+fn a_comment_only_trigraphs_close_is_reported() {
+    let text = "#pragma GCC /* x *??/\n/ y */ diagnostic ignored \"-Wunused-variable\"";
+    let found = run(registry(), [("x.c", text.as_bytes())]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
+}
+
+#[test]
 fn an_attribute_that_never_closes_is_reported() {
     let text = format!("{}[doc = \"open\nfn f() {{}}\n", '#');
     let found = run(registry(), [("a.rs", text.as_bytes())]);

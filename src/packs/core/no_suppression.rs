@@ -230,11 +230,14 @@ fn skip(mut text: &str, gaps: bool) -> Result<&str, End> {
             rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
             if let Some(inner) = pair(rest, '/', '*') {
                 let window = reach(inner);
-                let close = window
-                    .match_indices('*')
-                    .find_map(|(at, _)| pair(&window[at..], '*', '/'));
+                let close = window.match_indices('*').find_map(|(at, _)| {
+                    let after = pair(&window[at..], '*', '/')?;
+                    Some((&window[at..window.len() - after.len()], after))
+                });
                 match close {
-                    Some(after) => rest = &inner[window.len() - after.len()..],
+                    // A compiler that leaves trigraphs alone reads on to a later end, so the text after this one has two readings.
+                    Some((closer, _)) if closer.contains("??/") => return Err(End),
+                    Some((_, after)) => rest = &inner[window.len() - after.len()..],
                     // A comment that closes past the window could hide the rest of a directive.
                     None if window.len() < inner.len() => return Err(End),
                     None => {}
