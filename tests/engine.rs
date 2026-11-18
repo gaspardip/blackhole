@@ -148,3 +148,20 @@ fn window_cut_inside_attribute_token() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].note.as_deref(), Some("directive too long to read"));
 }
+
+#[test]
+fn env_options_can_name_multiple_interpreters() {
+    let scripts = [
+        "-Spython3",
+        "--split-string=python3",
+        "-S -u /bin/bash python3",
+    ]
+    .map(|options| format!("#!/usr/bin/env {options}\n# noqa\n"));
+    let lines = scripts.map(|text| {
+        run(registry(), [("script", text.as_bytes())])
+            .into_iter()
+            .map(|f| f.line)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(lines, [vec![2], vec![2], vec![2]]);
+}

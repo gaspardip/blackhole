@@ -511,25 +511,42 @@ fn unescape(text: &str) -> (String, Vec<usize>) {
     (out, origin)
 }
 
-fn script_kind(text: &str) -> Option<&'static str> {
-    let line = text
-        .lines()
-        .next()?
-        .strip_prefix("#!")?
-        .to_ascii_lowercase();
-    // Any word may be the interpreter: env takes options, assignments and a quoted command before it.
-    line.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
-        .find_map(|word| {
-            let name = word.rsplit('/').next()?;
-            match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
-                "sh" | "bash" | "dash" | "ksh" => Some("sh"),
-                "python" | "pypy" => Some("py"),
-                "node" | "nodejs" | "deno" | "bun" | "ts-node" | "tsx" => Some("js"),
-                "ruby" => Some("rb"),
-                "php" => Some("php"),
-                _ => None,
+fn interpreter(word: &str) -> Option<&'static str> {
+    let name = word.rsplit('/').next()?.to_ascii_lowercase();
+    match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.') {
+        "sh" | "bash" | "dash" | "ksh" => Some("sh"),
+        "python" | "pypy" => Some("py"),
+        "node" | "nodejs" | "deno" | "bun" | "ts-node" | "tsx" => Some("js"),
+        "ruby" => Some("rb"),
+        "php" => Some("php"),
+        _ => None,
+    }
+}
+
+fn script_kinds(text: &str) -> Vec<&'static str> {
+    let Some(line) = text.lines().next().and_then(|line| line.strip_prefix("#!")) else {
+        return Vec::new();
+    };
+    let words = line
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\''))
+        .filter(|word| !word.is_empty());
+    let mut args = words.clone();
+    let env_options = args.next().and_then(|path| path.rsplit('/').next()) == Some("env")
+        && args.any(|word| word.starts_with('-'));
+    if !env_options {
+        return words.clone().find_map(interpreter).into_iter().collect();
+    }
+    let mut kinds = Vec::new();
+    for word in words {
+        for piece in word.split("-S").flat_map(|piece| piece.split('=')) {
+            if let Some(kind) = interpreter(piece)
+                && !kinds.contains(&kind)
+            {
+                kinds.push(kind);
             }
-        })
+        }
+    }
+    kinds
 }
 
 fn listed(kind: &str) -> impl Iterator<Item = &'static str> {
@@ -556,9 +573,17 @@ fn check(ctx: &FileCtx<'_>, hits: &mut Findings) {
                         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
                 })
                 .map(|_| "dockerfile")
-        })
-        .or_else(|| script_kind(ctx.text));
-    let Some(kind) = kind else { return };
+        });
+    if let Some(kind) = kind {
+        check_kind(kind, ctx, hits);
+    } else {
+        for kind in script_kinds(ctx.text) {
+            check_kind(kind, ctx, hits);
+        }
+    }
+}
+
+fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
     if kind == "rs" {
         // Rust attributes are case-sensitive, and so is the prefix of a raw string.
         rust(ctx.text, hits);
