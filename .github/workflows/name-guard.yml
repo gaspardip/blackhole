@@ -18,14 +18,13 @@ jobs:
   name-guard:
     # A public pass or fail on text a stranger wrote would let them confirm a guessed name,
     # so the scan runs only on events from people who can already write to the repository.
+    # The comment comes first: a comment event also carries the issue it is on.
     if: >-
       github.event_name == 'push' || github.event_name == 'release' ||
-      (github.event_name == 'pull_request_target' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-      (github.event_name == 'issues' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
-      (github.event_name == 'issue_comment' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+        github.event.comment.author_association ||
+        github.event.pull_request.author_association ||
+        github.event.issue.author_association)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:

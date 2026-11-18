@@ -169,6 +169,12 @@ class Staged(Repo):
         git(self.dir, "checkout", "-q", "-b", "fix/quokka-sync")
         self.assertEqual(run(["staged"], self.dir).returncode, 1)
 
+    def test_deleting_a_badly_named_file_is_allowed(self) -> None:
+        self.write("quokka.txt", "fine\n")
+        self.commit("chore: start")
+        git(self.dir, "rm", "-q", "quokka.txt")
+        self.assertEqual(run(["staged"], self.dir).returncode, 0)
+
     def test_unstaged_content_is_ignored(self) -> None:
         self.write("a.txt", "fine\n")
         git(self.dir, "add", "-A")
@@ -179,8 +185,7 @@ class Staged(Repo):
 class OddPaths(Repo):
     def setUp(self) -> None:
         super().setUp()
-        with open(os.path.join(os.fsencode(self.dir), b"caf\xe9.txt"), "wb") as odd:
-            odd.write(b"Quokka\n")
+        Path(self.dir, os.fsdecode(b"caf\xe9.txt")).write_bytes(b"Quokka\n")
 
     def test_staged_content_under_a_non_utf8_name_is_caught(self) -> None:
         git(self.dir, "add", "-A")
@@ -216,6 +221,16 @@ class Range(Repo):
         self.write("a.txt", "fine\n")
         head = self.commit("fix: clean a")
         self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
+
+    def test_a_blob_repeated_across_commits_is_reported_once(self) -> None:
+        base = self.commit("chore: start")
+        self.write("a.txt", "Quokka\n")
+        self.commit("feat: add a")
+        git(self.dir, "mv", "a.txt", "b.txt")
+        head = self.commit("refactor: move a")
+        done = run(["range", base, head], self.dir)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stderr.count("banned name #1"), 1)
 
     def test_message_in_range_is_caught(self) -> None:
         base = self.commit("chore: start")

@@ -20,7 +20,7 @@ DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
 ZERO = re.compile(r"^0+$")
 GITLINK = "160000"
-RAW = ("--no-renames", "--no-abbrev")
+RAW = ("--raw", "-z", "--no-renames", "--no-abbrev")
 USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text"
 
 
@@ -77,10 +77,10 @@ class Entry:
 
 
 def diff_entries(raw: bytes) -> list[Entry]:
-    """Parses `--raw -z --no-renames` output: `:old new oldid newid status NUL path NUL`."""
-    fields = raw.split(b"\x00")
+    """Parses RAW output: `:old new oldid newid status NUL path NUL`."""
+    fields = raw.split(b"\x00")[:-1]
     entries = []
-    for meta, path in zip(fields[0::2], fields[1::2], strict=False):
+    for meta, path in zip(fields[0::2], fields[1::2], strict=True):
         _, mode, _, blob, _ = meta.decode().lstrip(":").split()
         entries.append(Entry(mode, blob, decode(path)))
     return entries
@@ -100,6 +100,7 @@ def tree_entries(raw: bytes) -> list[Entry]:
 class Guard:
     patterns: list[re.Pattern[str]]
     hits: list[str] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
 
     def redact(self, label: str) -> str:
         shown = normalize(label)
@@ -118,10 +119,15 @@ class Guard:
         self.scan(f"{kind} {value}", value)
 
     def entry(self, entry: Entry, origin: str = "") -> None:
+        if ZERO.match(entry.blob):  # a deletion adds nothing
+            return
         self.name(f"{origin}file name", entry.path)
+        if entry.mode == GITLINK or entry.blob in self.seen:
+            return
+        self.seen.add(entry.blob)
         # Blobs are read by id, so a path git prints differently than we decode it cannot hide one.
-        if entry.mode != GITLINK and not ZERO.match(entry.blob):
-            self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
+        # shortcut: one git process per blob; switch to `cat-file --batch` when the hook gets slow.
+        self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
 
     def env_text(self) -> None:
         for key in sorted(os.environ):
@@ -131,7 +137,7 @@ class Guard:
     def commit(self, sha: str) -> None:
         short = sha[:9]
         self.scan(f"commit {short}", decode(git("cat-file", "commit", sha)))
-        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", "--raw", "-z", *RAW, sha)
+        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", *RAW, sha)
         for entry in diff_entries(changed):
             self.entry(entry, f"{short} ")
 
@@ -145,7 +151,7 @@ class Guard:
             ["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, check=False
         )
         self.name("branch", decode(branch.stdout).strip())
-        for entry in diff_entries(git("diff", "--cached", "--raw", "-z", *RAW)):
+        for entry in diff_entries(git("diff", "--cached", *RAW)):
             self.entry(entry)
 
     def tree(self) -> None:
