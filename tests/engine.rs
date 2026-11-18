@@ -1,4 +1,4 @@
-use blackhole_check::engine::{Family, FileCtx, Findings, Rule, Run, registry, run};
+use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Rule, Run, registry, run};
 
 fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
     for (offset, _) in ctx.text.rmatch_indices('x') {
@@ -15,10 +15,7 @@ fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
                 open.repeat(depth),
                 close.repeat(depth)
             );
-            run(registry(), [("depth.ts", text.as_bytes())])
-                .into_iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>()
+            locations(&run(registry(), [("depth.ts", text.as_bytes())]))
         };
         let expected = judge(3);
         assert_eq!(expected, [("ts/no-comments", 1, 1)]);
@@ -57,9 +54,7 @@ fn diagnostic_points_to_the_offending_token() {
     ] {
         let hits = run(registry(), [("a.mjs", text.as_bytes())]);
         assert_eq!(
-            hits.iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
+            locations(&hits),
             [("core/unparseable", line, col)],
             "{text}"
         );
@@ -82,12 +77,7 @@ fn literal_nuls_are_parse_errors_across_encodings() {
     ];
     for bytes in encodings {
         let hits = run(registry(), [("a.js", bytes.as_slice())]);
-        assert_eq!(
-            hits.iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
-            [("core/unparseable", 2, 7)]
-        );
+        assert_eq!(locations(&hits), [("core/unparseable", 2, 7)]);
     }
 }
 
@@ -111,12 +101,7 @@ fn default_export_identifier_cannot_carry_docs() {
             b"const x = 42;\nexport default /** arbitrary */ x;".as_slice(),
         )],
     );
-    assert_eq!(
-        hits.iter()
-            .map(|f| (f.rule, f.line, f.col))
-            .collect::<Vec<_>>(),
-        [("ts/no-comments", 2, 16)]
-    );
+    assert_eq!(locations(&hits), [("ts/no-comments", 2, 16)]);
 }
 
 #[test]
@@ -153,6 +138,10 @@ fn registry_sorted_and_unique() {
     let rules = registry();
     assert!(rules.iter().any(|r| r.id == "core/no-suppression"));
     assert!(rules.windows(2).all(|w| w[0].id < w[1].id));
+}
+
+fn locations(findings: &[Finding]) -> Vec<(&'static str, usize, usize)> {
+    findings.iter().map(|f| (f.rule, f.line, f.col)).collect()
 }
 
 fn places(text: &[u8]) -> Vec<(usize, usize)> {
@@ -205,13 +194,7 @@ fn parsed_kinds_share_the_decoded_source() {
             .flat_map(u16::to_le_bytes)
             .collect();
         let found = run(registry(), [(path.as_str(), bytes.as_slice())]);
-        assert_eq!(
-            found
-                .iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
-            [("ts/no-comments", 2, 6)]
-        );
+        assert_eq!(locations(&found), [("ts/no-comments", 2, 6)]);
         let broken = run(
             registry(),
             [(
@@ -220,10 +203,7 @@ fn parsed_kinds_share_the_decoded_source() {
             )],
         );
         assert_eq!(
-            broken
-                .iter()
-                .map(|f| (f.rule, f.line, f.col))
-                .collect::<Vec<_>>(),
+            locations(&broken),
             [("core/no-suppression", 1, 2), ("core/unparseable", 2, 7)]
         );
         assert!(broken[1].note.as_ref().is_some_and(|n| !n.is_empty()));
