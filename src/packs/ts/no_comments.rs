@@ -269,12 +269,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if ctx.comments.is_empty() {
         return;
     }
+    let suppressed: HashSet<_> = ctx
+        .comments
+        .iter()
+        .filter(|c| suppressed_comment(c.span.source_text(ctx.text)))
+        .map(|c| c.span.start)
+        .collect();
     let directives: HashSet<_> = ctx
         .comments
         .iter()
         .filter(|c| {
-            directive(c.content_span().source_text(ctx.text))
-                && !suppressed_comment(c.span.source_text(ctx.text))
+            directive(c.content_span().source_text(ctx.text)) && !suppressed.contains(&c.span.start)
         })
         .map(|c| c.span.start)
         .collect();
@@ -294,9 +299,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .filter_map(|(_, n)| doc_before(ctx, n.span().start, &directives))
         .collect();
     for c in ctx.comments {
-        if !directives.contains(&c.span.start)
-            && !documented.contains(&c.span.start)
-            && !warning(c, c.content_span().source_text(ctx.text))
+        if suppressed.contains(&c.span.start)
+            || !directives.contains(&c.span.start)
+                && !documented.contains(&c.span.start)
+                && !warning(c, c.content_span().source_text(ctx.text))
         {
             findings.report(c.span.start as usize, None);
         }

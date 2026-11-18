@@ -160,7 +160,6 @@ fn a_directive_too_long_to_read_is_reported() {
         ("a.sh", format!("# shellcheck {pad} disable=SC2086\n")),
         ("a.go", format!("//{}nolint\n", " ".repeat(4096))),
         ("cut.go", format!("//{}nolint\n", " ".repeat(4091))),
-        ("a.ts", format!("/** {pad} */\nexport const a = 1;\n")),
     ] {
         let found = run(registry(), [(path, text.as_bytes())]);
         assert_eq!(found.len(), 1, "{path}");
@@ -170,6 +169,17 @@ fn a_directive_too_long_to_read_is_reported() {
             "{path}"
         );
     }
+    let text = format!("/** {pad} */\nexport const a = 1;\n");
+    let hits = run(registry(), [("a.ts", text.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|f| (f.rule, f.note.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("core/no-suppression", Some("directive too long to read")),
+            ("ts/no-comments", None)
+        ]
+    );
     // A comment that never closes before the end of the file hides nothing.
     assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
 }
