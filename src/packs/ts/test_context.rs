@@ -1,5 +1,5 @@
 use super::values::MemberKeys;
-use super::values::{Invocation, call_expr, invoked, path, resolve};
+use super::values::{Invocation, Origin, call_expr, invoked, origin_path, resolve};
 use crate::engine::TsCtx;
 use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
 use oxc::span::GetSpan;
@@ -65,11 +65,19 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+enum ModuleRoot {
+    #[default]
+    None,
+    DefaultTest,
+    CallableTest,
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Runner<'a> {
     prefix: [&'a str; 3],
     length: usize,
-    module_default_test: bool,
+    module_root: ModuleRoot,
     pub(super) last: Option<&'a str>,
     pub(super) skipped: bool,
     pub(super) skip_at: Option<usize>,
@@ -77,7 +85,27 @@ pub(crate) struct Runner<'a> {
 }
 impl<'a> Runner<'a> {
     fn push(&mut self, name: &'a str) {
-        let name = if std::mem::take(&mut self.module_default_test) && name == "default" {
+        let root = std::mem::take(&mut self.module_root);
+        if root == ModuleRoot::CallableTest
+            && matches!(
+                name,
+                "default"
+                    | "test"
+                    | "it"
+                    | "describe"
+                    | "suite"
+                    | "before"
+                    | "after"
+                    | "beforeEach"
+                    | "afterEach"
+                    | "mock"
+                    | "assert"
+                    | "run"
+            )
+        {
+            self.length = 0;
+        }
+        let name = if root != ModuleRoot::None && name == "default" {
             "test"
         } else {
             name
@@ -126,15 +154,22 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             e = m.object();
             continue;
         }
-        if let Some(parts) = path(ctx, e) {
+        if let Some((origin, parts)) = origin_path(ctx, e) {
             let mut result = Runner::default();
-            let names = match parts.as_slice() {
-                ["node:test" | "@playwright/test", rest @ ..] => {
-                    result.module_default_test = true;
+            let names = match (origin, parts.as_slice()) {
+                (Origin::Global, names)
+                | (_, names @ ["node:timers/promises" | "timers/promises", ..]) => names,
+                (Origin::Required, ["node:test", rest @ ..]) => {
+                    result.push("test");
+                    result.module_root = ModuleRoot::CallableTest;
                     rest
                 }
-                ["vitest" | "@jest/globals", rest @ ..] => rest,
-                other => other,
+                (_, ["node:test" | "@playwright/test", rest @ ..]) => {
+                    result.module_root = ModuleRoot::DefaultTest;
+                    rest
+                }
+                (_, ["vitest" | "@jest/globals", rest @ ..]) => rest,
+                _ => return Runner::default(),
             };
             for name in names {
                 result.push(name);

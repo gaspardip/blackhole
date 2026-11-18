@@ -117,6 +117,13 @@ pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool
         return false;
     };
 
+    if parts.len() == 2
+        && matches!(parts[0], "vi" | "vitest" | "jest")
+        && super::values::origin_path(ctx, call.callee)
+            .is_some_and(|(origin, _)| origin != super::values::Origin::Global)
+    {
+        return false;
+    }
     match parts.as_slice() {
         [
             "@tauri-apps/api/mocks",

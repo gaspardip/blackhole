@@ -211,6 +211,34 @@ impl<'a> MemberKeys<'_, 'a> {
 }
 
 pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<&'a str>> {
+    Some(origin_path(ctx, expr)?.1)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Origin {
+    Global,
+    Module,
+    Required,
+}
+
+pub(super) fn required_module<'a>(
+    ctx: &TsCtx<'a>,
+    call: &'a CallExpression<'a>,
+) -> Option<&'a str> {
+    if !resolves_to_global(ctx, &call.callee, "require") {
+        return None;
+    }
+    let [arg] = call.arguments.as_slice() else {
+        return None;
+    };
+    literal(ctx, arg.as_expression()?)
+}
+
+pub(super) fn origin_path<'a>(
+    ctx: &TsCtx<'a>,
+    expr: &'a Expression<'a>,
+) -> Option<(Origin, Vec<&'a str>)> {
+    let mut origin = Origin::Global;
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
     let mut expr = expr;
@@ -225,14 +253,15 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
             continue;
         }
         if let Some(call) = call_expr(expr) {
-            let id = call.callee.get_identifier_reference()?;
-            if id.name != "require" || !ctx.semantic.is_reference_to_global_variable(id) {
-                return None;
-            }
-            let [arg] = call.arguments.as_slice() else {
-                return None;
-            };
-            parts.push(literal(ctx, arg.as_expression()?)?);
+            parts.push(required_module(ctx, call)?);
+            origin = Origin::Required;
+            break;
+        }
+        if let Expression::AwaitExpression(wait) = expr
+            && let Expression::ImportExpression(import) = resolve(ctx, &wait.argument)
+        {
+            parts.push(literal(ctx, &import.source)?);
+            origin = Origin::Module;
             break;
         }
         if matches!(expr, Expression::ImportMeta(_)) {
@@ -248,6 +277,14 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
             }
             break;
         }
+        let decl = ctx.semantic.symbol_declaration(symbol(ctx, id)?);
+        if let AstKind::ImportDeclaration(import) = ctx.semantic.nodes().parent_kind(decl.id())
+            && (import.import_kind.is_type()
+                || matches!(decl.kind(),AstKind::ImportSpecifier(spec) if spec.import_kind.is_type()))
+        {
+            return None;
+        }
+        origin = Origin::Module;
         let (source, imported) = import_of(ctx, id)?;
         match imported {
             Imported::Named(name) => parts.push(name),
@@ -264,7 +301,7 @@ pub(super) fn path<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Vec<
     ) {
         parts.remove(0);
     }
-    Some(parts)
+    Some((origin, parts))
 }
 
 pub(super) fn enclosing_functions<'ctx, 'a>(

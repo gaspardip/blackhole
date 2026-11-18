@@ -130,17 +130,28 @@ fn check_bindings<'a>(
         }
     }
 }
-fn runner_import(statement: &oxc::ast::ast::Statement<'_>) -> bool {
-    let oxc::ast::ast::Statement::ImportDeclaration(import) = statement else {
-        return false;
-    };
-    import.source.value.as_str().is_some_and(|source| {
-        matches!(source, "vitest" | "@jest/globals" | "node:test") || source.starts_with("vitest/")
-    })
+fn runner_module(source: &str) -> bool {
+    matches!(
+        source,
+        "vitest" | "@jest/globals" | "node:test" | "@playwright/test"
+    ) || source.starts_with("vitest/")
+}
+fn runner_import<'a>(ctx: &TsCtx<'a>, kind: AstKind<'a>) -> bool {
+    use oxc::ast::ast::ImportDeclarationSpecifier;
+    match kind {
+        AstKind::ImportDeclaration(import) => !import.import_kind.is_type() && import.specifiers.as_ref().is_none_or(|specs| specs.is_empty() || specs.iter().any(|spec| !matches!(spec,ImportDeclarationSpecifier::ImportSpecifier(s) if s.import_kind.is_type()))) && import.source.value.as_str().is_some_and(runner_module),
+        AstKind::CallExpression(call) => super::values::required_module(ctx,call).is_some_and(runner_module),
+        AstKind::ImportExpression(import) => super::values::literal(ctx,&import.source).is_some_and(runner_module),
+        _=>false,
+    }
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let test_code =
-        super::test_context::test_file(ctx.path) || ctx.program.body.iter().any(runner_import);
+    let test_code = super::test_context::test_file(ctx.path)
+        || ctx
+            .semantic
+            .nodes()
+            .iter()
+            .any(|n| runner_import(ctx, n.kind()));
     if test_code {
         super::saved_methods::check(ctx, findings);
     }
