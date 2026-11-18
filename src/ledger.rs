@@ -1,4 +1,4 @@
-use crate::engine::{Finding, Rule};
+use crate::engine::{Finding, Rule, registry};
 use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
@@ -52,22 +52,21 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
     Ok(rows)
 }
 
+// Git stores one spelling of a path, so any other spelling is a line no file can match.
 fn invalid_path(path: &str) -> bool {
-    path.is_empty()
-        || path.starts_with('/')
-        || path.contains(['\\', '\r', '\t', '\n'])
-        || path.split('/').any(|p| p == "..")
+    path.contains(['\\', '\r', '\t', '\n', '\0'])
+        || path.split('/').any(|p| matches!(p, "" | "." | ".."))
 }
 
 /// # Errors
-/// Rejects paths that cannot be represented in the ledger.
+/// Rejects rows that would not read back as written.
 pub fn write(rows: &Counts) -> io::Result<String> {
     let mut text = HEADER.to_owned();
     for ((rule, path), n) in rows {
-        if invalid_path(path) {
-            return Err(io::Error::other("invalid ledger path"));
-        }
         writeln!(text, "{rule}\t{n}\t{path}").unwrap();
+    }
+    if parse(text.as_bytes(), registry()).ok().as_ref() != Some(rows) {
+        return Err(io::Error::other("rows cannot be written to the ledger"));
     }
     Ok(text)
 }

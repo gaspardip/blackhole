@@ -34,19 +34,31 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
     found.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
+fn locate(cwd: &Path, what: &str) -> io::Result<PathBuf> {
+    let output = git(cwd, &["rev-parse", what])?;
+    std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
+        .map(PathBuf::from)
+        .map_err(io::Error::other)
+}
+
+// Held while the ledger is read and replaced, so two runs cannot interleave.
+pub(crate) fn lock() -> io::Result<fs::File> {
+    let dir = locate(&env::current_dir()?, "--absolute-git-dir")?;
+    let file = fs::File::create(dir.join("blackhole.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
     let cwd = env::current_dir()?;
-    let output = git(&cwd, &["rev-parse", "--show-toplevel"])?;
-    let root = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
-        .map_err(io::Error::other)?;
-    let root = &fs::canonicalize(root)?;
+    let root = fs::canonicalize(locate(&cwd, "--show-toplevel")?)?;
     let paths = paths
         .iter()
         .map(|p| resolve(&cwd.join(p)))
         .collect::<io::Result<Vec<_>>>()?;
     let mut matched = vec![false; paths.len()];
     let mut selected = Vec::new();
-    let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
+    let names = git(&root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
     for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
         let name = std::str::from_utf8(bytes).map_err(|_| {
             io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
@@ -85,5 +97,5 @@ pub(crate) fn list(paths: &[PathBuf]) -> io::Result<(PathBuf, Vec<String>)> {
     }
     selected.sort_unstable();
     selected.dedup();
-    Ok((root.to_owned(), selected))
+    Ok((root, selected))
 }

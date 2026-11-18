@@ -2,6 +2,8 @@ use std::{
     fs,
     path::Path,
     process::{Command, Output},
+    thread,
+    time::Duration,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -197,6 +199,8 @@ fn stale_and_deleted_entries_shrink() {
     );
     assert_eq!(check(root, &[], 1).stdout, stale.as_bytes());
     assert_eq!(check(root, &["b.py"], 0).stdout, b"");
+    let selected = format!("a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\n");
+    assert_eq!(check(root, &["a.py"], 1).stdout, selected.as_bytes());
     assert_eq!(regenerate(root, 0), b"");
     assert_eq!(
         fs::read(root.join(".blackhole/ledger")).unwrap(),
@@ -213,8 +217,51 @@ fn absent_baseline() {
     for path in ["a\tb.py", "a\nb.py"] {
         fs::write(root.join(path), "#noqa").unwrap();
     }
-    assert_eq!(regenerate(root, 1), check(root, &[], 1).stdout);
+    let found = regenerate(root, 1);
+    assert_eq!(found, check(root, &[], 1).stdout);
+    let found = String::from_utf8(found).unwrap();
+    for line in [
+        format!("a\tb.py:1:1 {RULE}\n"),
+        format!("a\nb.py:1:1 {RULE}\n"),
+    ] {
+        assert!(found.contains(&line), "{found:?}");
+    }
+    assert_eq!(found.matches(&format!("\n{RULE} Fix ")).count(), 1);
     assert!(!root.join(".blackhole/ledger").exists());
+}
+
+#[test]
+fn over_blocks_the_shrink() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    let before = baseline(root, &[("a.py", 1), ("gone.py", 1)]);
+    regenerate(root, 1);
+    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+}
+
+#[test]
+fn regeneration_waits_for_the_lock() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    let before = baseline(root, &[("a.py", 2)]);
+    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
+    );
 }
 
 #[test]
@@ -239,4 +286,21 @@ fn symlink_baseline() {
     fs::write(root.join("target"), HEADER).unwrap();
     std::os::unix::fs::symlink("../target", root.join(".blackhole/ledger")).unwrap();
     check(root, &[], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_ledger_directory() {
+    let dir = repo();
+    let root = dir.path();
+    let other = repo();
+    let outside = baseline(other.path(), &[("a.py", 2)]);
+    std::os::unix::fs::symlink(other.path().join(".blackhole"), root.join(".blackhole")).unwrap();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    check(root, &[], 2);
+    run(root, &["ledger"], 2);
+    assert_eq!(
+        fs::read(other.path().join(".blackhole/ledger")).unwrap(),
+        outside
+    );
 }

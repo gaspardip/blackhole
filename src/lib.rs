@@ -36,6 +36,7 @@ pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
 /// # Errors
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
+    let _lock = files::lock()?;
     let scan = scan(&[], output)?;
     if !scan.over && !scan.stale.is_empty() {
         replace(&scan.ledger, &scan.actual)?;
@@ -44,13 +45,22 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
 }
 
 // A repository without a ledger allows nothing, which is what an empty one says.
-fn read_ledger(path: &Path) -> io::Result<ledger::Counts> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => ledger::parse(&fs::read(path)?, engine::registry()),
-        Ok(_) => Err(io::Error::other(".blackhole/ledger must be a regular file")),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(ledger::Counts::new()),
-        Err(e) => Err(e),
+// A link at either level would point the ledger at a file outside the repository.
+fn read_ledger(home: &Path) -> io::Result<ledger::Counts> {
+    let ledger = home.join("ledger");
+    for (path, directory) in [(home, true), (ledger.as_path(), false)] {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if directory && meta.is_dir() || !directory && meta.is_file() => {}
+            Ok(_) => {
+                return Err(io::Error::other(
+                    ".blackhole must be a directory and .blackhole/ledger a regular file",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(ledger::Counts::new()),
+            Err(e) => return Err(e),
+        }
     }
+    ledger::parse(&fs::read(ledger)?, engine::registry())
 }
 
 // The rename is the only write to the ledger, so a crash leaves the old one whole.
@@ -70,8 +80,8 @@ struct Scan {
 
 fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     let (root, names) = files::list(paths)?;
-    let ledger = root.join(".blackhole/ledger");
-    let base = read_ledger(&ledger)?;
+    let home = root.join(".blackhole");
+    let base = read_ledger(&home)?;
     let rules = engine::registry();
     let mut findings = Vec::new();
     for name in &names {
@@ -89,7 +99,7 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     findings.retain(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())));
     report(&findings, output)?;
     Ok(Scan {
-        ledger,
+        ledger: home.join("ledger"),
         actual,
         over: !over.is_empty(),
         stale,
