@@ -13,12 +13,14 @@ use std::{cell::RefCell, collections::HashMap};
 pub(super) enum Class {
     None,
     Broad,
+    AliasBody(NodeId),
     Dictionary,
     Any,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Query {
     Interface(SymbolId),
+    PlainAlias,
     UnsafeDictionary,
     ObjectInput,
     UnknownAlias,
@@ -468,12 +470,43 @@ impl Environments {
             place,
         }
     }
+    fn plain_alias(ctx: &TsCtx<'_>, g: Goal, kind: AstKind<'_>, budget: &mut Budget) -> Plan {
+        let AstKind::TSTypeAliasDeclaration(alias) = kind else {
+            return Plan::Done(Class::None);
+        };
+        if alias.type_parameters.is_some() {
+            return Plan::Done(Class::None);
+        }
+        if let Some(TSType::TSTypeReference(r)) = budget.unparen(&alias.type_annotation)
+            && let TSTypeName::IdentifierReference(i) = &r.type_name
+            && let Some(sym) = symbol(ctx, i)
+        {
+            if r.type_arguments.is_some() {
+                return Plan::Done(Class::None);
+            }
+            return type_declarations(ctx, sym)
+                .next()
+                .map_or(Plan::Done(Class::None), |node| {
+                    Plan::child(
+                        Combine::First,
+                        Goal {
+                            term: Term { node, ..g.term },
+                            ..g
+                        },
+                    )
+                });
+        }
+        Plan::Done(Class::AliasBody(g.term.node))
+    }
     fn plan(&mut self, ctx: &TsCtx<'_>, g: Goal, budget: &mut Budget) -> Plan {
         let q = g.query;
         if let Query::Interface(sym) = q {
             return Self::interface(ctx, sym, budget);
         }
         let kind = ctx.semantic.nodes().kind(g.term.node);
+        if q == Query::PlainAlias {
+            return Self::plain_alias(ctx, g, kind, budget);
+        }
         let width = match kind {
             AstKind::TSUnionType(n) => n.types.len(),
             AstKind::TSIntersectionType(n) => n.types.len(),
@@ -617,6 +650,20 @@ impl Resolution {
             },
         )
     }
+    pub(super) fn plain_alias<'a>(&self, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> &'a TSType<'a> {
+        if let TSType::TSTypeReference(r) = ty.without_parenthesized()
+            && r.type_arguments.is_none()
+            && let TSTypeName::IdentifierReference(i) = &r.type_name
+            && let Some(sym) = symbol(ctx, i)
+            && ctx.semantic.scoping().symbol_flags(sym).is_type_alias()
+            && let Some(decl) = type_declarations(ctx, sym).next()
+            && let Class::AliasBody(id) = self.query(ctx, decl, Query::PlainAlias)
+            && let AstKind::TSTypeAliasDeclaration(alias) = ctx.semantic.nodes().kind(id)
+        {
+            return &alias.type_annotation;
+        }
+        ty
+    }
     pub(super) fn unsafe_dictionary(&self, ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
         matches!(
             kind,
@@ -645,6 +692,31 @@ mod tests {
     use super::{Budget, Class, Combine, Goal, Plan, Query, Term, evaluate};
     use oxc::syntax::node::NodeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn exhausted_alias_lookup_keeps_the_syntactic_assertion_verdict() {
+        use super::super::no_widen_then_assert::{RULE, check_with_resolution};
+        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+            let resolution = super::Resolution::default();
+            resolution.0.borrow_mut().budget = Some(Budget {
+                remaining: 0,
+                exhausted: false,
+            });
+            check_with_resolution(ctx, findings, &resolution);
+        }
+        let source = "type Wide = Record<string, unknown>;\nconst value: Wide = { id: 1 };\nconst picked = value as { id: number };";
+        assert!(
+            run(
+                &[Rule {
+                    run: Run::Ts(check),
+                    ..RULE
+                }],
+                [("alias.ts", source.as_bytes())]
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn exhausted_budget_reports_each_unjudged_alias() {

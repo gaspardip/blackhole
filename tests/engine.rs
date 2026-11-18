@@ -326,6 +326,46 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
+fn widening_through_aliases_matches_the_spelled_out_annotation() {
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-widen-then-assert")
+        .unwrap();
+    for annotation in ["Wide", "Record<string, unknown>"] {
+        for (initializer, source_type, reports) in [
+            ("source", "Wide", false),
+            ("source", "Record<string, unknown>", false),
+            ("{ id: 1 }", "Wide", true),
+            ("source", "Narrow", true),
+        ] {
+            let text = format!(
+                "type Wide = Record<string, unknown>;\ntype Narrow = {{ id: number }};\ndeclare const source: {source_type};\nconst value: {annotation} = {initializer};\nconst picked = value as {{ id: number }};"
+            );
+            let hits = run(std::slice::from_ref(rule), [("alias.ts", text.as_bytes())]);
+            let expected = if reports {
+                vec![(rule.id, 5, 16)]
+            } else {
+                vec![]
+            };
+            assert_eq!(locations(&hits), expected, "{text}");
+        }
+    }
+    for (decl, annotation) in [
+        ("type Generic<T> = Record<string, T>;", "Generic<unknown>"),
+        ("import type { External } from './other';", "External"),
+        ("type Loop = Other; type Other = Loop;", "Loop"),
+    ] {
+        let text = format!(
+            "{decl}\nconst value: {annotation} = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert!(
+            run(std::slice::from_ref(rule), [("alias.ts", text.as_bytes())]).is_empty(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn inherited_interface_members_determine_dictionary_safety() {
     let cases = [
         ("interface Base {}", "Base", true),
