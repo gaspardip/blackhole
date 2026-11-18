@@ -27,11 +27,18 @@ pub(crate) fn declarations<'a>(
 ) -> impl Iterator<Item = (NodeId, SymbolFlags)> + 'a {
     let scopes = ctx.semantic.scoping();
     let merged = scopes.symbol_redeclarations(symbol);
-    merged.is_empty().then(|| (scopes.symbol_declaration(symbol), scopes.symbol_flags(symbol))).into_iter()
+    let first = merged.is_empty().then(|| {
+        (
+            scopes.symbol_declaration(symbol),
+            scopes.symbol_flags(symbol),
+        )
+    });
+    first.into_iter()
         .chain(merged.iter().map(|d| (d.declaration, d.flags)))
         .map(|(id, flags)| {
             // The binder marks import-equals as a value import even for the type-only spelling.
-            if flags.contains(SymbolFlags::Import) && matches!(ctx.semantic.nodes().kind(id), AstKind::TSImportEqualsDeclaration(i) if i.import_kind.is_type()) {
+            let type_only = matches!(ctx.semantic.nodes().kind(id), AstKind::TSImportEqualsDeclaration(i) if i.import_kind.is_type());
+            if flags.contains(SymbolFlags::Import) && type_only {
                 (id, SymbolFlags::TypeImport)
             } else { (id, flags) }
         })

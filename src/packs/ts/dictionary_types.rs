@@ -144,10 +144,7 @@ enum Children {
     One(Goal),
     Many(Vec<Goal>),
 }
-struct Budget {
-    remaining: usize,
-    exhausted: bool,
-}
+struct Budget(Option<usize>);
 impl Budget {
     fn unparen<'a>(&mut self, mut ty: &'a TSType<'a>) -> Option<&'a TSType<'a>> {
         while let TSType::TSParenthesizedType(p) = ty {
@@ -159,12 +156,8 @@ impl Budget {
         Some(ty)
     }
     fn take(&mut self, steps: usize) -> bool {
-        if let Some(left) = self.remaining.checked_sub(steps) {
-            self.remaining = left;
-        } else {
-            self.exhausted = true;
-        }
-        !self.exhausted
+        self.0 = self.0.and_then(|left| left.checked_sub(steps));
+        self.0.is_some()
     }
 }
 
@@ -176,11 +169,10 @@ struct Solver {
 }
 impl Solver {
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
-        let budget = self.budget.get_or_insert_with(|| Budget {
-            // shortcut: 128 steps per syntax node per rule, revisit when ordinary aliases approach it.
-            remaining: ctx.semantic.nodes().len().saturating_mul(128),
-            exhausted: false,
-        });
+        // shortcut: 128 steps per syntax node per rule, revisit when ordinary aliases approach it.
+        let budget = self
+            .budget
+            .get_or_insert_with(|| Budget(Some(ctx.semantic.nodes().len().saturating_mul(128))));
         evaluate(&mut self.memo, goal, budget, |g, b| {
             self.envs.plan(ctx, g, b)
         })
@@ -219,9 +211,7 @@ fn evaluate(
             continue;
         }
         let p = plan(g, budget);
-        if !budget.take(p.children().len()) {
-            return None;
-        }
+        budget.0?;
         for &child in p.children() {
             if !memo.contains_key(&child) {
                 parents.entry(child).or_default().push(g);
@@ -465,27 +455,30 @@ impl Environments {
         args: &[TSType<'_>],
         budget: &mut Budget,
     ) -> Plan {
-        let mut env = 0;
-        let mut place = 0;
+        let mut body = Term {
+            node: a.type_annotation.node_id(),
+            env: 0,
+            place: 0,
+        };
         if let Some(params) = &a.type_parameters {
             let Some(inner) = self.enter(g.term.place, a.node_id.get(), budget) else {
                 return Plan::Done(Class::None);
             };
-            place = inner;
+            body.place = inner;
             if !budget.take(params.params.len()) {
                 return Plan::Done(Class::None);
             }
             for (index, p) in params.params.iter().enumerate() {
-                let (arg, arg_env, arg_place) = if let Some(arg) = args.get(index) {
-                    (arg, g.term.env, g.term.place)
+                let (arg, base) = if let Some(arg) = args.get(index) {
+                    (arg, g.term)
                 } else if let Some(arg) = &p.default {
-                    (arg, env, place)
+                    (arg, body)
                 } else {
                     return Plan::Done(Class::None);
                 };
-                let value = self.argument(ctx, arg, arg_env, arg_place, budget);
-                env = self.bind(Binding {
-                    outer: env,
+                let value = self.argument(ctx, arg, base, budget);
+                body.env = self.bind(Binding {
+                    outer: body.env,
                     symbol: p.name.symbol_id.get().unwrap(),
                     value,
                 });
@@ -501,37 +494,25 @@ impl Environments {
         } else {
             Combine::First
         };
-        Plan::child(
-            combine,
-            Goal {
-                term: Term {
-                    node: a.type_annotation.node_id(),
-                    env,
-                    place,
-                },
-                query,
-            },
-        )
+        Plan::child(combine, Goal { term: body, query })
     }
     fn argument(
         &mut self,
         ctx: &TsCtx<'_>,
         ty: &TSType<'_>,
-        env: usize,
-        place: usize,
+        base: Term,
         budget: &mut Budget,
     ) -> Term {
         if let Some(TSType::TSTypeReference(r)) = budget.unparen(ty)
             && let TSTypeName::IdentifierReference(i) = &r.type_name
             && let Some(sym) = symbol(ctx, i)
-            && let Some(value) = self.lookup(env, sym, budget)
+            && let Some(value) = self.lookup(base.env, sym, budget)
         {
             return value;
         }
         Term {
             node: ty.node_id(),
-            env,
-            place,
+            ..base
         }
     }
     fn plain_alias(ctx: &TsCtx<'_>, g: Goal, kind: AstKind<'_>, budget: &mut Budget) -> Plan {
@@ -571,13 +552,13 @@ impl Environments {
         if q == Query::PlainAlias {
             return Self::plain_alias(ctx, g, kind, budget);
         }
-        let width = match kind {
-            AstKind::TSUnionType(n) => n.types.len(),
-            AstKind::TSIntersectionType(n) => n.types.len(),
-            AstKind::TSTypeLiteral(n) => n.members.len(),
-            _ => 0,
-        };
-        if !budget.take(width) {
+        if let AstKind::TSTypeLiteral(n) = kind
+            && matches!(
+                q,
+                Query::UnsafeDictionary | Query::Target | Query::AliasTarget
+            )
+            && !budget.take(n.members.len())
+        {
             return Plan::Done(Class::None);
         }
         match (kind, q) {
@@ -773,10 +754,7 @@ mod tests {
         };
         let run = |limit| {
             let mut memo = HashMap::new();
-            let mut budget = Budget {
-                remaining: limit,
-                exhausted: false,
-            };
+            let mut budget = Budget(Some(limit));
             evaluate(&mut memo, goal(0), &mut budget, |g, _| {
                 let i = g.term.node.index();
                 let links = [[1, 4], [0, 2], [0, 3], [3, 3], [5, 3]];
@@ -803,10 +781,7 @@ mod tests {
 
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget {
-                remaining: 0,
-                exhausted: false,
-            });
+            resolution.0.borrow_mut().budget = Some(Budget(Some(0)));
             check_with_resolution(ctx, findings, &resolution);
         }
         let mut source = String::from(
@@ -840,10 +815,7 @@ mod tests {
         use crate::engine::{Findings, Rule, Run, TsCtx, run};
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget {
-                remaining: 0,
-                exhausted: false,
-            });
+            resolution.0.borrow_mut().budget = Some(Budget(Some(0)));
             check_with_resolution(ctx, findings, &resolution);
         }
         let source = "type Wide = Record<string, unknown>;\nconst value: Wide = { id: 1 };\nconst picked = value as { id: number };";
@@ -866,10 +838,7 @@ mod tests {
 
         fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             let resolution = super::Resolution::default();
-            resolution.0.borrow_mut().budget = Some(Budget {
-                remaining: 2,
-                exhausted: false,
-            });
+            resolution.0.borrow_mut().budget = Some(Budget(Some(2)));
             check_aliases(ctx, findings, &resolution);
         }
         let rules = [Rule {
@@ -906,10 +875,7 @@ mod tests {
             query: Query::UnknownAlias,
         };
         let mut calls = 0;
-        let mut budget = Budget {
-            remaining: usize::MAX,
-            exhausted: false,
-        };
+        let mut budget = Budget(Some(usize::MAX));
         let mut memo = HashMap::new();
         let mut plan = |g: Goal, _: &mut Budget| {
             calls += 1;
