@@ -16,34 +16,12 @@ permissions:
 
 jobs:
   name-guard:
-    # A public pass or fail on text a stranger wrote would let them confirm a guessed name,
-    # so the scan runs only on events from people who can already write to the repository.
-    # The comment comes first: a comment event also carries the issue it is on.
-    if: >-
-      github.event_name == 'push' || github.event_name == 'release' ||
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
-        github.event.comment.author_association ||
-        github.event.pull_request.author_association ||
-        github.event.issue.author_association)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       BLACKHOLE_BANNED: ${{ secrets.BANNED_NAMES }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      PUSH_BEFORE: ${{ github.event.before }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      GUARD_TEXT_REF: ${{ github.ref_name }}
-      GUARD_TEXT_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-      GUARD_TEXT_PR_TITLE: ${{ github.event.pull_request.title }}
-      GUARD_TEXT_PR_BODY: ${{ github.event.pull_request.body }}
-      GUARD_TEXT_ISSUE_TITLE: ${{ github.event_name == 'issues' && github.event.issue.title || '' }}
-      GUARD_TEXT_ISSUE_BODY: ${{ github.event_name == 'issues' && github.event.issue.body || '' }}
-      GUARD_TEXT_COMMENT: ${{ github.event.comment.body }}
-      GUARD_TEXT_RELEASE_NAME: ${{ github.event.release.name }}
-      GUARD_TEXT_RELEASE_TAG: ${{ github.event.release.tag_name }}
-      GUARD_TEXT_RELEASE_BODY: ${{ github.event.release.body }}
     steps:
       - name: scan
         run: |
@@ -52,22 +30,12 @@ jobs:
           cd repo
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch -q origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          if [ -n "${PR_NUMBER}" ]; then
+            git fetch -q origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+          fi
           # The guard always comes from the default branch; the scanned refs are data.
           guard="${RUNNER_TEMP}/name_guard.py"
           git show "origin/${DEFAULT_BRANCH}:tools/name_guard.py" > "${guard}"
-          case "${GITHUB_EVENT_NAME}" in
-            push)
-              if [ "${GITHUB_REF_TYPE}" = tag ]; then
-                GUARD_TEXT_TAG_OBJECT="$(git cat-file -p "${GITHUB_REF}")"
-                export GUARD_TEXT_TAG_OBJECT
-              fi
-              python3 -I "${guard}" range "${PUSH_BEFORE}" "${GITHUB_SHA}"
-              ;;
-            pull_request_target)
-              git fetch -q origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
-              python3 -I "${guard}" range "${PR_BASE_SHA}" "${PR_HEAD_SHA}"
-              ;;
-            *)
-              python3 -I "${guard}" text
-              ;;
-          esac
+          # The guard reads the event file itself and decides whose text to scan. Event text
+          # passed through `env:` would be printed in this public log before the guard ran.
+          python3 -I "${guard}" event
