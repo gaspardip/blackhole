@@ -1,1 +1,1 @@
-test("loads", async () => {});
+test("loads", async () => { expect(await load()).toEqual(expected); });

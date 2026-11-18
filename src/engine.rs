@@ -73,6 +73,7 @@ pub fn registry() -> &'static [Rule] {
             fix: "Make the file parse. The judge must be able to read it.",
             run: Run::ParseError,
         },
+        crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_comments::RULE,
         crate::packs::ts::no_fixed_sleep::RULE,
         crate::packs::ts::no_flake_masking::RULE,

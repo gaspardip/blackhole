@@ -11,6 +11,7 @@ mod packs {
         mod config_responses;
         mod double_mutations;
         mod native_properties;
+        pub(crate) mod no_assertionless_tests;
         pub(crate) mod no_comments;
         pub(crate) mod no_fixed_sleep;
         pub(crate) mod no_flake_masking;

@@ -1,1 +1,1 @@
-test.each([1, 2])("loads %i", async () => {});
+test.each([1, 2])("loads %i", async () => { expect(await load()).toEqual(expected); });

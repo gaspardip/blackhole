@@ -1,1 +1,1 @@
-test('x', async () => { await operation(); });
+test('x', async () => { await operation(); expect(readState()).toEqual(expectedState); });
