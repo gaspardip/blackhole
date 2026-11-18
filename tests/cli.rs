@@ -242,26 +242,49 @@ fn over_blocks_the_shrink() {
 
 #[test]
 fn regeneration_waits_for_the_lock() {
+    let other = repo();
+    // A caller's git variables must not move the lock away from the ledger it guards.
+    for separate in [false, true] {
+        let dir = repo();
+        let root = dir.path();
+        fs::write(root.join("a.py"), "#noqa").unwrap();
+        let before = baseline(root, &[("a.py", 2)]);
+        let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
+        lock.lock().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_blackhole"));
+        command.current_dir(root).arg("ledger");
+        if separate {
+            command
+                .env("GIT_DIR", other.path().join(".git"))
+                .env("GIT_WORK_TREE", root);
+        }
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        assert!(child.try_wait().unwrap().is_none(), "{separate}");
+        assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+        lock.unlock().unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            fs::read(root.join(".blackhole/ledger")).unwrap(),
+            format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_lock_is_refused() {
     let dir = repo();
     let root = dir.path();
+    let other = tempdir().unwrap();
+    let victim = other.path().join("victim");
+    fs::write(&victim, "kept").unwrap();
     fs::write(root.join("a.py"), "#noqa").unwrap();
     let before = baseline(root, &[("a.py", 2)]);
-    let lock = fs::File::create(root.join(".git/blackhole.lock")).unwrap();
-    lock.lock().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(root)
-        .arg("ledger")
-        .spawn()
-        .unwrap();
-    thread::sleep(Duration::from_millis(500));
-    assert!(child.try_wait().unwrap().is_none());
+    std::os::unix::fs::symlink(&victim, root.join(".git/blackhole.lock")).unwrap();
+    run(root, &["ledger"], 2);
+    assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
-    lock.unlock().unwrap();
-    assert!(child.wait().unwrap().success());
-    assert_eq!(
-        fs::read(root.join(".blackhole/ledger")).unwrap(),
-        format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
-    );
 }
 
 #[test]

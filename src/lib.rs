@@ -85,9 +85,11 @@ fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     let rules = engine::registry();
     let mut findings = Vec::new();
     for name in &names {
-        let bytes = fs::read(root.join(name))
+        let bytes = files::read(&root.join(name))
             .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
-        findings.extend(engine::run(rules, [(name.as_str(), bytes.as_slice())]));
+        if let Some(bytes) = bytes {
+            findings.extend(engine::run(rules, [(name.as_str(), bytes.as_slice())]));
+        }
     }
     let actual = ledger::counts(&findings);
     let over = ledger::excess(&actual, &base);
