@@ -7,6 +7,36 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn documentation_and_directives_use_javascript_whitespace() {
+    for gap in ['\u{85}', '\u{feff}', '\u{2028}'] {
+        for (source, allowed) in [
+            ("export default (/** docs */GAPclass {});", gap != '\u{85}'),
+            ("export = (/** docs */GAPclass {});", false),
+            ("/** docs */GAPexport class C {}", gap != '\u{85}'),
+            ("/* @jsxGAPh */", gap != '\u{85}'),
+            ("/* @ts-checkGAPexplanation */", gap != '\u{85}'),
+            ("/* #GAPsourceURL=x */", gap != '\u{85}'),
+            ("/* /GAP<reference types='node' /> */", gap != '\u{85}'),
+            ("/*\nGAP* @license MIT\n */", gap != '\u{85}'),
+        ] {
+            let text = source.replace("GAP", &gap.to_string());
+            let hits = run(registry(), [("a.ts", text.as_bytes())]);
+            let column = source.find('/').unwrap() + 1;
+            let expected = (!allowed).then_some(("ts/no-comments", 1, column));
+            assert_eq!(locations(&hits), expected.as_slice(), "{text:?}");
+        }
+    }
+    for (gap, allowed) in [('\u{85}', true), ('\u{feff}', false)] {
+        let text = format!("// WARNING:{gap}");
+        let hits = run(registry(), [("a.ts", text.as_bytes())]);
+        assert_eq!(
+            locations(&hits),
+            (!allowed).then_some(("ts/no-comments", 1, 1)).as_slice()
+        );
+    }
+}
+
+#[test]
 fn suppression_after_literal_nul_keeps_its_source_column() {
     let wide: Vec<_> = "\u{feff}const s = \"🌑\0c8 ignore\";"
         .encode_utf16()

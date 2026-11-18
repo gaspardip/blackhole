@@ -26,20 +26,26 @@ fn word_end(rest: &str) -> bool {
     !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn js_whitespace(c: char) -> bool {
+    oxc::syntax::identifier::is_white_space(c) || is_line_terminator(c)
+}
+
 fn directive(raw: &str) -> bool {
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
         .split(is_line_terminator)
         .map(|line| {
-            line.trim_start().strip_prefix('*').map_or(line, |rest| {
-                rest.strip_prefix(char::is_whitespace).unwrap_or(rest)
-            })
+            line.trim_start_matches(js_whitespace)
+                .strip_prefix('*')
+                .map_or(line, |rest| {
+                    rest.strip_prefix(js_whitespace).unwrap_or(rest)
+                })
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let value = value.trim();
-    let first = value.split_whitespace().next().unwrap_or("");
+    let value = value.trim_matches(js_whitespace);
+    let (first, argument) = value.split_once(js_whitespace).unwrap_or((value, ""));
     matches!(
         first,
         "eslint-enable"
@@ -78,18 +84,21 @@ fn directive(raw: &str) -> bool {
         || (matches!(
             first,
             "@jsx" | "@jsxFrag" | "@jsxImportSource" | "@jsxRuntime"
-        ) && value.split_whitespace().nth(1).is_some())
+        ) && !argument.trim_start_matches(js_whitespace).is_empty())
         || value.strip_prefix('/').is_some_and(|v| {
-            matches!(
-                v.split_whitespace().next(),
-                Some("<reference" | "<amd-module" | "<amd-dependency")
-            ) && v.trim_start().contains(char::is_whitespace)
+            v.trim_start_matches(js_whitespace)
+                .split_once(js_whitespace)
+                .is_some_and(|(tag, _)| {
+                    matches!(tag, "<reference" | "<amd-module" | "<amd-dependency")
+                })
         })
         || value.strip_prefix('#').is_some_and(|v| {
-            v.trim_start().starts_with("sourceURL=")
-                || v.trim_start().starts_with("sourceMappingURL=")
+            v.trim_start_matches(js_whitespace)
+                .starts_with("sourceURL=")
+                || v.trim_start_matches(js_whitespace)
+                    .starts_with("sourceMappingURL=")
         })
-        || value.lines().any(|v| {
+        || value.split('\n').any(|v| {
             v.starts_with("SPDX-License-Identifier:")
                 || v.strip_prefix("@license").is_some_and(word_end)
         })
@@ -287,7 +296,7 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
     let end = ctx.comments.partition_point(|c| c.span.end <= start);
     for c in ctx.comments[..end].iter().rev() {
         if !ctx.text[c.span.end as usize..start as usize]
-            .trim()
+            .trim_matches(js_whitespace)
             .is_empty()
         {
             return None;
@@ -310,9 +319,9 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
 fn warning(comment: &Comment, raw: &str) -> bool {
     comment.is_line()
         && raw
-            .trim_start()
+            .trim_start_matches(js_whitespace)
             .strip_prefix("WARNING:")
-            .is_some_and(|v| !v.trim().is_empty())
+            .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
