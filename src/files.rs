@@ -32,6 +32,12 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn existing(path: &Path) -> io::Result<PathBuf> {
+    let absent = |e: &io::Error| {
+        matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
+    };
     let mut gone = Vec::new();
     let mut at = path;
     let mut found = loop {
@@ -40,13 +46,8 @@ fn existing(path: &Path) -> io::Result<PathBuf> {
         };
         gone.push(name);
         match fs::canonicalize(parent) {
-            // A link that points nowhere is an entry, not a directory that is gone.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) && fs::symlink_metadata(parent).is_err() =>
-            {
+            // A link that points nowhere is an entry, and a name that cannot be looked at is an error: neither is a directory that is gone.
+            Err(e) if absent(&e) && fs::symlink_metadata(parent).is_err_and(|e| absent(&e)) => {
                 at = parent;
             }
             dir => break dir?,
