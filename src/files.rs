@@ -7,13 +7,10 @@ use std::{
 fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
     let mut command = Command::new("git");
     // The caller's git variables must not point discovery at another repository or index.
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-    ] {
-        command.env_remove(name);
+    for (name, _) in env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(name);
+        }
     }
     let output = command.args(args).current_dir(dir).output()?;
     if !output.status.success() {

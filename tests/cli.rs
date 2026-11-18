@@ -89,7 +89,10 @@ fn git_variables_cannot_point_at_another_repository() {
     let root = dir.path();
     let other = repo();
     fs::write(root.join("bad.py"), "#noqa").unwrap();
+    let excludes = other.path().join("excludes");
+    fs::write(&excludes, "bad.py\n").unwrap();
     for (name, value) in [
+        ("GIT_COMMON_DIR", other.path().join(".git")),
         ("GIT_DIR", other.path().join(".git")),
         ("GIT_WORK_TREE", other.path().to_owned()),
         ("GIT_INDEX_FILE", other.path().join("index")),
@@ -97,6 +100,9 @@ fn git_variables_cannot_point_at_another_repository() {
         let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
             .current_dir(root)
             .env(name, value)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.excludesFile")
+            .env("GIT_CONFIG_VALUE_0", &excludes)
             .arg("check")
             .output()
             .unwrap();
