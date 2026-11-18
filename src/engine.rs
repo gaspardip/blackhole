@@ -77,6 +77,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_comments::RULE,
         crate::packs::ts::no_explicit_any::RULE,
         crate::packs::ts::no_non_null_assertion::RULE,
+        crate::packs::ts::no_widen_then_assert::RULE,
     ]
 }
 

@@ -11,6 +11,7 @@ mod packs {
         pub(crate) mod no_comments;
         pub(crate) mod no_explicit_any;
         pub(crate) mod no_non_null_assertion;
+        pub(crate) mod no_widen_then_assert;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;
