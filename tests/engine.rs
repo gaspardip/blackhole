@@ -1098,6 +1098,7 @@ fn a_directive_too_long_to_read_is_reported() {
         ]
     );
     // A comment that never closes before the end of the file hides nothing.
+    // In two pieces: this file's own scan would read the whole literal as a Rust attribute that never opens.
     let unclosed = concat!("#", " /* notes");
     assert!(run(registry(), [("a.py", unclosed.as_bytes())]).is_empty());
 }
