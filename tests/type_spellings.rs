@@ -1,6 +1,12 @@
 #[path = "common/run_rule.rs"]
 mod single;
 
+fn positions(hits: &[blackhole_check::engine::Finding]) -> Vec<(usize, usize, Option<&str>)> {
+    hits.iter()
+        .map(|h| (h.line, h.col, h.note.as_deref()))
+        .collect()
+}
+
 type Question = (
     &'static str,
     &'static str,
@@ -378,12 +384,7 @@ fn default_can_name_its_own_instantiation() {
     for spelling in ["A", "A<unknown>"] {
         let source = format!("type A<T = A<unknown>> = T | string;\ntype X = {spelling};");
         let hits = single::run_rule("ts/no-unknown-type-aliases", "types.ts", &source);
-        assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
-            [(2, 6, None)]
-        );
+        assert_eq!(positions(&hits), [(2, 6, None)]);
     }
 }
 
@@ -406,9 +407,7 @@ fn assertion_back_to_a_declaration_follows_its_binding() {
         );
         let hits = single::run_rule("ts/no-widen-then-assert", "binding.ts", &source);
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
+            positions(&hits),
             expected
                 .then_some((5, 16, None))
                 .into_iter()
@@ -454,9 +453,7 @@ fn dictionary_in_a_generic_container_reports_at_its_use() {
                 let hits =
                     single::run_rule("ts/no-unsafe-dictionary-type", "container.ts", &source);
                 assert_eq!(
-                    hits.iter()
-                        .map(|h| (h.line, h.col, h.note.as_deref()))
-                        .collect::<Vec<_>>(),
+                    positions(&hits),
                     reports.then_some(position).into_iter().collect::<Vec<_>>(),
                     "{source}"
                 );
@@ -487,13 +484,7 @@ fn nested_dictionary_reports_at_the_node_that_makes_it() {
         for (body, col) in [(named, named_col), (twin, twin_col)] {
             let source = format!("{declarations}\ntype Plain = {body};");
             let hits = single::run_rule("ts/no-unsafe-dictionary-type", "types.ts", &source);
-            assert_eq!(
-                hits.iter()
-                    .map(|h| (h.line, h.col, h.note.as_deref()))
-                    .collect::<Vec<_>>(),
-                [(4, col, None)],
-                "{body}"
-            );
+            assert_eq!(positions(&hits), [(4, col, None)], "{body}");
         }
     }
 }
@@ -512,13 +503,7 @@ fn a_discarded_dictionary_argument_still_reports_where_it_is_written() {
             "type Shared<T> = Record<string, T>;\ntype First<T, U> = T;\ntype Result = {body};"
         );
         let hits = single::run_rule("ts/no-unsafe-dictionary-type", "argument.ts", &source);
-        assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
-            expected,
-            "{body}"
-        );
+        assert_eq!(positions(&hits), expected, "{body}");
     }
 }
 
@@ -571,9 +556,7 @@ fn qualified_names_only_resolve_through_local_exports() {
         let source = format!("{prefix}\nfunction f(v: {name}) {{}}");
         let hits = single::run_rule("ts/no-unknown-parameters", "qualified.ts", &source);
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
+            positions(&hits),
             reports
                 .then_some((2, 15, None))
                 .into_iter()
@@ -595,13 +578,7 @@ fn import_equals_parameters_follow_the_exported_type() {
     ] {
         let source = format!("{declaration}\nfunction read(value: {annotation}) {{}}");
         let hits = single::run_rule("ts/no-unknown-parameters", "import.ts", &source);
-        assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
-            [(3, 22, None)],
-            "{source}"
-        );
+        assert_eq!(positions(&hits), [(3, 22, None)], "{source}");
     }
 }
 
@@ -653,9 +630,7 @@ fn a_plain_qualified_alias_reports_the_written_dictionary_once() {
         let source = format!("{declaration}\nexport const a: {name} = {{}};");
         let hits = single::run_rule("ts/no-unsafe-dictionary-type", "alias.ts", &source);
         assert_eq!(
-            hits.iter()
-                .map(|h| (h.line, h.col, h.note.as_deref()))
-                .collect::<Vec<_>>(),
+            positions(&hits),
             [(1, declaration.find("Record").unwrap() + 1, None)],
             "{source}"
         );
@@ -732,13 +707,7 @@ fn identity_follows_named_types_in_composite_positions() {
                 "interface Model {{ id: number }}\ntype Id<T> = T;\ntype Pass<T> = T;\ndeclare const original: {left};\nconst wide: Record<string,unknown> = original;\nconst back = wide as {right};"
             );
             let hits = single::run_rule("ts/no-widen-then-assert", "two-names.ts", &source);
-            assert_eq!(
-                hits.iter()
-                    .map(|h| (h.line, h.col, h.note.as_deref()))
-                    .collect::<Vec<_>>(),
-                [(6, 14, None)],
-                "{left} to {right}"
-            );
+            assert_eq!(positions(&hits), [(6, 14, None)], "{left} to {right}");
         }
     }
     for (left, right, same) in [
@@ -779,9 +748,7 @@ fn readonly_identity_preserves_the_spelled_out_verdict() {
                 );
                 let hits = single::run_rule("ts/no-widen-then-assert", "readonly.ts", &source);
                 assert_eq!(
-                    hits.iter()
-                        .map(|h| (h.line, h.col, h.note.as_deref()))
-                        .collect::<Vec<_>>(),
+                    positions(&hits),
                     if reports { vec![(5, 14, None)] } else { vec![] },
                     "{left} to {right}"
                 );
@@ -815,13 +782,7 @@ fn identity_aliases_of_a_function_parameter_report_at_the_assertion() {
                 "interface Model {{ id: number }}\ntype Id<T> = T;\nfunction f<Other>(original: {left}[]) {{\n const wide: Record<string, unknown> = original;\n const back = wide as {right}[];\n}}"
             );
             let hits = single::run_rule("ts/no-widen-then-assert", "parameter.ts", &source);
-            assert_eq!(
-                hits.iter()
-                    .map(|h| (h.line, h.col, h.note.as_deref()))
-                    .collect::<Vec<_>>(),
-                [(5, 15, None)],
-                "{source}"
-            );
+            assert_eq!(positions(&hits), [(5, 15, None)], "{source}");
         }
     }
 }

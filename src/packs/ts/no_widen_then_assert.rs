@@ -64,6 +64,11 @@ fn evidence<'a>(
     owner: Option<NodeId>,
     bindings: &mut ConstBindings<Judged<Evidence<'a>>>,
 ) -> Judged<Option<Evidence<'a>>> {
+    let annotated = |ty: &'a TSType<'a>| {
+        broad(resolver, ctx, ty)
+            .map(|b| b.is_none().then_some(Evidence::Annotated(ty)))
+            .transpose()
+    };
     bindings
         .walk(
             ctx,
@@ -73,11 +78,7 @@ fn evidence<'a>(
             |expr| {
                 let value = expr.without_parentheses();
                 if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
-                    return Break(
-                        broad(resolver, ctx, ty)
-                            .map(|b| b.is_none().then_some(Evidence::Annotated(ty)))
-                            .transpose(),
-                    );
+                    return Break(annotated(ty));
                 }
                 if let Expression::Identifier(i) = value {
                     Continue(i)
@@ -92,14 +93,7 @@ fn evidence<'a>(
                 let annotation =
                     super::function_types::direct_binding(kind).and_then(|b| b.annotation);
                 match annotation {
-                    Some(a) => Break(
-                        broad(resolver, ctx, &a.type_annotation)
-                            .map(|b| {
-                                b.is_none()
-                                    .then_some(Evidence::Annotated(&a.type_annotation))
-                            })
-                            .transpose(),
-                    ),
+                    Some(a) => Break(annotated(&a.type_annotation)),
                     None => Continue(()),
                 }
             },

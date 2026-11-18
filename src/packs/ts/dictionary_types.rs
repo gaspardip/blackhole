@@ -85,6 +85,15 @@ impl Goal {
             },
         )
     }
+    fn nested<'a>(self, types: impl Iterator<Item = &'a TSType<'a>>) -> Plan {
+        Plan::many(
+            Combine::First,
+            types
+                .map(|ty| self.child(ty, Query::NestedDictionary))
+                .collect(),
+        )
+    }
+
     fn child(self, ty: &TSType<'_>, query: Query) -> Self {
         Self {
             term: Term {
@@ -296,10 +305,7 @@ fn plan_root(
         budget.0 = None;
         return None;
     };
-    let spent = available - remaining;
-    if spent != 0 && !budget.take(spent) {
-        return None;
-    }
+    budget.0 = budget.0.map(|_| remaining);
     let children = root.children();
     if children.is_empty() {
         let value = match root {
@@ -454,6 +460,24 @@ fn alias_declaration(ctx: &TsCtx<'_>, sym: SymbolId, budget: &mut Budget) -> Opt
     type_declaration(ctx, sym, budget, |kind| {
         matches!(kind, AstKind::TSTypeAliasDeclaration(_))
     })
+}
+fn name_root<'a>(
+    ctx: &TsCtx<'_>,
+    mut name: &'a TSTypeName<'a>,
+    members: &mut Vec<&'a str>,
+    budget: &mut Budget,
+) -> Option<SymbolId> {
+    while let TSTypeName::QualifiedName(prefix) = name {
+        if !budget.take(1) {
+            return None;
+        }
+        members.push(prefix.right.name.as_str());
+        name = &prefix.left;
+    }
+    let TSTypeName::IdentifierReference(root) = name else {
+        return None;
+    };
+    symbol(ctx, root)
 }
 fn import_equals(ctx: &TsCtx<'_>, id: SymbolId, budget: &mut Budget) -> Option<NodeId> {
     let flags = ctx.semantic.scoping().symbol_flags(id);
@@ -640,25 +664,16 @@ impl Environments {
     fn local_name(
         &mut self,
         ctx: &TsCtx<'_>,
-        mut name: &TSTypeName<'_>,
+        name: &TSTypeName<'_>,
         budget: &mut Budget,
     ) -> Option<SymbolId> {
         use oxc::ast::ast::TSModuleReference;
         let mut members = Vec::new();
         let mut imports = std::collections::HashSet::new();
-        let mut sym = loop {
-            if !budget.take(1) {
-                return None;
-            }
-            match name {
-                TSTypeName::IdentifierReference(i) => break symbol(ctx, i)?,
-                TSTypeName::QualifiedName(q) => {
-                    members.push(q.right.name);
-                    name = &q.left;
-                }
-                TSTypeName::ThisExpression(_) => return None,
-            }
-        };
+        if !budget.take(1) {
+            return None;
+        }
+        let mut sym = name_root(ctx, name, &mut members, budget)?;
         let nodes = ctx.semantic.nodes();
         let scopes = ctx.semantic.scoping();
         loop {
@@ -674,19 +689,8 @@ impl Environments {
                 sym = match &i.module_reference {
                     TSModuleReference::IdentifierReference(i) => symbol(ctx, i)?,
                     TSModuleReference::QualifiedName(q) => {
-                        members.push(q.right.name);
-                        let mut left = &q.left;
-                        while let TSTypeName::QualifiedName(prefix) = left {
-                            if !budget.take(1) {
-                                return None;
-                            }
-                            members.push(prefix.right.name);
-                            left = &prefix.left;
-                        }
-                        let TSTypeName::IdentifierReference(i) = left else {
-                            return None;
-                        };
-                        symbol(ctx, i)?
+                        members.push(q.right.name.as_str());
+                        name_root(ctx, &q.left, &mut members, budget)?
                     }
                     TSModuleReference::ExternalModuleReference(_) => return None,
                 };
@@ -727,7 +731,7 @@ impl Environments {
                 }
                 entry.insert(exports);
             }
-            sym = *self.namespace_exports[&sym].get(member.as_str())?;
+            sym = *self.namespace_exports[&sym].get(member)?;
         }
     }
     fn resolve_name(
@@ -775,7 +779,8 @@ impl Environments {
         let scopes = ctx.semantic.scoping();
         let resolved = self.resolve_name(ctx, type_name, budget);
         if let Some(sym) = resolved {
-            if scopes.symbol_flags(sym).is_type_parameter() {
+            let flags = scopes.symbol_flags(sym);
+            if flags.is_type_parameter() {
                 let Some(term) = self.lookup(g.term.env, sym, budget) else {
                     return Self::terminal_reference(g, sym, !args.is_empty());
                 };
@@ -784,9 +789,7 @@ impl Environments {
                 }
                 return Plan::child(Combine::First, Goal { term, ..g });
             }
-            if g.query == Query::Identity
-                && (scopes.symbol_flags(sym).is_interface() || scopes.symbol_flags(sym).is_class())
-            {
+            if g.query == Query::Identity && (flags.is_interface() || flags.is_class()) {
                 let Some(id) = type_declaration(ctx, sym, budget, |kind| {
                     matches!(kind, AstKind::Class(_) | AstKind::TSInterfaceDeclaration(_))
                 }) else {
@@ -807,7 +810,7 @@ impl Environments {
                 };
                 return Plan::Done(Class::Declaration(sym, env));
             }
-            if scopes.symbol_flags(sym).is_interface()
+            if flags.is_interface()
                 && let Some(id) = type_declaration(ctx, sym, budget, |k| {
                     matches!(k, AstKind::TSInterfaceDeclaration(_))
                 })
@@ -840,7 +843,7 @@ impl Environments {
                     );
                 }
             }
-            if !scopes.symbol_flags(sym).is_type_alias() {
+            if !flags.is_type_alias() {
                 return Self::terminal_reference(g, sym, !args.is_empty());
             }
             let Some(id) =
@@ -933,11 +936,7 @@ impl Environments {
             body.env = bound.env;
             body.place = bound.place;
         }
-        let query = if g.query == Query::UnsafeDictionary {
-            Query::ContainedDictionary
-        } else {
-            annotation_query(g.query)
-        };
+        let query = annotation_query(g.query);
         Plan::child(Combine::First, Goal { term: body, query })
     }
     fn application(
@@ -1274,39 +1273,17 @@ impl Environments {
                 Query::IsObject,
             ) => Plan::Done(Class::Broad),
             (AstKind::TSUnionType(n), Query::ContainedDictionary | Query::NestedDictionary) => {
-                Plan::many(
-                    Combine::First,
-                    n.types
-                        .iter()
-                        .map(|t| g.child(t, Query::NestedDictionary))
-                        .collect(),
-                )
+                g.nested(n.types.iter())
             }
             (
                 AstKind::TSIntersectionType(n),
                 Query::ContainedDictionary | Query::NestedDictionary,
-            ) => Plan::many(
-                Combine::First,
-                n.types
-                    .iter()
-                    .map(|t| g.child(t, Query::NestedDictionary))
-                    .collect(),
-            ),
+            ) => g.nested(n.types.iter()),
             (AstKind::TSArrayType(n), Query::ContainedDictionary | Query::NestedDictionary) => {
-                Plan::child(
-                    Combine::First,
-                    g.child(&n.element_type, Query::NestedDictionary),
-                )
+                g.nested(std::iter::once(&n.element_type))
             }
             (AstKind::TSTupleType(n), Query::ContainedDictionary | Query::NestedDictionary) => {
-                Plan::many(
-                    Combine::First,
-                    n.element_types
-                        .iter()
-                        .filter_map(|t| t.as_ts_type())
-                        .map(|t| g.child(t, Query::NestedDictionary))
-                        .collect(),
-                )
+                g.nested(n.element_types.iter().filter_map(|t| t.as_ts_type()))
             }
             (AstKind::TSUnionType(n), Query::WideKey) => Plan::many(
                 Combine::All,
@@ -1359,10 +1336,10 @@ fn empty_members(
 
 // Naming an object or mapped annotation changes its written-form widening verdict.
 fn annotation_query(query: Query) -> Query {
-    if query == Query::Target {
-        Query::AliasTarget
-    } else {
-        query
+    match query {
+        Query::Target => Query::AliasTarget,
+        Query::UnsafeDictionary => Query::ContainedDictionary,
+        other => other,
     }
 }
 
@@ -1593,6 +1570,22 @@ mod tests {
     use super::{Budget, Class, Combine, Goal, Plan, Query, Term, evaluate};
     use oxc::syntax::node::NodeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_plain_alias_of_unknown_stays_silent_at_zero_budget() {
+        use crate::engine::run;
+        let rule = assertion::<0, 0>();
+        let source =
+            "type Top = unknown;\nconst wide: unknown = 'ok';\nconst picked = wide as Top;";
+        let hits = run(&[rule], [("plain.ts", source.as_bytes())]);
+        assert!(
+            hits.is_empty(),
+            "{:?}",
+            hits.iter()
+                .map(|hit| (hit.rule, hit.line, hit.col, &hit.note))
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn parameters_retain_identity_in_their_declaring_scope() {
@@ -1880,14 +1873,68 @@ mod tests {
         }
     }
 
+    use crate::engine::{Rule, Run};
+
+    fn guard<const STEPS: usize, const ALLOWANCE: usize>() -> Rule {
+        use super::super::no_known_value_widening;
+        Rule {
+            run: Run::Ts(|ctx, findings| {
+                no_known_value_widening::check_with_resolution(
+                    ctx,
+                    findings,
+                    &super::Resolution::with_budget(STEPS, ALLOWANCE),
+                );
+            }),
+            ..no_known_value_widening::RULE
+        }
+    }
+
+    fn dictionary<const STEPS: usize, const ALLOWANCE: usize>() -> Rule {
+        use super::super::no_unsafe_dictionary_type;
+        Rule {
+            run: Run::Ts(|ctx, findings| {
+                no_unsafe_dictionary_type::check_with_resolution(
+                    ctx,
+                    findings,
+                    &super::Resolution::with_budget(STEPS, ALLOWANCE),
+                );
+            }),
+            ..no_unsafe_dictionary_type::RULE
+        }
+    }
+
+    fn assertion<const STEPS: usize, const ALLOWANCE: usize>() -> Rule {
+        use super::super::no_widen_then_assert;
+        Rule {
+            run: Run::Ts(|ctx, findings| {
+                no_widen_then_assert::check_with_resolution(
+                    ctx,
+                    findings,
+                    &super::Resolution::with_budget(STEPS, ALLOWANCE),
+                );
+            }),
+            ..no_widen_then_assert::RULE
+        }
+    }
+
+    fn alias<const STEPS: usize, const ALLOWANCE: usize>() -> Rule {
+        use super::super::no_unknown_type_aliases;
+        Rule {
+            run: Run::Ts(|ctx, findings| {
+                no_unknown_type_aliases::check_aliases(
+                    ctx,
+                    findings,
+                    &super::Resolution::with_budget(STEPS, ALLOWANCE),
+                );
+            }),
+            ..no_unknown_type_aliases::RULE
+        }
+    }
+
     #[test]
     fn a_later_guard_can_finish_a_shared_origin() {
-        use super::super::no_known_value_widening::{RULE, check_with_resolution};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        use crate::engine::run;
         use std::fmt::Write;
-        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            check_with_resolution(ctx, findings, &super::Resolution::with_budget(0, 128));
-        }
         let mut source = String::from("type P0 = unknown; type E0 = string;\n");
         for i in 1..=80 {
             writeln!(
@@ -1898,13 +1945,7 @@ mod tests {
             .unwrap();
         }
         source.push_str("declare function slow(v: P80): v is string; declare function cheap(v: unknown): v is string;\ndeclare const root: E80; const shared = root;\nslow(shared);\ncheap(shared);");
-        let hits = run(
-            &[Rule {
-                run: Run::Ts(check),
-                ..RULE
-            }],
-            [("shared.ts", source.as_bytes())],
-        );
+        let hits = run(&[guard::<0, 128>()], [("shared.ts", source.as_bytes())]);
         assert_eq!(
             hits.iter()
                 .map(|h| (h.line, h.col, h.note.as_deref()))
@@ -1915,21 +1956,12 @@ mod tests {
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
-        use super::super::no_known_value_widening::{RULE, check_with_resolution};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        use crate::engine::run;
         use std::{
             fmt::Write as _,
             time::{Duration, Instant},
         };
 
-        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(0, 0);
-            check_with_resolution(ctx, findings, &resolution);
-        }
-        fn unlimited(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(usize::MAX, 0);
-            check_with_resolution(ctx, findings, &resolution);
-        }
         for (origin, note) in [
             (
                 "type Origin = string; declare const root: Origin;",
@@ -1945,13 +1977,7 @@ mod tests {
             }
             source.push_str(&"guard(v4000);\n".repeat(4000));
             let start = Instant::now();
-            let hits = run(
-                &[Rule {
-                    run: Run::Ts(check),
-                    ..RULE
-                }],
-                [("guard.ts", source.as_bytes())],
-            );
+            let hits = run(&[guard::<0, 0>()], [("guard.ts", source.as_bytes())]);
             assert!(start.elapsed() < Duration::from_secs(3));
             assert_eq!(hits.len(), 4000);
             for (i, hit) in hits.iter().enumerate() {
@@ -1962,10 +1988,7 @@ mod tests {
             }
             if note.is_none() {
                 let other = run(
-                    &[Rule {
-                        run: Run::Ts(unlimited),
-                        ..RULE
-                    }],
+                    &[guard::<{ usize::MAX }, 0>()],
                     [("guard.ts", source.as_bytes())],
                 );
                 assert!(
@@ -1990,25 +2013,14 @@ mod tests {
 
     #[test]
     fn exhausted_dictionary_budget_keeps_the_later_record_red() {
-        use super::super::no_unsafe_dictionary_type::{RULE, check_with_resolution};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
-        fn check<const LIMIT: usize>(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(LIMIT, 128);
-            check_with_resolution(ctx, findings, &resolution);
-        }
+        use crate::engine::run;
         let defaults = default_parameters();
         let text = "type Wrap<TDEFAULTS> = T[];\ntype Stress = Wrap<string>;\nconst value: Record<string, unknown> = {id: 1};".replace("DEFAULTS", &defaults);
         for (runner, note) in [
-            (Run::Ts(check::<0>), Some("type too complex to judge")),
-            (Run::Ts(check::<{ usize::MAX }>), None),
+            (dictionary::<0, 128>(), Some("type too complex to judge")),
+            (dictionary::<{ usize::MAX }, 128>(), None),
         ] {
-            let hits = run(
-                &[Rule {
-                    run: runner,
-                    ..RULE
-                }],
-                [("later.ts", text.as_bytes())],
-            );
+            let hits = run(&[runner], [("later.ts", text.as_bytes())]);
             let actual: Vec<_> = hits
                 .iter()
                 .map(|h| (h.line, h.col, h.note.as_deref()))
@@ -2023,80 +2035,49 @@ mod tests {
     }
     #[test]
     fn unresolved_assertion_reports_at_the_ordinary_finding_position() {
-        use super::super::no_widen_then_assert::{RULE, check_with_resolution};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
-        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(0, 0);
-            check_with_resolution(ctx, findings, &resolution);
-        }
-        fn unlimited(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(usize::MAX, 0);
-            check_with_resolution(ctx, findings, &resolution);
-        }
+        use crate::engine::run;
         let source = "type Wide = Record<string, unknown>;\nconst value: Wide = { id: 1 };\nconst picked = value as { id: number };";
         for (runner, note) in [
-            (Run::Ts(unlimited), None),
-            (Run::Ts(check), Some("type too complex to judge")),
+            (assertion::<{ usize::MAX }, 0>(), None),
+            (assertion::<0, 0>(), Some("type too complex to judge")),
         ] {
-            let hits = run(
-                &[Rule {
-                    run: runner,
-                    ..RULE
-                }],
-                [("alias.ts", source.as_bytes())],
-            );
+            let hits = run(&[runner], [("alias.ts", source.as_bytes())]);
             assert_eq!(
                 hits.iter()
                     .map(|h| (h.rule, h.line, h.col, h.note.as_deref()))
                     .collect::<Vec<_>>(),
-                [(RULE.id, 3, 16, note)]
+                [(super::super::no_widen_then_assert::RULE.id, 3, 16, note)]
             );
         }
     }
 
     #[test]
     fn an_exhausted_assertion_allows_the_later_plain_assertion() {
-        use super::super::no_widen_then_assert::{RULE, check_with_resolution};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
-        fn check<const LIMIT: usize>(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(LIMIT, 128);
-            check_with_resolution(ctx, findings, &resolution);
-        }
+        use crate::engine::run;
         let defaults = default_parameters();
         let source = "type Key<TDEFAULTS> = T;\nconst stress: Record<Key<string>, unknown> = {id: 1};\nconst first = stress as {id: number};\nconst plain: Record<string, unknown> = {id: 1};\nconst next = plain as {id: number};".replace("DEFAULTS", &defaults);
         for (runner, note) in [
-            (Run::Ts(check::<1>), Some("type too complex to judge")),
-            (Run::Ts(check::<{ usize::MAX }>), None),
+            (assertion::<1, 128>(), Some("type too complex to judge")),
+            (assertion::<{ usize::MAX }, 128>(), None),
         ] {
-            let hits = run(
-                &[Rule {
-                    run: runner,
-                    ..RULE
-                }],
-                [("pair.ts", source.as_bytes())],
-            );
+            let hits = run(&[runner], [("pair.ts", source.as_bytes())]);
             assert_eq!(
                 hits.iter()
                     .map(|h| (h.rule, h.line, h.col, h.note.as_deref()))
                     .collect::<Vec<_>>(),
-                [(RULE.id, 3, 15, note), (RULE.id, 5, 14, None)]
+                [
+                    (super::super::no_widen_then_assert::RULE.id, 3, 15, note),
+                    (super::super::no_widen_then_assert::RULE.id, 5, 14, None)
+                ]
             );
         }
     }
 
     #[test]
     fn exhausted_budget_reports_each_unjudged_alias() {
-        use super::super::no_unknown_type_aliases::{RULE, check_aliases};
-        use crate::engine::{Findings, Rule, Run, TsCtx, run};
+        use crate::engine::run;
 
-        fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-            let resolution = super::Resolution::with_budget(2, 0);
-            check_aliases(ctx, findings, &resolution);
-        }
-        let rules = [Rule {
-            run: Run::Ts(check),
-            ..RULE
-        }];
+        let rules = [alias::<2, 0>()];
         let hits = run(
             &rules,
             [(
@@ -2109,8 +2090,18 @@ mod tests {
                 .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
                 .collect::<Vec<_>>(),
             [
-                (RULE.id, 2, 6, Some("type too complex to judge")),
-                (RULE.id, 4, 6, Some("type too complex to judge"))
+                (
+                    super::super::no_unknown_type_aliases::RULE.id,
+                    2,
+                    6,
+                    Some("type too complex to judge")
+                ),
+                (
+                    super::super::no_unknown_type_aliases::RULE.id,
+                    4,
+                    6,
+                    Some("type too complex to judge")
+                )
             ]
         );
     }
