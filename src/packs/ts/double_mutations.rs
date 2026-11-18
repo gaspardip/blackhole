@@ -233,8 +233,10 @@ pub(super) fn framework_call(ctx: &TsCtx<'_>, call: &Invocation<'_>) -> bool {
                 "fn" => call
                     .arg(0)
                     .is_some_and(|e| !super::values::global(ctx, e, "undefined")),
-                "mock" | "doMock" | "mockObject" => *owner == "jest" || !observation(ctx, call),
-                "stubGlobal"
+                "mockObject" => *owner == "jest" || !observation(ctx, call),
+                "mock"
+                | "doMock"
+                | "stubGlobal"
                 | "unstable_mockModule"
                 | "importMock"
                 | "createMockFromModule"
