@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::Path,
     process::{Command, Output},
     thread,
@@ -14,8 +14,15 @@ fn repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    let mut command = Command::new("git");
+    // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
+    for (name, _) in env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(name);
+        }
+    }
     assert!(
-        Command::new("git")
+        command
             .current_dir(dir)
             .args(args)
             .status()
