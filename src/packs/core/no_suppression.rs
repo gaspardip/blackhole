@@ -8,12 +8,17 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::File(check),
 };
 
+const JS_KINDS: &[&str] = &[
+    "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "astro",
+];
+// Coverage tools and legacy ESLint read these directives from raw source lines.
+const RAW_JS_PATTERNS: &[&str] = &["c8 ignore", "v8 ignore", "node:coverage", "/*~eslint-env"];
+
 // Patterns are lowercase. A tilde permits a gap, a space requires one, and a star is the rest of the line.
 const PATTERNS: &[(&[&str], &[&str])] = &[
+    (JS_KINDS, RAW_JS_PATTERNS),
     (
-        &[
-            "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "vue", "svelte", "astro",
-        ],
+        JS_KINDS,
         &[
             "eslint-disable",
             "/*~eslint ",
@@ -28,13 +33,9 @@ const PATTERNS: &[(&[&str], &[&str])] = &[
             "$flowfixme",
             "$flowexpectederror",
             "istanbul ignore",
-            "c8 ignore",
-            "v8 ignore",
-            "node:coverage",
             "/*~exported ",
             "/*~global ",
             "/*~globals ",
-            "/*~eslint-env",
         ],
     ),
     (
@@ -652,20 +653,70 @@ fn check_kind(kind: &str, ctx: &FileCtx<'_>, hits: &mut Findings) {
         nolint(&text, hits);
     }
     let patterns: Vec<_> = listed(kind).collect();
-    for (offset, first) in text.char_indices() {
-        let mut found = None;
+    if let Some(comments) = ctx.comments {
+        let mut previous = 0;
+        for comment in comments {
+            let span = comment.span;
+            let start = span.start as usize;
+            scan_patterns(
+                &text[previous..start],
+                RAW_JS_PATTERNS,
+                kind,
+                previous,
+                &[],
+                hits,
+            );
+            scan_patterns(span.source_text(&text), &patterns, kind, start, &[], hits);
+            previous = span.end as usize;
+        }
+        scan_patterns(
+            &text[previous..],
+            RAW_JS_PATTERNS,
+            kind,
+            previous,
+            &[],
+            hits,
+        );
+    } else {
+        scan_patterns(&text, &patterns, kind, 0, &origin, hits);
+    }
+}
+
+pub(crate) fn suppressed_comment(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let patterns: Vec<_> = listed("ts").collect();
+    // A directive too long to read counts, so such a comment never passes as documentation.
+    pattern_hits(&text, &patterns, "ts").next().is_some()
+}
+
+// Each offset where a directive starts, with a note when it could not be read to its end.
+fn pattern_hits<'a>(
+    text: &'a str,
+    patterns: &'a [&str],
+    kind: &'a str,
+) -> impl Iterator<Item = (usize, Option<&'static str>)> + 'a {
+    text.char_indices().filter_map(move |(offset, first)| {
+        let mut unread = None;
         for pattern in patterns.iter().filter(|p| p.starts_with(first)) {
             match matches(&text[offset..], pattern, kind) {
-                Ok(true) => {
-                    found = Some(None);
-                    break;
-                }
+                Ok(true) => return Some((offset, None)),
                 Ok(false) => {}
-                Err(End) => found = Some(Some("directive too long to read")),
+                Err(End) => unread = Some("directive too long to read"),
             }
         }
-        if let Some(note) = found {
-            hits.report(origin.get(offset).copied().unwrap_or(offset), note);
-        }
+        unread.map(|note| (offset, Some(note)))
+    })
+}
+
+fn scan_patterns(
+    text: &str,
+    patterns: &[&str],
+    kind: &str,
+    start: usize,
+    origin: &[usize],
+    hits: &mut Findings,
+) {
+    for (offset, note) in pattern_hits(text, patterns, kind) {
+        hits.report(origin.get(offset).copied().unwrap_or(start + offset), note);
     }
 }

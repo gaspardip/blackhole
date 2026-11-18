@@ -169,7 +169,7 @@ pub fn parse(bytes: &[u8], today: Date) -> io::Result<Rows> {
         let &[rule, path, count, filed, renewal, reason] = fields.as_slice() else {
             return Err(err("expected six fields"));
         };
-        if ledger::invalid_path(path) || !engine::registry().iter().any(|r| r.id == rule) {
+        if ledger::invalid_path(path) || !engine::can_allow(engine::registry(), rule) {
             return Err(err("invalid rule or path"));
         }
         let extra = ledger::count_of(count).ok_or_else(|| err("invalid count"))?;
