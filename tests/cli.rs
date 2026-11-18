@@ -153,6 +153,19 @@ fn untracked_findings_and_single_fix() {
 }
 
 #[test]
+fn an_ignore_rule_hides_an_untracked_file_and_never_a_tracked_one() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::write(root.join(".git/info/exclude"), "a.py\n").unwrap();
+    assert_eq!(check(root, &[], 0).stdout, b"");
+    check(root, &["a.py"], 2);
+    git(root, &["add", "-f", "a.py"]);
+    check(root, &[], 1);
+    check(root, &["a.py"], 1);
+}
+
+#[test]
 fn path_filters_use_directory_components() {
     let dir = repo();
     let root = dir.path();
@@ -384,6 +397,73 @@ fn the_lock_is_not_a_file() {
     regenerate(&root, 0);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert_eq!(names(&root), [".git", "a.py"]);
+}
+
+#[cfg(unix)]
+type Outside =
+    std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, Option<std::time::SystemTime>)>;
+
+#[cfg(unix)]
+fn shared_index(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"sharedindex."))
+}
+
+#[cfg(unix)]
+fn outside(dir: &Path, root: &Path, seen: &mut Outside) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path == root {
+            continue;
+        }
+        if path.is_dir() {
+            outside(&path, root, seen);
+            seen.insert(path, (Vec::new(), None));
+            continue;
+        }
+        // Git refreshes the shared index's timestamps each time it reads a split index.
+        let modified =
+            (!shared_index(&path)).then(|| fs::metadata(&path).unwrap().modified().unwrap());
+        seen.insert(path.clone(), (fs::read(&path).unwrap(), modified));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nothing_outside_the_checkout_changes_but_the_shared_index_times() {
+    let dir = tempdir().unwrap();
+    let (meta, root) = (dir.path().join("meta"), dir.path().join("tree"));
+    let at = |path: &Path| path.to_str().unwrap().to_owned();
+    git(
+        dir.path(),
+        &["init", "-q", "--separate-git-dir", &at(&meta), &at(&root)],
+    );
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["update-index", "--split-index"]);
+    fs::write(dir.path().join("victim"), "kept").unwrap();
+    let snapshot = || {
+        let mut seen = Outside::new();
+        outside(dir.path(), &root, &mut seen);
+        seen
+    };
+    let before = snapshot();
+    assert!(before.keys().any(|path| shared_index(path)));
+    baseline(&root, &[("a.py", 1)]);
+    for args in [
+        &["check"][..],
+        &["ledger"],
+        &["object", RULE, "a.py", "reason"],
+    ] {
+        if args[0] == "object" {
+            fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+        }
+        run(&root, args, 0);
+        assert!(
+            snapshot() == before,
+            "{args:?} changed a file outside the checkout"
+        );
+    }
 }
 
 #[cfg(unix)]

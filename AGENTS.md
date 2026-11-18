@@ -14,7 +14,9 @@ Git 2.45 or newer: every git call the tool makes passes `--no-lazy-fetch`, and a
 
 ## What the local commands promise
 
-`check`, `ledger` and `object` write only inside the checkout, take policy only from inside it, and run no program the checkout's git configuration names. They refuse to run when the root git reports is not the directory that holds the nearest `.git`.
+`check`, `ledger` and `object` write only inside the checkout, take policy only from `blackhole.toml`, `.blackhole/ledger` and `.blackhole/objections` inside it, and run no program the checkout's git configuration names. They refuse to run when the root git reports is not the directory that holds the nearest `.git`.
+
+Which untracked files they look at is git's answer: its standard ignore rules apply wherever git keeps them (`.gitignore`, the git directory's `info/exclude`, the user's `core.excludesFile`). An ignore rule never hides a tracked file, and `ci` reads commits, where no ignore rule applies.
 
 Git keeps its own files in the git directory the checkout names. That directory can lie outside the checkout (a linked worktree, a submodule, `--separate-git-dir`), and git may refresh the timestamps of its index files there when it reads them. That is git's bookkeeping, not a write this tool makes.
 
