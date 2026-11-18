@@ -16,7 +16,7 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
-fn plain_alias(ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
+fn is_bare_alias_use(ctx: &TsCtx<'_>, kind: AstKind<'_>) -> bool {
     let AstKind::TSTypeReference(r) = kind else {
         return false;
     };
@@ -64,7 +64,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             }
         }
         dictionaries.insert(id);
-        let mut needs_alias = plain_alias(ctx, kind);
+        let mut needs_alias = is_bare_alias_use(ctx, kind);
         let hidden = nodes.ancestor_ids(id).any(|id| {
             let parent = nodes.kind(id);
             if matches!(parent, AstKind::TSTypeAliasDeclaration(_)) {

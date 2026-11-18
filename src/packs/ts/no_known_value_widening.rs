@@ -91,7 +91,7 @@ fn guard_argument<'a>(
         (name == Some(subject)).then_some((index, ty))
     })?;
     let arg = call.arguments.get(index)?.as_expression()?;
-    match resolution.unknown_parameter(ctx, annotation) {
+    match resolution.contains_unknown(ctx, annotation) {
         Ok(true) => {}
         Ok(false) => return None,
         Err(e) => return Some((arg, Err(e))),

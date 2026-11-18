@@ -20,7 +20,7 @@ pub(super) fn check_aliases(ctx: &TsCtx<'_>, findings: &mut Findings, resolution
             report(
                 findings,
                 alias.id.span.start as usize,
-                resolution.unknown_alias(ctx, &alias.type_annotation),
+                resolution.contains_unknown(ctx, &alias.type_annotation),
             );
         }
     }

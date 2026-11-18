@@ -18,7 +18,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some((name, ty)) = parameter(n.kind()) else {
             continue;
         };
-        let unknown = resolution.unknown_parameter(ctx, ty);
+        let unknown = resolution.contains_unknown(ctx, ty);
         if matches!(unknown, Ok(false)) || name == Some("cause") {
             continue;
         }

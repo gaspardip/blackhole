@@ -329,17 +329,6 @@ fn deeply_nested_array_reports_its_element_type() {
 }
 
 #[test]
-fn already_broad_source_stays_broad_with_an_aliased_dictionary_key() {
-    for key in ["string", "Key"] {
-        let source = format!(
-            "type Key = string;\ndeclare const source: Record<{key}, unknown>;\nconst wide: Record<string, unknown> = source;\nconst picked = wide as {{ id: number }};"
-        );
-        let hits = run_rule("ts/no-widen-then-assert", "nested.ts", &source);
-        assert!(hits.is_empty(), "{key}: {:?}", locations(&hits));
-    }
-}
-
-#[test]
 fn widening_through_aliases_matches_the_spelled_out_annotation() {
     let id = "ts/no-widen-then-assert";
     for annotation in ["Wide", "Record<string, unknown>"] {
@@ -357,8 +346,13 @@ fn widening_through_aliases_matches_the_spelled_out_annotation() {
             assert_eq!(locations(&hits), expected, "{text}");
         }
     }
+    for annotation in ["Generic<unknown>", "Record<string, unknown>"] {
+        let text = format!(
+            "type Generic<T> = Record<string, T>;\nconst value: {annotation} = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert_eq!(locations(&run_rule(id, "alias.ts", &text)), [(id, 3, 16)]);
+    }
     for (decl, annotation) in [
-        ("type Generic<T> = Record<string, T>;", "Generic<unknown>"),
         ("import type { External } from './other';", "External"),
         ("type Loop = Other; type Other = Loop;", "Loop"),
     ] {
@@ -380,6 +374,15 @@ fn inherited_interface_members_determine_dictionary_safety() {
             "interface Base {} interface Base { value: string }",
             "Base",
             false,
+        ),
+        ("type Base = {};", "Base", true),
+        ("type Base = {} & {};", "Base", true),
+        ("interface Base<T> {}", "Base<string>", true),
+        ("type Base<T> = {};", "Base<string>", true),
+        (
+            "type Missing = never; interface Base { id?: Missing }",
+            "Base",
+            true,
         ),
         ("class Base {}", "Base", false),
         ("import type { Base } from './other';", "Base", false),
@@ -1214,4 +1217,150 @@ fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
         found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
         [(1, 1), (2, 2), (3, 1), (4, 1)]
     );
+}
+
+fn generic_budget_chain() -> String {
+    use std::fmt::Write as _;
+    let mut declarations = String::from("type A0<T> = T;\n");
+    for i in 1..=24 {
+        let previous = i - 1;
+        writeln!(
+            declarations,
+            "type A{i}<T> = A{previous}<T[]> | A{previous}<readonly T[]>;"
+        )
+        .unwrap();
+    }
+    declarations
+}
+
+#[test]
+fn only_unresolved_parameters_receive_the_budget_note() {
+    let declarations = generic_budget_chain();
+    let mut differences = Vec::new();
+    for (order, second_alias) in [(0, false), (1, false), (2, false), (0, true)] {
+        let mut lines = vec![
+            "function ordinary1(x: object) {}",
+            "function ordinary2(x: object) {}",
+        ];
+        if second_alias {
+            lines[1] = "function ordinary2(x: A3<unknown>) {}";
+        }
+        lines.insert(order, "function stress(x: A24<string>) {}");
+        let text = format!("{declarations}{}", lines.join("\n"));
+        let hits = run_rule("ts/no-unknown-parameters", "params.ts", &text);
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|h| (h.line, h.col, h.note.as_deref()))
+            .collect();
+        let note = Some("type too complex to judge");
+        let mut expected = vec![(26 + order, 20, note)];
+        if second_alias {
+            expected.push((28, 23, note));
+        }
+        if actual != expected {
+            differences.push(format!("{lines:?}: {actual:?} expected {expected:?}"));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn deep_alias_questions_keep_their_time_and_budget_bounds() {
+    use std::fmt::Write as _;
+    let mut chain = alias_chain(100_000);
+    chain.push_str("function f(x: A99999) {}\nconst v: A99999 = 's';\nconst p = v as string;");
+    assert!(timed_alias_findings("chain.ts", &chain, 3).is_empty());
+
+    let mut nested = String::from("type G0<T> = T;\n");
+    for i in 1..=128 {
+        writeln!(nested, "type G{i}<T> = G{}<T[]>;", i - 1).unwrap();
+    }
+    nested.push_str("type Result = G128<string>;");
+    let hits = run_rule("ts/no-unknown-type-aliases", "nested.ts", &nested);
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.line, h.col, h.note.as_deref()))
+            .collect::<Vec<_>>(),
+        (99..=130)
+            .map(|line| (line, 6, Some("type too complex to judge")))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unresolved_type_limits() {
+    let chain = generic_budget_chain();
+    for (declarations, ty, expected) in [
+        (
+            "import type { External } from './other';\n",
+            "External",
+            None,
+        ),
+        ("type Loop = Other; type Other = Loop;\n", "Loop", None),
+        (
+            chain.as_str(),
+            "A24<string>",
+            Some("type too complex to judge"),
+        ),
+    ] {
+        let source = format!("{declarations}function f(x: {ty}) {{}}");
+        let hits = run_rule("ts/no-unknown-parameters", "limits.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+                .map(|note| (source.lines().count(), 15, Some(note)))
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn keyword_answers_survive_an_expensive_neighbor() {
+    let chain = generic_budget_chain();
+    for (rule, stress, ordinary) in [
+        (
+            "ts/no-known-value-widening",
+            "declare function guard(x: unknown): x is string; declare const v: A24<string>; guard(v);",
+            "const nNAME: unknown = 1;",
+        ),
+        (
+            "ts/no-unknown-returns",
+            "function stress(): A24<string> { throw 0; }",
+            "function fNAME(): unknown { throw 0; }",
+        ),
+        (
+            "ts/no-widen-then-assert",
+            "const a: Record<A24<string>, unknown> = { id: 1 }; const p = a as number;",
+            "const aNAME: unknown = 1; const pNAME = aNAME as number;",
+        ),
+    ] {
+        for order in 0..3 {
+            let mut lines = vec![ordinary.replace("NAME", "1"), ordinary.replace("NAME", "2")];
+            let baseline = run_rule(rule, "case.ts", &lines.join("\n"));
+            assert_eq!(baseline.len(), 2);
+            lines.insert(order, stress.into());
+            let hits = run_rule(rule, "case.ts", &format!("{chain}{}", lines.join("\n")));
+            let offset = chain.lines().count();
+            let positions: Vec<_> = hits
+                .iter()
+                .filter(|h| h.line > offset && h.line != offset + order + 1)
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect();
+            assert_eq!(
+                positions,
+                baseline
+                    .iter()
+                    .map(|h| (
+                        offset + h.line + usize::from(h.line > order),
+                        h.col,
+                        h.note.as_deref()
+                    ))
+                    .collect::<Vec<_>>(),
+                "{rule}, order {order}"
+            );
+        }
+    }
 }

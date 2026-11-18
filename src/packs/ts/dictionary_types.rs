@@ -3,7 +3,7 @@ use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{TSSignature, TSType, TSTypeName, TSTypeOperatorOperator, TSTypeReference},
+        ast::{TSSignature, TSType, TSTypeName, TSTypeOperatorOperator},
     },
     syntax::{node::NodeId, symbol::SymbolId},
 };
@@ -29,9 +29,7 @@ pub(super) enum Query {
     WideRecord,
     NarrowRecord,
     IsObject,
-    UnknownParameter,
     Never,
-    Empty,
     UnknownAlias,
     UnknownReturn,
     Target,
@@ -52,6 +50,25 @@ struct Goal {
     query: Query,
 }
 impl Goal {
+    fn wide_record(self, key: &TSType<'_>, value: &TSType<'_>) -> Plan {
+        Plan::many(
+            Combine::All,
+            vec![
+                self.child(key, Query::WideKey),
+                self.child(value, Query::Top),
+            ],
+        )
+    }
+    fn root(node: NodeId, query: Query) -> Self {
+        Self {
+            term: Term {
+                node,
+                env: 0,
+                place: 0,
+            },
+            query,
+        }
+    }
     fn child(self, ty: &TSType<'_>, query: Query) -> Self {
         Self {
             term: Term {
@@ -136,7 +153,6 @@ enum Combine {
     Any,
     All,
     Dictionary,
-    OnlyDictionary,
     Not,
 }
 impl Combine {
@@ -151,7 +167,6 @@ impl Combine {
             Self::Not if first == Class::None => Class::Broad,
             Self::Any if first != Class::None => Class::Broad,
             Self::Dictionary if first != Class::None => Class::Dictionary,
-            Self::OnlyDictionary if first == Class::Dictionary => first,
             Self::All if values.contains(&Class::Any) => Class::Any,
             Self::All if !values.is_empty() && !values.contains(&Class::None) => Class::Broad,
             _ => Class::None,
@@ -209,6 +224,39 @@ struct Equation {
     queued: bool,
 }
 
+fn plan_root(
+    memo: &HashMap<Goal, Class>,
+    budget: &mut Budget,
+    plan: impl FnOnce(&mut Budget) -> Plan,
+) -> Option<Plan> {
+    let mut planning = Budget(Some(usize::MAX));
+    let root = plan(&mut planning);
+    let children = root.children();
+    if children.is_empty() {
+        let value = match root {
+            Plan::Done(value) => value,
+            Plan::Children(combine, _) => combine.apply(&[]),
+        };
+        return Some(Plan::Done(value));
+    }
+    if !budget.take(usize::MAX - planning.0?) {
+        return None;
+    }
+    if let Plan::Children(combine, _) = &root
+        && let Some(values) = children
+            .iter()
+            .map(|child| memo.get(child).copied())
+            .collect::<Option<Vec<_>>>()
+    {
+        if !budget.take(2 + 2 * children.len()) {
+            return None;
+        }
+        let value = combine.apply(&values);
+        return Some(Plan::Done(value));
+    }
+    Some(root)
+}
+
 fn evaluate(
     memo: &mut HashMap<Goal, Class>,
     goal: Goal,
@@ -218,6 +266,12 @@ fn evaluate(
     if let Some(value) = memo.get(&goal) {
         return Some(*value);
     }
+    let root = plan_root(memo, budget, |planning| plan(goal, planning))?;
+    if let Plan::Done(value) = root {
+        memo.insert(goal, value);
+        return Some(value);
+    }
+    let mut first = Some(root);
     let mut equations = HashMap::new();
     let mut parents: HashMap<Goal, Vec<Goal>> = HashMap::new();
     let mut discover = vec![(goal, false)];
@@ -233,7 +287,7 @@ fn evaluate(
         if equations.contains_key(&g) || memo.contains_key(&g) {
             continue;
         }
-        let p = plan(g, budget);
+        let p = first.take().unwrap_or_else(|| plan(g, budget));
         budget.0?;
         for &child in p.children() {
             if !memo.contains_key(&child) {
@@ -311,14 +365,10 @@ impl Plan {
 }
 impl Environments {
     fn interface_goal(ctx: &TsCtx<'_>, sym: SymbolId) -> Goal {
-        Goal {
-            term: Term {
-                node: ctx.semantic.scoping().symbol_declaration(sym),
-                env: 0,
-                place: 0,
-            },
-            query: Query::Interface(sym),
-        }
+        Goal::root(
+            ctx.semantic.scoping().symbol_declaration(sym),
+            Query::Interface(sym),
+        )
     }
 
     fn interface(ctx: &TsCtx<'_>, sym: SymbolId, budget: &mut Budget) -> Plan {
@@ -346,16 +396,8 @@ impl Environments {
                 };
                 if ctx.semantic.scoping().symbol_flags(base).is_interface() {
                     parents.push(Self::interface_goal(ctx, base));
-                } else if let Some(AstKind::TSTypeAliasDeclaration(alias)) =
-                    type_declarations(ctx, base)
-                        .next()
-                        .map(|id| ctx.semantic.nodes().kind(id))
-                    && alias.type_parameters.is_none()
-                    && parent.type_arguments.is_none()
-                {
-                    parents.push(
-                        Self::interface_goal(ctx, base).child(&alias.type_annotation, Query::Empty),
-                    );
+                } else if ctx.semantic.scoping().symbol_flags(base).is_type_alias() {
+                    parents.push(Goal::root(parent.node_id.get(), Query::Value));
                 } else {
                     return Plan::Done(Class::None);
                 }
@@ -371,13 +413,21 @@ impl Environments {
     fn forwarding_target(ctx: &TsCtx<'_>, id: NodeId, budget: &mut Budget) -> Option<NodeId> {
         let nodes = ctx.semantic.nodes();
         let alias = nodes.kind(id).as_ts_type_alias_declaration()?;
-        let params = &alias.type_parameters.as_ref()?.params;
         let TSType::TSTypeReference(r) = budget.unparen(&alias.type_annotation)? else {
             return None;
         };
         let TSTypeName::IdentifierReference(name) = &r.type_name else {
             return None;
         };
+        let target = type_declarations(ctx, symbol(ctx, name)?).next()?;
+        let dest = nodes.kind(target).as_ts_type_alias_declaration()?;
+        if alias.type_parameters.is_none()
+            && r.type_arguments.is_none()
+            && dest.type_parameters.is_none()
+        {
+            return Some(target);
+        }
+        let params = &alias.type_parameters.as_ref()?.params;
         let args = &r.type_arguments.as_ref()?.params;
         if params.len() != args.len() || !budget.take(args.len()) {
             return None;
@@ -396,8 +446,6 @@ impl Environments {
                 return None;
             }
         }
-        let target = type_declarations(ctx, symbol(ctx, name)?).next()?;
-        let dest = nodes.kind(target).as_ts_type_alias_declaration()?;
         let target_params = &dest.type_parameters.as_ref()?.params;
         (target_params.len() == args.len() && target_params.iter().all(|p| p.default.is_none()))
             .then_some(target)
@@ -434,16 +482,14 @@ impl Environments {
         &mut self,
         ctx: &TsCtx<'_>,
         g: Goal,
-        r: &TSTypeReference<'_>,
+        type_name: &TSTypeName<'_>,
+        type_arguments: Option<&oxc::ast::ast::TSTypeParameterInstantiation<'_>>,
         budget: &mut Budget,
     ) -> Plan {
-        let TSTypeName::IdentifierReference(name) = &r.type_name else {
+        let TSTypeName::IdentifierReference(name) = type_name else {
             return Plan::Done(Class::None);
         };
-        let args = r
-            .type_arguments
-            .as_ref()
-            .map_or(&[][..], |a| a.params.as_slice());
+        let args = type_arguments.map_or(&[][..], |a| a.params.as_slice());
         let scopes = ctx.semantic.scoping();
         if let Some(sym) = symbol(ctx, name) {
             if self.syntax_only {
@@ -454,9 +500,7 @@ impl Environments {
             {
                 return Plan::child(Combine::First, Goal { term, ..g });
             }
-            if matches!(g.query, Query::Value | Query::Empty)
-                && scopes.symbol_flags(sym).is_interface()
-            {
+            if g.query == Query::Value && scopes.symbol_flags(sym).is_interface() {
                 return Plan::child(Combine::First, Self::interface_goal(ctx, sym));
             }
             let Some(id) = type_declarations(ctx, sym)
@@ -472,22 +516,6 @@ impl Environments {
                 _ => return Plan::Done(Class::None),
             }
         }
-        if name.name == "Record"
-            && let [key, value] = args
-        {
-            match g.query {
-                Query::WideRecord => {
-                    return Plan::many(
-                        Combine::All,
-                        vec![g.child(key, Query::WideKey), g.child(value, Query::Top)],
-                    );
-                }
-                Query::NarrowRecord => {
-                    return Plan::child(Combine::Not, g.child(value, Query::Top));
-                }
-                _ => {}
-            }
-        }
         let (index, query, combine) = match (name.name.as_str(), g.query) {
             (
                 "Readonly" | "NonNullable" | "Partial" | "Required",
@@ -496,6 +524,13 @@ impl Environments {
             | ("Promise" | "PromiseLike", Query::UnknownReturn)
             | ("Readonly", Query::WideRecord | Query::NarrowRecord)
             | ("Pick" | "Omit", Query::UnsafeDictionary) => (0, g.query, Combine::First),
+            ("Record", Query::WideRecord) => {
+                return match args {
+                    [key, value] => g.wide_record(key, value),
+                    _ => Plan::Done(Class::None),
+                };
+            }
+            ("Record", Query::NarrowRecord) if args.len() == 2 => (1, Query::Top, Combine::Not),
             ("Record", Query::UnsafeDictionary) => (1, Query::Value, Combine::First),
             ("Record", Query::Target | Query::AliasTarget) if args.is_empty() => {
                 return Plan::Done(Class::Dictionary);
@@ -522,20 +557,6 @@ impl Environments {
             place: 0,
         };
         if let Some(params) = &a.type_parameters {
-            if matches!(
-                g.query,
-                Query::UnknownParameter
-                    | Query::Never
-                    | Query::Empty
-                    | Query::Top
-                    | Query::WideObject
-                    | Query::WideKey
-                    | Query::WideRecord
-                    | Query::NarrowRecord
-                    | Query::IsObject
-            ) {
-                return Plan::Done(Class::None);
-            }
             let Some(inner) = self.enter(g.term.place, a.node_id.get(), g.query, budget) else {
                 return Plan::Done(Class::None);
             };
@@ -547,7 +568,13 @@ impl Environments {
                 let (arg, base) = if let Some(arg) = args.get(index) {
                     (arg, g.term)
                 } else if let Some(arg) = &p.default {
-                    (arg, body)
+                    (
+                        arg,
+                        Term {
+                            place: g.term.place,
+                            ..body
+                        },
+                    )
                 } else {
                     return Plan::Done(Class::None);
                 };
@@ -560,12 +587,7 @@ impl Environments {
             }
         }
         let query = annotation_query(g.query);
-        let combine = if g.query == Query::Target && a.type_parameters.is_some() {
-            Combine::OnlyDictionary
-        } else {
-            Combine::First
-        };
-        Plan::child(combine, Goal { term: body, query })
+        Plan::child(Combine::First, Goal { term: body, query })
     }
     fn argument(
         &mut self,
@@ -626,29 +648,23 @@ impl Environments {
         if let AstKind::TSTypeLiteral(n) = kind
             && matches!(
                 q,
-                Query::UnsafeDictionary | Query::Target | Query::AliasTarget
+                Query::UnsafeDictionary | Query::Target | Query::AliasTarget | Query::NarrowRecord
             )
             && !budget.take(n.members.len())
         {
             return Plan::Done(Class::None);
         }
         match (kind, q) {
-            (AstKind::TSTypeReference(r), _) => self.reference(ctx, g, r, budget),
+            (AstKind::TSTypeReference(r), _) => {
+                self.reference(ctx, g, &r.type_name, r.type_arguments.as_deref(), budget)
+            }
+            (AstKind::TSInterfaceHeritage(h), Query::Value) => {
+                self.reference(ctx, g, &h.type_name, h.type_arguments.as_deref(), budget)
+            }
             (AstKind::TSParenthesizedType(p), _) => {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
-            (AstKind::TSTypeOperator(p), _)
-                if p.operator == TSTypeOperatorOperator::Readonly
-                    && !matches!(
-                        q,
-                        Query::Top
-                            | Query::WideObject
-                            | Query::WideRecord
-                            | Query::WideKey
-                            | Query::NarrowRecord
-                            | Query::UnknownParameter
-                    ) =>
-            {
+            (AstKind::TSTypeOperator(p), _) if p.operator == TSTypeOperatorOperator::Readonly => {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
             _ => Self::classify(kind, g, budget),
@@ -657,10 +673,7 @@ impl Environments {
     fn classify(kind: AstKind<'_>, g: Goal, budget: &mut Budget) -> Plan {
         let q = g.query;
         match (kind, q) {
-            (
-                AstKind::TSUnknownKeyword(_),
-                Query::UnknownParameter | Query::UnknownReturn | Query::UnknownAlias,
-            )
+            (AstKind::TSUnknownKeyword(_), Query::UnknownReturn | Query::UnknownAlias)
             | (AstKind::TSNeverKeyword(_), Query::Never)
             | (AstKind::TSObjectKeyword(_), Query::ObjectInput)
             | (
@@ -671,14 +684,13 @@ impl Environments {
                 AstKind::TSStringKeyword(_)
                 | AstKind::TSNumberKeyword(_)
                 | AstKind::TSSymbolKeyword(_),
-                Query::Key,
+                Query::Key | Query::WideKey,
             ) => Plan::Done(Class::Broad),
             (AstKind::TSAnyKeyword(_), Query::Value) => Plan::Done(Class::Any),
             (
                 AstKind::TSUnionType(n),
                 Query::Value
                 | Query::Key
-                | Query::UnknownParameter
                 | Query::UnknownReturn
                 | Query::UnknownAlias
                 | Query::ObjectInput,
@@ -686,11 +698,11 @@ impl Environments {
                 Combine::Any,
                 n.types.iter().map(|ty| g.child(ty, q)).collect(),
             ),
-            (AstKind::TSIntersectionType(n), Query::Value) => Plan::many(
+            (AstKind::TSIntersectionType(n), Query::Value | Query::IsObject) => Plan::many(
                 Combine::All,
                 n.types.iter().map(|ty| g.child(ty, q)).collect(),
             ),
-            (AstKind::TSTypeLiteral(n), Query::Value | Query::Empty) => {
+            (AstKind::TSTypeLiteral(n), Query::Value) => {
                 let mut children = Vec::new();
                 if !empty_members(g, &n.members, budget, &mut children) {
                     Plan::Done(Class::None)
@@ -719,7 +731,9 @@ impl Environments {
             {
                 Plan::Done(Class::Dictionary)
             }
-            (AstKind::TSTypeLiteral(n), Query::Target) if !n.members.is_empty() => {
+            (AstKind::TSTypeLiteral(n), Query::Target | Query::IsObject)
+                if !n.members.is_empty() =>
+            {
                 Plan::Done(Class::Broad)
             }
             (AstKind::TSMappedType(_), Query::Target) => Plan::Done(Class::Dictionary),
@@ -732,20 +746,14 @@ impl Environments {
                 .map_or(Plan::Done(Class::None), |ty| {
                     Plan::child(Combine::First, g.child(ty, Query::Value))
                 }),
-            _ => Self::assertion_shape(kind, g, budget),
+            _ => Self::assertion_shape(kind, g),
         }
     }
-    fn assertion_shape(kind: AstKind<'_>, g: Goal, budget: &mut Budget) -> Plan {
+    fn assertion_shape(kind: AstKind<'_>, g: Goal) -> Plan {
         let q = g.query;
         match (kind, q) {
             (AstKind::TSAnyKeyword(_) | AstKind::TSUnknownKeyword(_), Query::Top)
             | (AstKind::TSObjectKeyword(_), Query::WideObject)
-            | (
-                AstKind::TSStringKeyword(_)
-                | AstKind::TSNumberKeyword(_)
-                | AstKind::TSSymbolKeyword(_),
-                Query::WideKey,
-            )
             | (
                 AstKind::TSArrayType(_)
                 | AstKind::TSConstructorType(_)
@@ -759,28 +767,17 @@ impl Environments {
                 Combine::All,
                 n.types.iter().map(|t| g.child(t, q)).collect(),
             ),
-            (AstKind::TSIntersectionType(n), Query::IsObject) => Plan::many(
-                Combine::All,
-                n.types.iter().map(|t| g.child(t, q)).collect(),
-            ),
-            (AstKind::TSTypeLiteral(n), Query::IsObject) if !n.members.is_empty() => {
-                Plan::Done(Class::Broad)
-            }
             (AstKind::TSTypeLiteral(n), Query::WideRecord) => match n.members.as_slice() {
-                [TSSignature::TSIndexSignature(i)] => Plan::many(
-                    Combine::All,
-                    vec![
-                        g.child(&i.parameter.type_annotation.type_annotation, Query::WideKey),
-                        g.child(&i.type_annotation.type_annotation, Query::Top),
-                    ],
+                [TSSignature::TSIndexSignature(i)] => g.wide_record(
+                    &i.parameter.type_annotation.type_annotation,
+                    &i.type_annotation.type_annotation,
                 ),
                 _ => Plan::Done(Class::None),
             },
             (AstKind::TSTypeLiteral(n), Query::NarrowRecord)
-                if budget.take(n.members.len())
-                    && n.members
-                        .iter()
-                        .any(|m| !matches!(m, TSSignature::TSIndexSignature(_))) =>
+                if n.members
+                    .iter()
+                    .any(|m| !matches!(m, TSSignature::TSIndexSignature(_))) =>
             {
                 Plan::Done(Class::Broad)
             }
@@ -805,8 +802,11 @@ fn empty_members(
         let Some(annotation) = &p.type_annotation else {
             return false;
         };
+        if !p.optional {
+            return false;
+        }
         children.push(g.child(&annotation.type_annotation, Query::Never));
-        p.optional
+        true
     })
 }
 
@@ -834,17 +834,7 @@ pub(super) fn report(findings: &mut crate::engine::Findings, offset: usize, answ
 }
 impl Resolution {
     fn query(&self, ctx: &TsCtx<'_>, node: NodeId, query: Query) -> Judged<Class> {
-        self.0.borrow_mut().solve(
-            ctx,
-            Goal {
-                term: Term {
-                    node,
-                    env: 0,
-                    place: 0,
-                },
-                query,
-            },
-        )
+        self.0.borrow_mut().solve(ctx, Goal::root(node, query))
     }
     pub(super) fn plain_alias<'a>(&self, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> &'a TSType<'a> {
         if let TSType::TSTypeReference(r) = ty.without_parenthesized()
@@ -888,14 +878,7 @@ impl Resolution {
                 syntax_only: true,
                 ..Environments::default()
             };
-            let goal = Goal {
-                term: Term {
-                    node: ty.node_id(),
-                    env: 0,
-                    place: 0,
-                },
-                query,
-            };
+            let goal = Goal::root(ty.node_id(), query);
             evaluate(
                 &mut HashMap::new(),
                 goal,
@@ -906,11 +889,7 @@ impl Resolution {
         });
         value != Class::None
     }
-    pub(super) fn unknown_parameter(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
-        self.query(ctx, ty.node_id(), Query::UnknownParameter)
-            .map(|v| v != Class::None)
-    }
-    pub(super) fn unknown_alias(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
+    pub(super) fn contains_unknown(&self, ctx: &TsCtx<'_>, ty: &TSType<'_>) -> Judged<bool> {
         self.query(ctx, ty.node_id(), Query::UnknownAlias)
             .map(|v| v != Class::None)
     }
@@ -946,14 +925,12 @@ mod tests {
                 Query::PlainAlias,
                 Query::UnsafeDictionary,
                 Query::ObjectInput,
-                Query::UnknownParameter,
                 Query::UnknownAlias,
                 Query::UnknownReturn,
                 Query::Target,
                 Query::AliasTarget,
                 Query::Key,
                 Query::Value,
-                Query::Empty,
                 Query::Never,
                 Query::Top,
                 Query::WideObject,
@@ -976,17 +953,15 @@ mod tests {
             for first in queries {
                 for second in queries.into_iter().filter(|q| *q != first) {
                     let decl = alias.node_id.get();
-                    let goal = |query| Goal {
-                        query,
-                        term: Term {
-                            node: if query == Query::PlainAlias {
+                    let goal = |query| {
+                        Goal::root(
+                            if query == Query::PlainAlias {
                                 decl
                             } else {
                                 alias.type_annotation.node_id()
                             },
-                            env: 0,
-                            place: 0,
-                        },
+                            query,
+                        )
                     };
                     let mut shared = Solver::default();
                     let places = &mut shared.envs;
@@ -1070,28 +1045,57 @@ mod tests {
             resolution.0.borrow_mut().budget = Some(Budget(Some(0)));
             check_with_resolution(ctx, findings, &resolution);
         }
-        let mut source = String::from(
-            "declare function guard(v: unknown): v is string;\ndeclare const root: string;\nconst v0 = root;\n",
-        );
-        for i in 1..=4000 {
-            writeln!(source, "const v{i} = v{};", i - 1).unwrap();
+        fn unlimited(ctx: &TsCtx<'_>, findings: &mut Findings) {
+            let resolution = super::Resolution::default();
+            resolution.0.borrow_mut().budget = Some(Budget(Some(usize::MAX)));
+            check_with_resolution(ctx, findings, &resolution);
         }
-        source.push_str(&"guard(v4000);\n".repeat(4000));
-        let start = Instant::now();
-        let hits = run(
-            &[Rule {
-                run: Run::Ts(check),
-                ..RULE
-            }],
-            [("guard.ts", source.as_bytes())],
-        );
-        assert!(start.elapsed() < Duration::from_secs(3));
-        assert_eq!(hits.len(), 4000);
-        for (i, hit) in hits.iter().enumerate() {
-            assert_eq!(
-                (hit.line, hit.col, hit.note.as_deref()),
-                (4004 + i, 7, Some("type too complex to judge"))
+        for (origin, note) in [
+            (
+                "type Origin = string; declare const root: Origin;",
+                Some("type too complex to judge"),
+            ),
+            ("declare const root: string;", None),
+        ] {
+            let mut source = format!(
+                "declare function guard(v: unknown): v is string;\n{origin}\nconst v0 = root;\n",
             );
+            for i in 1..=4000 {
+                writeln!(source, "const v{i} = v{};", i - 1).unwrap();
+            }
+            source.push_str(&"guard(v4000);\n".repeat(4000));
+            let start = Instant::now();
+            let hits = run(
+                &[Rule {
+                    run: Run::Ts(check),
+                    ..RULE
+                }],
+                [("guard.ts", source.as_bytes())],
+            );
+            assert!(start.elapsed() < Duration::from_secs(3));
+            assert_eq!(hits.len(), 4000);
+            for (i, hit) in hits.iter().enumerate() {
+                assert_eq!(
+                    (hit.line, hit.col, hit.note.as_deref()),
+                    (4004 + i, 7, note)
+                );
+            }
+            if note.is_none() {
+                let other = run(
+                    &[Rule {
+                        run: Run::Ts(unlimited),
+                        ..RULE
+                    }],
+                    [("guard.ts", source.as_bytes())],
+                );
+                assert!(
+                    hits.iter()
+                        .map(|h| (h.rule, &h.path, h.line, h.col, &h.note))
+                        .eq(other
+                            .iter()
+                            .map(|h| (h.rule, &h.path, h.line, h.col, &h.note)))
+                );
+            }
         }
     }
 
@@ -1135,7 +1139,7 @@ mod tests {
             &rules,
             [(
                 "types.ts",
-                b"type Clean = string;\ntype X = Clean;\ntype Y = number;".as_slice(),
+                b"type Clean = string;\ntype X = Clean;\ntype Y = number;\ntype Z = Y;".as_slice(),
             )],
         );
         assert_eq!(
@@ -1144,7 +1148,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 (RULE.id, 2, 6, Some("type too complex to judge")),
-                (RULE.id, 3, 6, Some("type too complex to judge"))
+                (RULE.id, 4, 6, Some("type too complex to judge"))
             ]
         );
     }
