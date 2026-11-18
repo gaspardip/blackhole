@@ -12,6 +12,7 @@ mod packs {
         pub(crate) mod no_chained_type_assertions;
         pub(crate) mod no_comments;
         pub(crate) mod no_explicit_any;
+        pub(crate) mod no_explicit_return_types;
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;

@@ -9,6 +9,18 @@ struct Case {
 
 const CASES: &[Case] = &[
     Case {
+        silent: "ts/no-known-value-widening",
+        path: "valid-06.ts",
+        snippet: "type Command = () => void; const startCommand = () => {}; function create(): Record<string, Command> { return {}; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-known-value-widening",
+        path: "valid-07.ts",
+        snippet: "type Command = () => void; const startCommand = () => {}; const create = (): Record<string, Command> => ({});",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
         silent: "ts/no-widen-then-assert",
         path: "valid-01.ts",
         snippet: "const source = { id: 'first' }; const widened: unknown = source;",
@@ -61,6 +73,90 @@ const CASES: &[Case] = &[
         path: "valid-02.ts",
         snippet: "Reflect.get(owner, key);",
         reporting: "ts/no-reflect-get",
+    },
+    Case {
+        silent: "ts/no-comments",
+        path: "preserves-exported-public-api-documentation-12.ts",
+        snippet: "interface Result { /** Number of items. */ count: number; }\nexport function count(): Result { return { count: 1 }; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-explicit-return-types",
+        path: "allows-inferred-returns-and-type-only-signatures-01.ts",
+        snippet: "function isString(value: unknown): value is string { return typeof value === 'string'; }",
+        reporting: "ts/no-runtime-typeof",
+    },
+    Case {
+        silent: "ts/no-explicit-return-types",
+        path: "allows-inferred-returns-and-type-only-signatures-02.ts",
+        snippet: "function assertString(value: unknown): asserts value is string { if (typeof value !== 'string') throw Error(); }",
+        reporting: "ts/no-runtime-typeof",
+    },
+    Case {
+        silent: "ts/no-known-value-widening",
+        path: "valid-18.ts",
+        snippet: "type Command = () => void; const startCommand = () => {}; interface Commands { readonly start: Command } function create(): Commands { return { start: startCommand }; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-parameters",
+        path: "valid-01.ts",
+        snippet: "function enrich(cause: unknown): void {}",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-parameters",
+        path: "valid-02.ts",
+        snippet: "function enrich(cause: Error | unknown): void {}",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-parameters",
+        path: "valid-09.ts",
+        snippet: "function parse(value: string | number): void {}",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-02.ts",
+        snippet: "function parse(): ImportedValue { return input; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-03.ts",
+        snippet: "function parse(): User { return user; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-05.ts",
+        snippet: "function generic<Value>(): Value { return value; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-10.ts",
+        snippet: "type Result = { value: unknown }; function load(): Result { return result; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-11.ts",
+        snippet: "function load(): Promise<User> { return promise; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unknown-returns",
+        path: "valid-12.ts",
+        snippet: "type Identity<T> = T; function load(): Identity<User> { return user; }",
+        reporting: "ts/no-explicit-return-types",
+    },
+    Case {
+        silent: "ts/no-unsafe-dictionary-type",
+        path: "valid-25.ts",
+        snippet: "function run<T extends Record<string, unknown>>(input: T): T { return input; }",
+        reporting: "ts/no-explicit-return-types",
     },
 ];
 
