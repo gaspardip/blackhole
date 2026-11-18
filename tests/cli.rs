@@ -2,6 +2,8 @@ use std::{
     fs,
     path::Path,
     process::{Command, Output},
+    thread,
+    time::Duration,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -23,9 +25,12 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn check(dir: &Path, args: &[&str], code: i32) -> Output {
+    run(dir, &[&["check"], args].concat(), code)
+}
+
+fn run(dir: &Path, args: &[&str], code: i32) -> Output {
     let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
         .current_dir(dir)
-        .arg("check")
         .args(args)
         .output()
         .unwrap();
@@ -147,4 +152,295 @@ fn invalid_path_is_an_error() {
     fs::write(dir.path().join(OsStr::from_bytes(b"bad\xff")), "").unwrap();
     let message = check(dir.path(), &[], 2).stderr;
     assert_eq!(message, b"blackhole: path is not valid UTF-8: bad\\xff\n");
+}
+
+const HEADER: &str = "blackhole-ledger 1\n";
+const RULE: &str = "core/no-suppression";
+
+fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
+    fs::create_dir_all(dir.join(".blackhole")).unwrap();
+    let mut data = HEADER.to_owned();
+    for (path, n) in rows {
+        use std::fmt::Write;
+        writeln!(data, "{RULE}\t{n}\t{path}").unwrap();
+    }
+    fs::write(dir.join(".blackhole/ledger"), &data).unwrap();
+    data.into_bytes()
+}
+
+fn regenerate(dir: &Path, code: i32) -> Vec<u8> {
+    run(dir, &["ledger"], code).stdout
+}
+
+#[test]
+fn ledger_exact_and_over() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    let expected = check(root, &[], 1).stdout;
+    baseline(root, &[("a.py", 2)]);
+    assert_eq!(check(root, &[], 0).stdout, b"");
+    let before = baseline(root, &[("a.py", 1)]);
+    assert_eq!(check(root, &[], 1).stdout, expected);
+    assert_eq!(regenerate(root, 1), expected);
+    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+}
+
+#[test]
+fn stale_and_deleted_entries_shrink() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::write(root.join("b.py"), "").unwrap();
+    baseline(root, &[("a.py", 2), ("gone.py", 1)]);
+    let stale = format!(
+        "a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\n\
+         gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n"
+    );
+    assert_eq!(check(root, &[], 1).stdout, stale.as_bytes());
+    assert_eq!(check(root, &["b.py"], 0).stdout, b"");
+    let selected = format!("a.py {RULE}: ledger allows 2, found 1; run blackhole ledger\n");
+    assert_eq!(check(root, &["a.py"], 1).stdout, selected.as_bytes());
+    assert_eq!(regenerate(root, 0), b"");
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
+    );
+    assert_eq!(check(root, &[], 0).stdout, b"");
+}
+
+#[test]
+fn a_selection_keeps_the_rows_of_files_that_are_gone() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/clean.py"), "").unwrap();
+    fs::create_dir(root.join("empty")).unwrap();
+    fs::write(root.join("other.py"), "").unwrap();
+    baseline(
+        root,
+        &[
+            ("empty/gone.py", 1),
+            ("gone.py", 1),
+            ("gone/deep/file.py", 1),
+            ("sub/gone.py", 1),
+            ("subway/gone.py", 1),
+        ],
+    );
+    let stale = format!("sub/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["sub"], 1).stdout, stale.as_bytes());
+    assert_eq!(check(&root.join("sub"), &["."], 1).stdout, stale.as_bytes());
+    assert_eq!(check(root, &["other.py"], 0).stdout, b"");
+    let stale = format!("empty/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    assert_eq!(check(root, &["empty"], 1).stdout, stale.as_bytes());
+    let stale =
+        format!("gone/deep/file.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    for path in ["gone", "gone/deep/file.py"] {
+        assert_eq!(check(root, &[path], 1).stdout, stale.as_bytes(), "{path}");
+    }
+    for path in ["nowhere", "nowhere/deep.py", "gone/../other.py", ".."] {
+        check(root, &[path], 2);
+    }
+}
+
+#[test]
+fn absent_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    assert_eq!(regenerate(root, 0), b"");
+    for path in ["a\tb.py", "a\nb.py"] {
+        fs::write(root.join(path), "#noqa").unwrap();
+    }
+    let found = regenerate(root, 1);
+    assert_eq!(found, check(root, &[], 1).stdout);
+    let found = String::from_utf8(found).unwrap();
+    for line in [
+        format!("a\tb.py:1:1 {RULE}\n"),
+        format!("a\nb.py:1:1 {RULE}\n"),
+    ] {
+        assert!(found.contains(&line), "{found:?}");
+    }
+    assert_eq!(found.matches(&format!("\n{RULE} Fix ")).count(), 1);
+    assert!(!root.join(".blackhole/ledger").exists());
+}
+
+#[test]
+fn over_blocks_the_shrink() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    let before = baseline(root, &[("a.py", 1), ("gone.py", 1)]);
+    regenerate(root, 1);
+    assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+}
+
+#[test]
+fn regeneration_waits_for_the_lock() {
+    let other = repo();
+    // Neither the caller's git variables nor a second repository on the same tree may move the lock away from the ledger it guards.
+    for case in ["plain", "variables", "nested"] {
+        let dir = repo();
+        let root = dir.path();
+        fs::write(root.join("a.py"), "#noqa").unwrap();
+        let before = baseline(root, &[("a.py", 2)]);
+        let lock = fs::File::open(root).unwrap();
+        lock.lock().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_blackhole"));
+        command.current_dir(root).arg("ledger");
+        if case == "variables" {
+            command
+                .env("GIT_DIR", other.path().join(".git"))
+                .env("GIT_WORK_TREE", root);
+        }
+        if case == "nested" {
+            git(root, &["init", "-q", "nested"]);
+            let nested = root.join("nested");
+            git(
+                &nested,
+                &["config", "core.worktree", root.to_str().unwrap()],
+            );
+            command.current_dir(nested);
+        }
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        assert!(child.try_wait().unwrap().is_none(), "{case}");
+        assert_eq!(fs::read(root.join(".blackhole/ledger")).unwrap(), before);
+        lock.unlock().unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            fs::read(root.join(".blackhole/ledger")).unwrap(),
+            format!("{HEADER}{RULE}\t1\ta.py\n").as_bytes()
+        );
+    }
+}
+
+#[test]
+fn the_root_is_found_once() {
+    let dir = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("a.py"), "#noqa").unwrap();
+    baseline(root, &[("sub/a.py", 2)]);
+    let inner = baseline(&sub, &[("a.py", 2)]);
+    let lock = fs::File::open(root).unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(&sub)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    // A repository that appears under the tree while the writer waits must not become its root.
+    git(&sub, &["init", "-q"]);
+    lock.unlock().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read(sub.join(".blackhole/ledger")).unwrap(), inner);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_lock_is_not_a_file() {
+    let dir = tempdir().unwrap();
+    let (meta, root) = (dir.path().join("meta"), dir.path().join("tree"));
+    let at = |path: &Path| path.to_str().unwrap().to_owned();
+    git(
+        dir.path(),
+        &["init", "-q", "--separate-git-dir", &at(&meta), &at(&root)],
+    );
+    fs::write(root.join("a.py"), "").unwrap();
+    let victim = dir.path().join("victim");
+    fs::write(&victim, "kept").unwrap();
+    let absent = dir.path().join("absent");
+    // A file of the old lock's name, wherever it points, is no part of the lock.
+    std::os::unix::fs::symlink(&absent, root.join("blackhole.lock")).unwrap();
+    regenerate(&root, 0);
+    assert!(!meta.join("blackhole.lock").try_exists().unwrap());
+    assert!(!absent.try_exists().unwrap());
+    fs::remove_file(root.join("blackhole.lock")).unwrap();
+    std::os::unix::fs::symlink(&victim, meta.join("blackhole.lock")).unwrap();
+    regenerate(&root, 0);
+    assert_eq!(fs::read(&victim).unwrap(), b"kept");
+    let mut left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, [".git", "a.py"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_entry_on_the_way_is_not_a_directory_that_is_gone() {
+    let dir = repo();
+    let root = dir.path();
+    baseline(root, &[("gone/deep/file.py", 1)]);
+    let stale =
+        format!("gone/deep/file.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n");
+    fs::write(root.join("gone"), "").unwrap();
+    assert_eq!(
+        check(root, &["gone/deep/file.py"], 1).stdout,
+        stale.as_bytes()
+    );
+    fs::remove_file(root.join("gone")).unwrap();
+    std::os::unix::fs::symlink("../old-location", root.join("gone")).unwrap();
+    check(root, &["gone/deep/file.py"], 2);
+}
+
+#[test]
+fn a_path_of_many_missing_directories_is_an_error() {
+    let dir = repo();
+    let root = dir.path();
+    check(root, &[&format!("{}f.py", "x/".repeat(60_000))], 2);
+    // A name too long to look at is not a directory that is gone, even with a row under it.
+    let long = format!("gone/{}f.py", "x/".repeat(60_000));
+    baseline(root, &[(&long, 1)]);
+    fs::write(root.join("gone"), "").unwrap();
+    check(root, &[&long], 2);
+}
+
+#[test]
+fn invalid_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    baseline(root, &[]);
+    let path = root.join(".blackhole/ledger");
+    fs::write(&path, b"invalid").unwrap();
+    check(root, &[], 2);
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    check(root, &[], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_baseline() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    fs::write(root.join("target"), HEADER).unwrap();
+    std::os::unix::fs::symlink("../target", root.join(".blackhole/ledger")).unwrap();
+    check(root, &[], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_ledger_directory() {
+    let dir = repo();
+    let root = dir.path();
+    let other = repo();
+    let outside = baseline(other.path(), &[("a.py", 2)]);
+    std::os::unix::fs::symlink(other.path().join(".blackhole"), root.join(".blackhole")).unwrap();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    check(root, &[], 2);
+    run(root, &["ledger"], 2);
+    assert_eq!(
+        fs::read(other.path().join(".blackhole/ledger")).unwrap(),
+        outside
+    );
 }
