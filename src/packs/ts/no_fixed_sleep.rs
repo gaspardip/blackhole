@@ -41,7 +41,7 @@ fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
         return false;
     };
     let timer = invoked(ctx, effect);
-    if timer.path.as_deref() != Some(&["setTimeout"]) {
+    if !super::values::any_assigned_path(ctx, timer.callee, |_, path| path == ["setTimeout"]) {
         return false;
     }
     let Some(arg) = timer.arg(0).map(|e| resolve(ctx, e)) else {
@@ -72,14 +72,19 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             promise(ctx, n)
         } else {
             super::values::call_expr(value).is_some_and(|c| {
-                matches!(
-                    super::test_context::runner(ctx, &super::values::invoked(ctx, c)).short(),
-                    Some(
-                        ["scheduler", "wait"]
-                            | ["Bun", "sleep"]
-                            | ["node:timers/promises" | "timers/promises", "setTimeout"]
+                let inv = super::values::invoked(ctx, c);
+                super::values::any_assigned_path(ctx, inv.callee, |origin, path| {
+                    matches!(
+                        (origin, path),
+                        (
+                            super::values::Origin::Global,
+                            ["scheduler", "wait"] | ["Bun", "sleep"]
+                        ) | (
+                            _,
+                            ["node:timers/promises" | "timers/promises", "setTimeout"]
+                        )
                     )
-                )
+                })
             })
         };
         if sleep

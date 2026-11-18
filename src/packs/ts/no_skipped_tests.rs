@@ -55,11 +55,35 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let base = path.first().copied().unwrap_or("");
         let position = if path.test_or_suite() {
             if path.skipped {
-                Some(path.skip_at.unwrap_or(call.callee.span().start as usize))
+                let usage = c.callee.get_inner_expression();
+                Some(if matches!(usage, Expression::Identifier(_)) {
+                    usage.span().start as usize
+                } else {
+                    path.skip_at.unwrap_or(call.callee.span().start as usize)
+                })
             } else {
                 call.test_options()[0].and_then(|arg| skip_option(ctx, arg))
             }
-        } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe") {
+        } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe")
+            || path.is_empty()
+                && super::values::any_assigned_path(ctx, call.callee, |origin, parts| {
+                    let ((super::values::Origin::Global, names)
+                    | (
+                        _,
+                        [
+                            "vitest" | "node:test" | "@jest/globals" | "@playwright/test",
+                            names @ ..,
+                        ],
+                    )) = (origin, parts)
+                    else {
+                        return false;
+                    };
+                    names.split_first().is_some_and(|(root, rest)| {
+                        (super::test_context::is_test(root) || super::test_context::suite(root))
+                            && rest.iter().any(|key| modifier(key))
+                    })
+                })
+        {
             Some(call.callee.span().start as usize)
         } else if is_test_file
             && let Some(at) = body_skip(call.callee)

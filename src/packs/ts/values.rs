@@ -20,6 +20,8 @@ use std::{
 #[derive(Default)]
 pub(crate) struct Resolution<'a> {
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
+    unreadable: OnceCell<HashSet<SymbolId>>,
+    assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
     written: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
@@ -66,6 +68,32 @@ pub(super) fn destructured<'a>(
     key(ctx, &property.key)
 }
 
+fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
+    ctx.resolution.unreadable.get_or_init(|| {
+        let mut symbols=HashSet::new();
+        let nodes=ctx.semantic.nodes();
+        let scopes=ctx.semantic.scoping();
+        for node in nodes.iter() {
+            match node.kind() {
+                AstKind::CallExpression(c) if c.callee.get_identifier_reference().is_some_and(|id|
+                    id.name=="eval" && ctx.semantic.is_reference_to_global_variable(id)) => {
+                    for scope in scopes.scope_ancestors(node.scope_id()) {
+                        symbols.extend(scopes.iter_bindings_in(scope).filter(|s|!scopes.symbol_flags(*s).is_const_variable()));
+                    }
+                }
+                AstKind::IdentifierReference(id) if id.reference_id.get().is_some_and(|r|scopes.get_reference(r).is_write()) => {
+                    let plain=matches!(nodes.parent_kind(node.id()),AstKind::AssignmentExpression(a) if a.operator.is_assign() && a.left.span()==id.span);
+                    if !plain || nodes.ancestors(node.id()).any(|n|matches!(n.kind(),AstKind::WithStatement(_))) {
+                        symbols.extend(symbol(ctx,id));
+                    }
+                }
+                _=>{}
+            }
+        }
+        symbols
+    }).contains(&sym)
+}
+
 pub(super) fn declaration<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
@@ -82,6 +110,7 @@ pub(super) fn declaration<'a>(
                 .collect()
         })
         .contains(&symbol)
+        && !unreadable(ctx, symbol)
         && scope.symbol_redeclarations(symbol).is_empty())
     .then(|| ctx.semantic.symbol_declaration(symbol).kind())
 }
@@ -96,6 +125,131 @@ pub(super) fn initializer<'a>(
         }
         _ => None,
     }
+}
+
+struct Write<'a> {
+    value: &'a Expression<'a>,
+    overwritten: Option<(oxc::span::Span, Option<oxc::syntax::node::NodeId>)>,
+}
+
+fn boundary(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> Option<oxc::syntax::node::NodeId> {
+    ctx.semantic
+        .nodes()
+        .ancestors(id)
+        .find(|n| {
+            matches!(
+                n.kind(),
+                AstKind::Function(_)
+                    | AstKind::ArrowFunctionExpression(_)
+                    | AstKind::ClassBody(_)
+                    | AstKind::StaticBlock(_)
+            )
+        })
+        .map(oxc::semantic::AstNode::id)
+}
+
+fn assignments<'a>(ctx: &TsCtx<'a>) -> HashMap<SymbolId, Vec<Write<'a>>> {
+    use oxc::ast::ast::AssignmentTarget;
+    let nodes = ctx.semantic.nodes();
+    let mut by_symbol: HashMap<_, Vec<Write<'a>>> = HashMap::new();
+    let mut previous = HashMap::new();
+    for node in nodes.iter() {
+        let written = match node.kind() {
+            AstKind::VariableDeclarator(v) => {
+                v.id.get_binding_identifier()
+                    .and_then(|id| id.symbol_id.get())
+                    .zip(v.init.as_ref())
+            }
+            AstKind::AssignmentExpression(a) if a.operator.is_assign() => {
+                if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                    symbol(ctx, id).map(|sym| (sym, &a.right))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some((sym, value)) = written else {
+            continue;
+        };
+        let writes = by_symbol.entry(sym).or_default();
+        let statement = nodes.parent_node(node.id());
+        let list = nodes.parent_node(statement.id());
+        if matches!(
+            statement.kind(),
+            AstKind::ExpressionStatement(_) | AstKind::VariableDeclaration(_)
+        ) && matches!(
+            list.kind(),
+            AstKind::Program(_)
+                | AstKind::BlockStatement(_)
+                | AstKind::FunctionBody(_)
+                | AstKind::SwitchCase(_)
+        ) && let Some(index) = previous.insert((sym, list.id()), writes.len())
+        {
+            let range = oxc::span::Span::new(statement.span().end, list.span().end);
+            let old: &mut Write = &mut writes[index];
+            old.overwritten = Some((range, boundary(ctx, list.id())));
+        }
+        writes.push(Write {
+            value,
+            overwritten: None,
+        });
+    }
+    by_symbol
+}
+
+fn live_writes<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'a>) -> Vec<&'a Expression<'a>> {
+    let Some(writes) = symbol(ctx, id).and_then(|sym| {
+        ctx.resolution
+            .assignments
+            .get_or_init(|| assignments(ctx))
+            .get(&sym)
+    }) else {
+        return Vec::new();
+    };
+    let owner = OnceCell::new();
+    writes
+        .iter()
+        .filter(|w| {
+            !w.overwritten.is_some_and(|(range, b)| {
+                range.contains_inclusive(id.span)
+                    && *owner.get_or_init(|| boundary(ctx, id.node_id.get())) == b
+            })
+        })
+        .map(|w| w.value)
+        .collect()
+}
+
+pub(super) fn any_value<'a>(
+    ctx: &TsCtx<'a>,
+    initial: &'a Expression<'a>,
+    mut matches: impl FnMut(&'a Expression<'a>) -> bool,
+) -> bool {
+    let mut pending = vec![initial];
+    let mut seen = HashSet::new();
+    while let Some(value) = pending.pop() {
+        let value = resolve(ctx, value);
+        if !seen.insert(value.span()) {
+            continue;
+        }
+        if matches(value) {
+            return true;
+        }
+        if let Expression::Identifier(id) = value {
+            pending.extend(live_writes(ctx, id));
+        }
+    }
+    false
+}
+
+pub(super) fn any_assigned_path<'a>(
+    ctx: &TsCtx<'a>,
+    initial: &'a Expression<'a>,
+    matches: impl Fn(Origin, &[&str]) -> bool,
+) -> bool {
+    any_value(ctx, initial, |e| {
+        origin_path(ctx, e).is_some_and(|(origin, path)| matches(origin, &path))
+    })
 }
 
 pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
@@ -134,11 +288,17 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
         if !seen.insert(id.span.start) {
             return expr;
         }
-        let Some(next) = initializer(ctx, id) else {
+        if let Some(next) = initializer(ctx, id) {
+            aliases.extend(symbol(ctx, id));
+            expr = next;
+        } else if symbol(ctx, id).is_some_and(|s| !unreadable(ctx, s))
+            && declaration(ctx, id).is_none()
+            && let [next] = live_writes(ctx, id).as_slice()
+        {
+            expr = next;
+        } else {
             break;
-        };
-        aliases.extend(symbol(ctx, id));
-        expr = next;
+        }
     }
     ctx.resolution
         .aliases

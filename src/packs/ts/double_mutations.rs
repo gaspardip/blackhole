@@ -113,18 +113,32 @@ pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool
     }) {
         return true;
     }
-    let Some(parts) = &call.path else {
-        return false;
-    };
+    if let Some(parts) = &call.path {
+        let origin = super::values::origin_path(ctx, call.callee).map(|(origin, _)| origin);
+        return framework_path(ctx, call, origin, parts);
+    }
+    super::values::receiver(ctx, call.callee).is_some_and(|(owner, method)| {
+        super::values::any_assigned_path(ctx, owner, |origin, path| {
+            let mut parts = path.to_vec();
+            parts.push(method);
+            framework_path(ctx, call, Some(origin), &parts)
+        })
+    })
+}
 
+fn framework_path<'a>(
+    ctx: &TsCtx<'a>,
+    call: &Invocation<'a>,
+    origin: Option<super::values::Origin>,
+    parts: &[&str],
+) -> bool {
     if parts.len() == 2
         && matches!(parts[0], "vi" | "vitest" | "jest")
-        && super::values::origin_path(ctx, call.callee)
-            .is_some_and(|(origin, _)| origin != super::values::Origin::Global)
+        && origin != Some(super::values::Origin::Global)
     {
         return false;
     }
-    match parts.as_slice() {
+    match parts {
         [
             "@tauri-apps/api/mocks",
             "mockIPC" | "mockWindows" | "mockConvertFileSrc",

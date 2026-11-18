@@ -1,11 +1,5 @@
-use super::values::symbol;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::ast::{
-    AstKind,
-    ast::{AssignmentTarget, Expression},
-};
-use oxc::syntax::symbol::SymbolId;
-use std::collections::HashMap;
+use oxc::ast::{AstKind, ast::Expression};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/strict-msw",
@@ -18,7 +12,6 @@ pub(crate) const RULE: Rule = Rule {
 enum Factory {
     Server,
     Worker,
-    Ambiguous,
 }
 fn factory<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<Factory> {
     let call = super::values::call_expr(super::values::resolve(ctx, e))?;
@@ -46,34 +39,6 @@ fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
         || super::values::resolve(ctx, &p.value).is_function()
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let mut factories = HashMap::<SymbolId, Factory>::new();
-    for node in ctx.semantic.nodes().iter() {
-        let (symbol, value) = match node.kind() {
-            AstKind::VariableDeclarator(v) => (
-                v.id.get_binding_identifier()
-                    .and_then(|b| b.symbol_id.get()),
-                v.init.as_ref(),
-            ),
-            AstKind::AssignmentExpression(a) => {
-                if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
-                    (symbol(ctx, id), Some(&a.right))
-                } else {
-                    continue;
-                }
-            }
-            _ => continue,
-        };
-        if let (Some(symbol), Some(kind)) = (symbol, value.and_then(|v| factory(ctx, v))) {
-            factories
-                .entry(symbol)
-                .and_modify(|previous| {
-                    if *previous != kind {
-                        *previous = Factory::Ambiguous;
-                    }
-                })
-                .or_insert(kind);
-        }
-    }
     for node in ctx.semantic.nodes().iter() {
         let AstKind::CallExpression(c) = node.kind() else {
             continue;
@@ -82,14 +47,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some((object, key)) = super::values::receiver(ctx, inv.callee) else {
             continue;
         };
-        let kind = match super::values::resolve(ctx, object) {
-            Expression::Identifier(id) => symbol(ctx, id).and_then(|s| factories.get(&s).copied()),
-            other => factory(ctx, other),
-        };
-        if matches!(
-            (kind, Some(key)),
-            (Some(Factory::Server), Some("listen")) | (Some(Factory::Worker), Some("start"))
-        ) && !strict(ctx, inv.arg(0))
+        if super::values::any_value(ctx, object, |e| {
+            matches!(
+                (factory(ctx, e), key),
+                (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
+            )
+        }) && !strict(ctx, inv.arg(0))
         {
             findings.report(c.span.start as usize, None);
         }

@@ -7,6 +7,13 @@ use std::{
 fn source(shape: &str, n: usize) -> String {
     let mut text = String::new();
     match shape {
+        "overwrites" => {
+            text.push_str("let x=vi;");
+            for _ in 0..n {
+                text.push_str("x=vi;x=custom;");
+            }
+            text.push_str("x.mock('client');");
+        }
         "object-spreads" | "aliased-spreads" | "array-spreads" => {
             let array = shape == "array-spreads";
             let (left, right) = if array { ("[", "]") } else { ("{", "}") };
@@ -81,6 +88,7 @@ fn check_shapes() {
         "object-spreads",
         "aliased-spreads",
         "array-spreads",
+        "overwrites",
         "imported",
         "letalias",
         "fnhelper",
