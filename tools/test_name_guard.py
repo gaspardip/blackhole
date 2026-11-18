@@ -312,22 +312,25 @@ class Event(Repo):
         super().setUp()
         self.base = self.commit("chore: start")
 
-    def event(self, name: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
-        path = self.dir / "event.json"
+    def event(
+        self, name: str, payload: dict[str, object], **env: str
+    ) -> subprocess.CompletedProcess[str]:
+        path = self.dir / ".git" / "event.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        env = {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
+        env |= {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
         return run(["event"], self.dir, env=env)
 
     def pull_request(
         self,
         title: str = "fix: sync",
+        body: str | None = None,
         association: str = "OWNER",
         head_repo: str | None = "o/r",
         head: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         pull = {
             "title": title,
-            "body": None,
+            "body": body,
             "author_association": association,
             "head": {
                 "ref": "fix/sync",
@@ -346,6 +349,9 @@ class Event(Repo):
         done = self.pull_request(title="Quokka fix")
         self.assertEqual(done.returncode, 1)
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_pull_request_body_is_caught(self) -> None:
+        self.assertEqual(self.pull_request(body="for Quokka").returncode, 1)
 
     def test_pull_request_commits_are_caught(self) -> None:
         self.write("a.txt", "Quokka\n")
@@ -408,6 +414,11 @@ class Event(Repo):
     def test_an_event_without_a_scan_fails_closed(self) -> None:
         self.assertEqual(self.event("workflow_dispatch", {}).returncode, 2)
 
+    def test_environment_text_is_not_scanned_for_an_event(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "NONE"}
+        done = self.event("issues", {"issue": issue}, GUARD_TEXT_ISSUE="Quokka")
+        self.assertEqual(done.returncode, 0)
+
     def test_an_unexpected_payload_fails_closed(self) -> None:
         self.assertEqual(self.event("issues", {}).returncode, 2)
         self.assertEqual(self.event("issues", {"issue": "Quokka"}).returncode, 2)
@@ -421,11 +432,27 @@ class Errors(Repo):
         self.assertEqual(done.returncode, 2)
         self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
 
-    def test_a_staged_submodule_name_is_caught_when_git_hides_submodules(self) -> None:
-        head = self.commit("chore: start")
+    def test_an_unexpected_failure_is_not_reported_as_a_found_name(self) -> None:
+        done = run(["push"], self.dir, stdin="quokka\n")
+        self.assertEqual(done.returncode, 2)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+
+class HiddenSubmodules(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.commit("chore: start")
+        git(self.dir, "update-index", "--add", "--cacheinfo", f"160000,{self.base},quokka-mod")
+
+    def test_a_staged_submodule_name_is_caught(self) -> None:
         git(self.dir, "config", "diff.ignoreSubmodules", "all")
-        git(self.dir, "update-index", "--add", "--cacheinfo", f"160000,{head},quokka-mod")
         self.assertEqual(run(["staged"], self.dir).returncode, 1)
+
+    def test_a_committed_submodule_name_is_caught(self) -> None:
+        self.write(".gitmodules", '[submodule "m"]\n\tpath = quokka-mod\n\turl = ./m\n\tignore = all\n')
+        git(self.dir, "commit", "-q", "--no-verify", "-m", "feat: add a module")
+        self.assertEqual(run(["range", self.base, "HEAD"], self.dir, banned="zebrafish").returncode, 0)
+        self.assertEqual(run(["range", self.base, "HEAD"], self.dir).returncode, 1)
 
 
 if __name__ == "__main__":

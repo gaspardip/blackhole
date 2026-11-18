@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,10 +146,6 @@ class Guard:
         # shortcut: one git process per blob; switch to `cat-file --batch` when the hook gets slow.
         self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
 
-    def texts(self, **labelled: str | None) -> None:
-        for label, text in labelled.items():
-            self.scan(label.replace("_", " "), text or "")
-
     def env_text(self) -> None:
         for key in sorted(os.environ):
             if key.startswith("GUARD_TEXT_"):
@@ -178,10 +175,11 @@ class Guard:
         for entry in tree_entries(git("ls-tree", "-r", "-z", "HEAD")):
             self.entry(entry)
 
-    def range(self, base: str, head: str) -> None:
-        # An all-zero or unknown base (new ref, force push) means every commit is new.
+    def range(self, base: str, head: str, *fallback: str) -> None:
+        # An all-zero or unknown base (new ref, force push) means every commit is new,
+        # except those the fallback names.
         if ZERO.match(base) or not known(base):
-            self.commits(head)
+            self.commits(head, *fallback)
         else:
             self.commits(head, base)
 
@@ -207,21 +205,24 @@ class Guard:
                 # A head in another repository can be pushed to by people who cannot write here.
                 local = (head["repo"] or {}).get("full_name") == payload["repository"]["full_name"]
                 if by_writer(pull) and local:
-                    self.texts(pull_request_title=pull["title"], pull_request_body=pull["body"])
+                    self.scan("pull request title", pull["title"])
+                    self.scan("pull request body", pull["body"] or "")
                     self.name("ref", head["ref"])
                     self.range(pull["base"]["sha"], head["sha"])
             case "issues":
                 issue = payload["issue"]
                 if by_writer(issue):
-                    self.texts(issue_title=issue["title"], issue_body=issue["body"])
+                    self.scan("issue title", issue["title"])
+                    self.scan("issue body", issue["body"] or "")
             case "issue_comment":
                 # The issue a comment sits on can be a stranger's, so only the comment is scanned.
                 comment = payload["comment"]
                 if by_writer(comment):
-                    self.texts(comment=comment["body"])
+                    self.scan("comment", comment["body"])
             case "release":
                 release = payload["release"]
-                self.texts(release_name=release["name"], release_body=release["body"])
+                self.scan("release name", release["name"] or "")
+                self.scan("release body", release["body"] or "")
                 self.name("ref", release["tag_name"])
             case _:
                 raise CannotRun("no scan is defined for this event")
@@ -234,10 +235,7 @@ class Guard:
                 continue
             self.name("ref", local_ref)
             self.tag(remote_ref, local_sha)
-            if ZERO.match(remote_sha) or not known(remote_sha):
-                self.commits(f"{local_sha}^{{commit}}", "--remotes")
-            else:
-                self.commits(f"{local_sha}^{{commit}}", remote_sha)
+            self.range(remote_sha, f"{local_sha}^{{commit}}", "--remotes")
 
 
 def run(argv: list[str]) -> int:
@@ -256,13 +254,11 @@ def run(argv: list[str]) -> int:
         case ["text"]:
             pass
         case ["event"]:
-            try:
-                guard.event(*load_event())
-            except (KeyError, TypeError, AttributeError, ValueError) as error:
-                raise CannotRun("the event payload is not what GitHub documents") from error
+            guard.event(*load_event())
         case _:
             raise CannotRun(USAGE)
-    guard.env_text()
+    if argv != ["event"]:  # the environment says nothing about who wrote its text
+        guard.env_text()
     for hit in guard.hits:
         print(hit, file=sys.stderr)
     if guard.hits:
@@ -276,7 +272,11 @@ def main() -> int:
         return run(sys.argv[1:])
     except CannotRun as error:
         print(f"name guard cannot run: {error}", file=sys.stderr)
-        return 2
+    except Exception as error:
+        # Status 1 means a name was found, and the error's own message can repeat its input.
+        line = traceback.extract_tb(error.__traceback__)[-1].lineno
+        print(f"name guard cannot run: {type(error).__name__} at line {line}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
