@@ -1,7 +1,7 @@
 use oxc::{
     allocator::Allocator,
     ast::ast::{Comment, Program},
-    diagnostics::OxcDiagnostic,
+    diagnostics::{LabeledSpan, OxcDiagnostic},
     parser::{ParseOptions, Parser},
     semantic::{Semantic, SemanticBuilder},
     span::SourceType,
@@ -41,7 +41,7 @@ pub struct TsCtx<'a> {
     pub path: &'a str,
     pub text: &'a str,
     pub program: &'a Program<'a>,
-    pub semantic: &'a Semantic<'a>,
+    pub semantic: Semantic<'a>,
     pub comments: &'a [Comment],
 }
 
@@ -98,85 +98,44 @@ pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
         .any(|r| r.id == id && !matches!(r.run, Run::ParseError))
 }
 
-type Hit = (usize, &'static str, Option<String>);
-
-fn diagnostic(error: &OxcDiagnostic) -> (usize, &str) {
-    (
-        error
-            .labels
-            .first()
-            .map_or(0, |label| label.offset() as usize),
-        &error.message,
-    )
+fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {
+    let at = error.labels.first().map_or(0, LabeledSpan::offset);
+    (at as usize, error.message.to_string())
 }
 
-fn parsed_hits(rules: &[Rule], path: &str, text: &str, kind: SourceType) -> Vec<Hit> {
-    let arena = Allocator::default();
-    let Ok(parsed) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Parser::new(&arena, text, kind)
-            .with_options(ParseOptions {
-                parse_regular_expression: true,
-                ..ParseOptions::default()
-            })
-            .parse()
-    })) else {
-        return collect(rules, path, text, None, Some((0, "Parser panicked")));
-    };
-    if parsed.fatal_error || !parsed.diagnostics.is_empty() {
-        let error = parsed
-            .diagnostics
-            .first()
-            .map_or((0, "Parser failed"), diagnostic);
-        return collect(rules, path, text, None, Some(error));
+fn parse<'a>(
+    arena: &'a Allocator,
+    path: &'a str,
+    text: &'a str,
+    kind: SourceType,
+) -> Result<TsCtx<'a>, (usize, String)> {
+    let parsed = Parser::new(arena, text, kind)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(diagnostic(error));
     }
+    if parsed.fatal_error {
+        return Err((0, "Parser failed".to_owned()));
+    }
+    let program: &Program = arena.alloc(parsed.program);
     let built = SemanticBuilder::new()
         .with_build_nodes(true)
         .with_check_syntax_error(true)
-        .build(&parsed.program);
+        .build(program);
     if let Some(error) = built.diagnostics.first() {
-        return collect(rules, path, text, None, Some(diagnostic(error)));
+        return Err(diagnostic(error));
     }
-    let ts = TsCtx {
+    Ok(TsCtx {
         path,
         text,
-        program: &parsed.program,
-        semantic: &built.semantic,
-        comments: &parsed.program.comments,
-    };
-    collect(rules, path, text, Some(&ts), None)
-}
-
-fn collect(
-    rules: &[Rule],
-    path: &str,
-    text: &str,
-    ts: Option<&TsCtx<'_>>,
-    error: Option<(usize, &str)>,
-) -> Vec<Hit> {
-    let ctx = FileCtx {
-        path,
-        text,
-        comments: ts.map(|t| t.comments),
-    };
-    let mut hits = Vec::new();
-    for rule in rules {
-        let mut findings = Findings::default();
-        match rule.run {
-            Run::File(check) => check(&ctx, &mut findings),
-            Run::Ts(check) => {
-                if let Some(ts) = ts {
-                    check(ts, &mut findings);
-                }
-            }
-            Run::ParseError => {
-                if let Some((at, message)) = error {
-                    findings.report(at, Some(message));
-                }
-            }
-        }
-        hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
-    }
-    hits
+        program,
+        semantic: built.semantic,
+        comments: &program.comments,
+    })
 }
 
 fn source_type(path: &str) -> Option<SourceType> {
@@ -195,10 +154,38 @@ pub fn run<'a>(
     let mut result = Vec::new();
     for (path, bytes) in files {
         let text = decode(bytes);
-        let mut hits = match source_type(path) {
-            Some(kind) => parsed_hits(rules, path, &text, kind),
-            None => collect(rules, path, &text, None, None),
+        let arena = Allocator::default();
+        // A parser that panics has not read the file, which is a finding like any other parse failure.
+        let parsed = source_type(path).map(|kind| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parse(&arena, path, &text, kind)
+            }))
+            .unwrap_or_else(|_| Err((0, "Parser panicked".to_owned())))
+        });
+        let ts = parsed.as_ref().and_then(|parsed| parsed.as_ref().ok());
+        let ctx = FileCtx {
+            path,
+            text: &text,
+            comments: ts.map(|ts| ts.comments),
         };
+        let mut hits = Vec::new();
+        for rule in rules {
+            let mut findings = Findings::default();
+            match rule.run {
+                Run::File(check) => check(&ctx, &mut findings),
+                Run::Ts(check) => {
+                    if let Some(ts) = ts {
+                        check(ts, &mut findings);
+                    }
+                }
+                Run::ParseError => {
+                    if let Some(Err((at, message))) = &parsed {
+                        findings.report(*at, Some(message));
+                    }
+                }
+            }
+            hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule.id, note)));
+        }
         hits.sort_by_key(|hit| hit.0);
         let (mut previous, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
