@@ -1,11 +1,12 @@
+pub(super) mod bindings;
+pub(super) mod expressions;
 use oxc::ast::{
     AstKind,
     ast::{BindingPattern, TSType, TSTypeAnnotation},
 };
 pub(super) fn contains_unknown(ty: &TSType<'_>) -> bool {
-    match ty {
+    match ty.without_parenthesized() {
         TSType::TSUnknownKeyword(_) => true,
-        TSType::TSParenthesizedType(n) => contains_unknown(&n.type_annotation),
         TSType::TSUnionType(n) => n.types.iter().any(contains_unknown),
         _ => false,
     }

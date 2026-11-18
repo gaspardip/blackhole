@@ -10,7 +10,7 @@ pub(crate) const RULE: Rule = Rule {
 
 use super::{
     dictionary_types::{informative, unsafe_dictionary},
-    no_widen_then_assert::declaration,
+    function_types::bindings::declaration,
 };
 use oxc::{
     ast::{AstKind, ast::TSTypeName},

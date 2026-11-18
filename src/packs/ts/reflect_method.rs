@@ -1,6 +1,10 @@
 use crate::engine::{Findings, TsCtx};
 use oxc::ast::{AstKind, ast::Expression};
+use oxc::semantic::IsGlobalReference;
 
+fn string_key(expr: &Expression<'_>, method: &str) -> bool {
+    matches!(expr.without_parentheses(),Expression::StringLiteral(s) if s.value==method)
+}
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings, method: &str) {
     for n in ctx.semantic.nodes().iter() {
         let AstKind::CallExpression(call) = n.kind() else {
@@ -8,20 +12,14 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings, method: &str) {
         };
         let object = match call.callee.without_parentheses() {
             Expression::StaticMemberExpression(m) if m.property.name == method => &m.object,
-            Expression::ComputedMemberExpression(m) if matches!(m.expression.without_parentheses(),Expression::StringLiteral(s) if s.value==method) => {
+            Expression::ComputedMemberExpression(m) if string_key(&m.expression, method) => {
                 &m.object
             }
             _ => continue,
         };
         if let Expression::Identifier(id) = object.without_parentheses()
             && id.name == "Reflect"
-            && id.reference_id.get().is_some_and(|r| {
-                ctx.semantic
-                    .scoping()
-                    .get_reference(r)
-                    .symbol_id()
-                    .is_none()
-            })
+            && id.is_global_reference(ctx.semantic.scoping())
         {
             findings.report(call.span.start as usize, None);
         }

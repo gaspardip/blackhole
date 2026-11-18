@@ -54,8 +54,8 @@ fn empty(members: &[TSSignature<'_>]) -> bool {
 
 fn transparent<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
     loop {
+        ty = ty.without_parenthesized();
         ty = match ty {
-            TSType::TSParenthesizedType(n) => &n.type_annotation,
             TSType::TSTypeOperatorType(n) if n.operator == TSTypeOperatorOperator::Readonly => {
                 &n.type_annotation
             }
@@ -91,11 +91,7 @@ impl<'a> Resolution<'a> {
             .as_ref()
             .map_or(&[][..], |p| p.params.as_slice());
         let scopes = ctx.semantic.scoping();
-        if let Some(symbol) = name
-            .reference_id
-            .get()
-            .and_then(|id| scopes.get_reference(id).symbol_id())
-        {
+        if let Some(symbol) = super::function_types::bindings::symbol(ctx, name) {
             let id = scopes.symbol_declaration(symbol);
             let mut next = self.clone();
             if !next.visiting.insert(id) {

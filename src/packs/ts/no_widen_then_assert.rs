@@ -8,28 +8,27 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 
+use super::function_types::{
+    bindings::{ConstBindings, symbol},
+    expressions::{assertion, known_value},
+};
 use oxc::{
     ast::{
         AstKind,
         ast::{
-            BindingPattern, Expression, IdentifierReference, TSSignature, TSType, TSTypeName,
-            TSTypeOperatorOperator, VariableDeclarationKind,
+            BindingPattern, Expression, TSSignature, TSType, TSTypeName, TSTypeOperatorOperator,
         },
     },
     span::GetSpan,
     syntax::node::NodeId,
 };
-use std::collections::HashSet;
-
-fn unparen<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
-    while let TSType::TSParenthesizedType(n) = ty {
-        ty = &n.type_annotation;
-    }
-    ty
-}
+use std::{
+    collections::HashSet,
+    ops::ControlFlow::{Break, Continue},
+};
 
 fn reference<'a>(ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
-    let TSType::TSTypeReference(r) = unparen(ty) else {
+    let TSType::TSTypeReference(r) = ty.without_parenthesized() else {
         return None;
     };
     let TSTypeName::IdentifierReference(id) = &r.type_name else {
@@ -45,13 +44,13 @@ fn reference<'a>(ty: &'a TSType<'a>) -> Option<(&'a str, &'a [TSType<'a>])> {
 
 fn top(ty: &TSType<'_>) -> bool {
     matches!(
-        unparen(ty),
+        ty.without_parenthesized(),
         TSType::TSUnknownKeyword(_) | TSType::TSAnyKeyword(_)
     )
 }
 
 fn broad_key(ty: &TSType<'_>) -> bool {
-    match unparen(ty) {
+    match ty.without_parenthesized() {
         TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSSymbolKeyword(_) => {
             true
         }
@@ -60,25 +59,33 @@ fn broad_key(ty: &TSType<'_>) -> bool {
     }
 }
 
-fn record(ty: &TSType<'_>, broad: bool) -> bool {
-    if let TSType::TSTypeLiteral(n) = unparen(ty) {
-        return if broad {
-            matches!(n.members.as_slice(),[TSSignature::TSIndexSignature(i)] if broad_key(&i.parameter.type_annotation.type_annotation) && top(&i.type_annotation.type_annotation))
-        } else {
-            n.members
-                .iter()
-                .any(|m| !matches!(m, TSSignature::TSIndexSignature(_)))
-        };
+fn broad_index(member: &TSSignature<'_>) -> bool {
+    let TSSignature::TSIndexSignature(index) = member else {
+        return false;
+    };
+    broad_key(&index.parameter.type_annotation.type_annotation)
+        && top(&index.type_annotation.type_annotation)
+}
+fn broad_record(ty: &TSType<'_>) -> bool {
+    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
+        return matches!(n.members.as_slice(),[member] if broad_index(member));
     }
     match reference(ty) {
-        Some(("Readonly", [inner, ..])) => record(inner, broad),
-        Some(("Record", [key, value])) => {
-            if broad {
-                broad_key(key) && top(value)
-            } else {
-                !top(value)
-            }
-        }
+        Some(("Readonly", [inner, ..])) => broad_record(inner),
+        Some(("Record", [key, value])) => broad_key(key) && top(value),
+        _ => false,
+    }
+}
+fn narrow_record(ty: &TSType<'_>) -> bool {
+    if let TSType::TSTypeLiteral(n) = ty.without_parenthesized() {
+        return n
+            .members
+            .iter()
+            .any(|m| !matches!(m, TSSignature::TSIndexSignature(_)));
+    }
+    match reference(ty) {
+        Some(("Readonly", [inner, ..])) => narrow_record(inner),
+        Some(("Record", [_, value])) => !top(value),
         _ => false,
     }
 }
@@ -93,15 +100,15 @@ enum Broad {
 fn broad(ty: &TSType<'_>) -> Option<Broad> {
     if top(ty) {
         Some(Broad::Top)
-    } else if matches!(unparen(ty), TSType::TSObjectKeyword(_)) {
+    } else if matches!(ty.without_parenthesized(), TSType::TSObjectKeyword(_)) {
         Some(Broad::Object)
     } else {
-        record(ty, true).then_some(Broad::Record)
+        broad_record(ty).then_some(Broad::Record)
     }
 }
 
 fn object(ty: &TSType<'_>) -> bool {
-    match unparen(ty) {
+    match ty.without_parenthesized() {
         TSType::TSArrayType(_)
         | TSType::TSConstructorType(_)
         | TSType::TSFunctionType(_)
@@ -117,14 +124,6 @@ fn object(ty: &TSType<'_>) -> bool {
     }
 }
 
-fn assertion<'a>(expr: &'a Expression<'a>) -> Option<(&'a Expression<'a>, &'a TSType<'a>)> {
-    match expr.without_parentheses() {
-        Expression::TSAsExpression(n) => Some((&n.expression, &n.type_annotation)),
-        Expression::TSTypeAssertion(n) => Some((&n.expression, &n.type_annotation)),
-        _ => None,
-    }
-}
-
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
     let nodes = ctx.semantic.nodes();
     nodes.ancestor_ids(id).find(|p| {
@@ -135,24 +134,6 @@ fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
     })
 }
 
-pub(super) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<NodeId> {
-    let scopes = ctx.semantic.scoping();
-    let symbol = scopes
-        .get_reference(ident.reference_id.get()?)
-        .symbol_id()?;
-    Some(scopes.symbol_declaration(symbol))
-}
-
-pub(super) fn immutable(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>, id: NodeId) -> bool {
-    let scopes = ctx.semantic.scoping();
-    matches!(ctx.semantic.nodes().parent_kind(id),AstKind::VariableDeclaration(v) if v.kind == VariableDeclarationKind::Const)
-        && ident
-            .reference_id
-            .get()
-            .and_then(|r| scopes.get_reference(r).symbol_id())
-            .is_some_and(|s| scopes.get_resolved_references(s).all(|r| !r.is_write()))
-}
-
 #[derive(Clone, Copy)]
 enum Evidence<'a> {
     Value,
@@ -161,72 +142,61 @@ enum Evidence<'a> {
 
 fn evidence<'a>(
     ctx: &'a TsCtx<'a>,
-    mut expr: &'a Expression<'a>,
+    expr: &'a Expression<'a>,
     owner: Option<NodeId>,
-    mut visited: HashSet<NodeId>,
+    binding: NodeId,
+    bindings: &mut ConstBindings,
 ) -> Option<Evidence<'a>> {
-    loop {
-        let value = expr.without_parentheses();
-        if let Some((_, ty)) = assertion(value) {
-            return broad(ty).is_none().then_some(Evidence::Annotated(ty));
-        }
-        if value.is_literal()
-            || matches!(
-                value,
-                Expression::TemplateLiteral(_)
-                    | Expression::ArrayExpression(_)
-                    | Expression::ArrowFunctionExpression(_)
-                    | Expression::ClassExpression(_)
-                    | Expression::FunctionExpression(_)
-                    | Expression::NewExpression(_)
-                    | Expression::ObjectExpression(_)
-            )
-        {
-            return Some(Evidence::Value);
-        }
-        let Expression::Identifier(ident) = value else {
-            return None;
-        };
-        let id = declaration(ctx, ident)?;
-        if !visited.insert(id) || boundary(ctx, id) != owner {
-            return None;
-        }
-        let kind = ctx.semantic.nodes().kind(id);
-        let annotation = match kind {
-            AstKind::VariableDeclarator(v)
-                if matches!(v.id, BindingPattern::BindingIdentifier(_)) =>
-            {
-                v.type_annotation.as_deref()
+    bindings.walk(
+        ctx,
+        expr,
+        HashSet::from([binding]),
+        |expr| {
+            let value = expr.without_parentheses();
+            if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(value.node_id())) {
+                return Break(broad(ty).is_none().then_some(Evidence::Annotated(ty)));
             }
-            AstKind::FormalParameter(p)
-                if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
-            {
-                p.type_annotation.as_deref()
+            if let Expression::Identifier(i) = value {
+                Continue(i)
+            } else {
+                Break(known_value(value).then_some(Evidence::Value))
             }
-            _ => None,
-        };
-        if let Some(a) = annotation {
-            return broad(&a.type_annotation)
-                .is_none()
-                .then_some(Evidence::Annotated(&a.type_annotation));
-        }
-        let AstKind::VariableDeclarator(v) = kind else {
-            return None;
-        };
-        if !immutable(ctx, ident, id) {
-            return None;
-        }
-        expr = v.init.as_ref()?;
-    }
+        },
+        |id, kind| {
+            if boundary(ctx, id) != owner {
+                return Break(None);
+            }
+            let annotation = match kind {
+                AstKind::VariableDeclarator(v)
+                    if matches!(v.id, BindingPattern::BindingIdentifier(_)) =>
+                {
+                    v.type_annotation.as_deref()
+                }
+                AstKind::FormalParameter(p)
+                    if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
+                {
+                    p.type_annotation.as_deref()
+                }
+                _ => None,
+            };
+            match annotation {
+                Some(a) => Break(
+                    broad(&a.type_annotation)
+                        .is_none()
+                        .then_some(Evidence::Annotated(&a.type_annotation)),
+                ),
+                None => Continue(()),
+            }
+        },
+    )
 }
-
 fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSType<'_>) -> bool {
     if broad(target).is_some() {
         return false;
     }
     if let Evidence::Annotated(old) = original {
         let normalized = |ty: &TSType<'_>| {
-            unparen(ty)
+            ty.without_parenthesized()
                 .span()
                 .source_text(ctx.text)
                 .split_whitespace()
@@ -239,30 +209,30 @@ fn narrower(ctx: &TsCtx<'_>, kind: Broad, original: Evidence<'_>, target: &TSTyp
     match kind {
         Broad::Top => true,
         Broad::Object => object(target),
-        Broad::Record => record(target, false),
+        Broad::Record => narrow_record(target),
     }
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
+    let mut bindings = ConstBindings::default();
     for (id, node) in nodes.iter_enumerated() {
-        let (expr, target) = match node.kind() {
-            AstKind::TSAsExpression(n) => (&n.expression, &n.type_annotation),
-            AstKind::TSTypeAssertion(n) => (&n.expression, &n.type_annotation),
-            _ => continue,
+        let Some((expr, target)) = assertion(node.kind()) else {
+            continue;
         };
         let Expression::Identifier(ident) = expr.without_parentheses() else {
             continue;
         };
-        let Some(binding) = declaration(ctx, ident) else {
+        let Some(symbol) = symbol(ctx, ident) else {
             continue;
         };
+        let binding = ctx.semantic.scoping().symbol_declaration(symbol);
         let AstKind::VariableDeclarator(v) = nodes.kind(binding) else {
             continue;
         };
         let owner = boundary(ctx, binding);
         if !matches!(v.id, BindingPattern::BindingIdentifier(_))
-            || !immutable(ctx, ident, binding)
+            || !bindings.immutable(ctx, symbol, binding)
             || node.span().start <= v.span.end
             || boundary(ctx, id) != owner
         {
@@ -271,7 +241,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some(init) = v.init.as_ref() else {
             continue;
         };
-        let asserted = assertion(init).and_then(|(e, t)| Some((e, broad(t)?)));
+        let asserted = assertion(nodes.kind(init.without_parentheses().node_id()))
+            .and_then(|(e, t)| Some((e, broad(t)?)));
         let Some(kind) = v
             .type_annotation
             .as_ref()
@@ -284,7 +255,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             ctx,
             asserted.map_or(init, |(e, _)| e),
             owner,
-            HashSet::from([binding]),
+            binding,
+            &mut bindings,
         ) && narrower(ctx, kind, original, target)
         {
             findings.report(node.span().start as usize, None);

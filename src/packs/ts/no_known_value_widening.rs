@@ -10,21 +10,25 @@ pub(crate) const RULE: Rule = Rule {
 
 use super::{
     dictionary_types::{Class, informative, target},
-    no_widen_then_assert::{declaration, immutable},
+    function_types::{
+        bindings::{ConstBindings, declaration},
+        contains_unknown,
+        expressions::{assertion, known_value, parent},
+    },
 };
 use oxc::{
     ast::{
         AstKind,
         ast::{
-            AssignmentTarget, BindingPattern, Expression, FormalParameters, TSType,
-            TSTypeAnnotation, TSTypePredicateName,
+            AssignmentTarget, BindingPattern, CallExpression, Expression, FormalParameters,
+            IdentifierReference, TSType, TSTypeAnnotation, TSTypePredicateName,
         },
     },
     span::GetSpan,
 };
 use std::collections::HashSet;
 
-use super::function_types::contains_unknown;
+use std::ops::ControlFlow::{self, Break, Continue};
 
 type Signature<'a> = (&'a FormalParameters<'a>, Option<&'a TSTypeAnnotation<'a>>);
 fn signature(kind: AstKind<'_>) -> Option<Signature<'_>> {
@@ -52,151 +56,138 @@ fn local_function<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Signa
     }
 }
 
-fn known<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>, guard: bool) -> bool {
-    let mut seen = HashSet::new();
-    loop {
-        if guard {
-            match expr.without_parentheses() {
-                Expression::TSNonNullExpression(n) => {
-                    expr = &n.expression;
-                    continue;
-                }
-                Expression::TSSatisfiesExpression(n) => {
-                    expr = &n.expression;
-                    continue;
-                }
-                Expression::TSAsExpression(n) => return informative(ctx, &n.type_annotation),
-                Expression::TSTypeAssertion(n) => return informative(ctx, &n.type_annotation),
-                Expression::CallExpression(n) => {
-                    return local_function(ctx, &n.callee)
-                        .and_then(|(_, r)| r)
-                        .is_some_and(|r| informative(ctx, &r.type_annotation));
-                }
-                _ => {}
-            }
-        }
-        let value = expr.get_inner_expression();
-        let Expression::Identifier(ident) = value else {
-            return value.is_literal()
-                || matches!(
-                    value,
-                    Expression::TemplateLiteral(_)
-                        | Expression::UnaryExpression(_)
-                        | Expression::ArrayExpression(_)
-                        | Expression::ArrowFunctionExpression(_)
-                        | Expression::ClassExpression(_)
-                        | Expression::FunctionExpression(_)
-                        | Expression::NewExpression(_)
-                        | Expression::ObjectExpression(_)
-                );
-        };
-        let Some(id) = declaration(ctx, ident) else {
-            return false;
-        };
-        if !seen.insert(id) {
-            return false;
-        }
-        let kind = ctx.semantic.nodes().kind(id);
-        if guard {
-            let a = match kind {
-                AstKind::VariableDeclarator(n)
-                    if matches!(n.id, BindingPattern::BindingIdentifier(_)) =>
-                {
-                    n.type_annotation.as_deref()
-                }
-                AstKind::FormalParameter(n) => n.type_annotation.as_deref(),
-                _ => None,
-            };
-            if let Some(a) = a {
-                return informative(ctx, &a.type_annotation);
-            }
-        }
-        let AstKind::VariableDeclarator(v) = kind else {
-            return false;
-        };
-        let Some(init) = &v.init else { return false };
-        if !immutable(ctx, ident, id) {
-            return false;
-        }
-        expr = init;
+fn value_or_binding<'a>(
+    expr: &'a Expression<'a>,
+) -> ControlFlow<Option<bool>, &'a IdentifierReference<'a>> {
+    let value = expr.get_inner_expression();
+    match value {
+        Expression::Identifier(i) => Continue(i),
+        _ => Break(Some(
+            known_value(value) || matches!(value, Expression::UnaryExpression(_)),
+        )),
     }
 }
 
-fn check<'a>(ctx: &TsCtx<'a>, findings: &mut Findings) {
-    let flow = |expr: &'a Expression<'a>, ty: &'a TSType<'a>, findings: &mut Findings| {
-        let class = target(ctx, ty);
-        if class != Class::None
-            && !(class == Class::Dictionary
-                && matches!(expr.get_inner_expression(),Expression::ObjectExpression(n) if n.properties.is_empty()))
-            && known(ctx, expr, false)
-        {
-            findings.report(expr.without_parentheses().span().start as usize, None);
+fn known<'a>(ctx: &TsCtx<'a>, bindings: &mut ConstBindings, expr: &'a Expression<'a>) -> bool {
+    bindings
+        .walk(ctx, expr, HashSet::new(), value_or_binding, |_, _| {
+            Continue(())
+        })
+        .unwrap_or(false)
+}
+
+fn guard_argument<'a>(
+    ctx: &TsCtx<'a>,
+    bindings: &mut ConstBindings,
+    call: &'a CallExpression<'a>,
+) -> Option<&'a Expression<'a>> {
+    let (params, ret) = local_function(ctx, &call.callee)?;
+    let TSType::TSTypePredicate(pred) = &ret?.type_annotation else {
+        return None;
+    };
+    let TSTypePredicateName::Identifier(name) = &pred.parameter_name else {
+        return None;
+    };
+    let index = params.items.iter().position(|p| {
+        p.pattern.get_identifier_name() == Some(name.name)
+            && p.type_annotation
+                .as_ref()
+                .is_some_and(|a| contains_unknown(&a.type_annotation))
+    })?;
+    let arg = call.arguments.get(index)?.as_expression()?;
+    let known = bindings.walk(
+        ctx,
+        arg,
+        HashSet::new(),
+        |mut expr| loop {
+            expr = expr.without_parentheses();
+            if let Some((_, ty)) = assertion(ctx.semantic.nodes().kind(expr.node_id())) {
+                return Break(Some(informative(ctx, ty)));
+            }
+            match expr {
+                Expression::TSNonNullExpression(n) => expr = &n.expression,
+                Expression::TSSatisfiesExpression(n) => expr = &n.expression,
+                Expression::CallExpression(n) => {
+                    return Break(Some(
+                        local_function(ctx, &n.callee)
+                            .and_then(|(_, r)| r)
+                            .is_some_and(|r| informative(ctx, &r.type_annotation)),
+                    ));
+                }
+                _ => return value_or_binding(expr),
+            }
+        },
+        |_, kind| {
+            let annotation = match kind {
+                AstKind::VariableDeclarator(v)
+                    if matches!(v.id, BindingPattern::BindingIdentifier(_)) =>
+                {
+                    v.type_annotation.as_ref()
+                }
+                AstKind::FormalParameter(p) => p.type_annotation.as_ref(),
+                _ => None,
+            };
+            annotation.map_or(Continue(()), |a| {
+                Break(Some(informative(ctx, &a.type_annotation)))
+            })
+        },
+    )?;
+    known.then_some(arg)
+}
+
+fn typed_flow<'a>(
+    ctx: &TsCtx<'a>,
+    id: oxc::syntax::node::NodeId,
+    kind: AstKind<'a>,
+) -> Option<(&'a Expression<'a>, &'a TSType<'a>)> {
+    let nodes = ctx.semantic.nodes();
+    let (expr, a) = match kind {
+        AstKind::ArrowFunctionExpression(n) => (n.get_expression()?, n.return_type.as_deref()?),
+        AstKind::VariableDeclarator(n) if matches!(n.id, BindingPattern::BindingIdentifier(_)) => {
+            (n.init.as_ref()?, n.type_annotation.as_deref()?)
+        }
+        AstKind::PropertyDefinition(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
+        AstKind::AccessorProperty(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
+        AstKind::ReturnStatement(n) => (
+            n.argument.as_ref()?,
+            nodes
+                .ancestor_ids(id)
+                .find_map(|a| signature(nodes.kind(a)))?
+                .1?,
+        ),
+        AstKind::AssignmentExpression(n) if n.operator.is_assign() => {
+            let AssignmentTarget::AssignmentTargetIdentifier(i) = &n.left else {
+                return None;
+            };
+            let AstKind::VariableDeclarator(v) = nodes.kind(declaration(ctx, i)?) else {
+                return None;
+            };
+            (&n.right, v.type_annotation.as_deref()?)
+        }
+        kind => {
+            let pair = assertion(kind)?;
+            return parent(ctx, id)
+                .and_then(assertion)
+                .is_none()
+                .then_some(pair);
         }
     };
-    let nodes = ctx.semantic.nodes();
-    for (id, node) in nodes.iter_enumerated() {
-        let pair = match node.kind() {
-            AstKind::ArrowFunctionExpression(n) => n.get_expression().zip(n.return_type.as_deref()),
-            AstKind::VariableDeclarator(n)
-                if matches!(n.id, BindingPattern::BindingIdentifier(_)) =>
-            {
-                n.init.as_ref().zip(n.type_annotation.as_deref())
-            }
-            AstKind::PropertyDefinition(n) => n.value.as_ref().zip(n.type_annotation.as_deref()),
-            AstKind::AccessorProperty(n) => n.value.as_ref().zip(n.type_annotation.as_deref()),
-            AstKind::ReturnStatement(n) => n.argument.as_ref().zip(
-                nodes
-                    .ancestor_ids(id)
-                    .find_map(|a| signature(nodes.kind(a)))
-                    .and_then(|(_, r)| r),
-            ),
-            AstKind::AssignmentExpression(n) if n.operator.is_assign() => {
-                if let AssignmentTarget::AssignmentTargetIdentifier(i) = &n.left
-                    && let Some(d) = declaration(ctx, i)
-                    && let AstKind::VariableDeclarator(v) = nodes.kind(d)
-                {
-                    v.type_annotation.as_deref().map(|a| (&n.right, a))
-                } else {
-                    None
-                }
-            }
-            AstKind::CallExpression(n) => {
-                if let Some((params, Some(ret))) = local_function(ctx, &n.callee)
-                    && let TSType::TSTypePredicate(pred) = &ret.type_annotation
-                    && let TSTypePredicateName::Identifier(name) = &pred.parameter_name
-                    && let Some((index, _)) = params.items.iter().enumerate().find(|(_, p)| {
-                        p.pattern.get_identifier_name() == Some(name.name)
-                            && p.type_annotation
-                                .as_ref()
-                                .is_some_and(|a| contains_unknown(&a.type_annotation))
-                    })
-                    && let Some(arg) = n.arguments.get(index).and_then(|a| a.as_expression())
-                    && known(ctx, arg, true)
-                {
-                    findings.report(arg.without_parentheses().span().start as usize, None);
-                }
-                None
-            }
-            kind => {
-                let (expr, ty) = match kind {
-                    AstKind::TSAsExpression(n) => (&n.expression, &n.type_annotation),
-                    AstKind::TSTypeAssertion(n) => (&n.expression, &n.type_annotation),
-                    _ => continue,
-                };
-                if !matches!(
-                    nodes
-                        .ancestor_ids(id)
-                        .map(|a| nodes.kind(a))
-                        .find(|k| !matches!(k, AstKind::ParenthesizedExpression(_))),
-                    Some(AstKind::TSAsExpression(_) | AstKind::TSTypeAssertion(_))
-                ) {
-                    flow(expr, ty, findings);
-                }
-                None
-            }
+    Some((expr, &a.type_annotation))
+}
+
+fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let mut bindings = ConstBindings::default();
+    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+        let expr=match node.kind(){
+            AstKind::CallExpression(call)=>guard_argument(ctx,&mut bindings,call),
+            kind=>typed_flow(ctx,id,kind).and_then(|(expr,ty)|{
+                let class=target(ctx,ty);
+                let empty=matches!(expr.get_inner_expression(),Expression::ObjectExpression(n) if n.properties.is_empty());
+                (class!=Class::None && !(class==Class::Dictionary && empty) && known(ctx,&mut bindings,expr)).then_some(expr)
+            }),
         };
-        if let Some((expr, a)) = pair {
-            flow(expr, &a.type_annotation, findings);
+        if let Some(expr) = expr {
+            findings.report(expr.without_parentheses().span().start as usize, None);
         }
     }
 }

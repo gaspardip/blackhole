@@ -22,10 +22,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if n.operator != UnaryOperator::Typeof {
             continue;
         }
-        if let Some(AstKind::BinaryExpression(b)) = nodes
-            .ancestor_ids(id)
-            .map(|p| nodes.kind(p))
-            .find(|k| !matches!(k, AstKind::ParenthesizedExpression(_)))
+        if let Some(AstKind::BinaryExpression(b)) =
+            super::function_types::expressions::parent(ctx, id)
             && b.operator.is_equality()
         {
             let other = if b.left.without_parentheses().span() == n.span {
