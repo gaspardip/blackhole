@@ -14,4 +14,4 @@ python3 -I -m unittest discover -s tools
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo run --locked --quiet -- check src tests tools bin .github .githooks
+cargo run --locked --quiet -- check

@@ -1,3 +1,4 @@
+mod config;
 pub mod engine;
 pub mod ledger;
 mod packs {
@@ -79,7 +80,9 @@ struct Scan {
 }
 
 fn scan(paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
-    let (root, names, selection) = files::list(paths)?;
+    let (root, mut names, selection) = files::list(paths)?;
+    let excludes = config::parse(&config::read_optional(&root.join("blackhole.toml"))?)?;
+    names.retain(|name| !excludes.is_match(name));
     let home = root.join(".blackhole");
     let base = read_ledger(&home)?;
     let rules = engine::registry();

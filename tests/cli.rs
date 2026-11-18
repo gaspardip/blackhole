@@ -347,3 +347,25 @@ fn symlinked_ledger_directory() {
         outside
     );
 }
+
+#[test]
+fn root_config_controls_check_and_ledger() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::write(root.join("blackhole.toml"), "exclude = ['*.py']").unwrap();
+    assert_eq!(check(root, &[], 0).stdout, b"");
+    baseline(root, &[("a.py", 1)]);
+    regenerate(root, 0);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
+}
+
+#[test]
+fn unknown_config_key_is_an_error() {
+    let dir = repo();
+    fs::write(dir.path().join("blackhole.toml"), "excludes = []").unwrap();
+    check(dir.path(), &[], 2);
+}
