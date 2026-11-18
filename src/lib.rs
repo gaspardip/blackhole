@@ -15,12 +15,14 @@ mod packs {
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;
+        pub(crate) mod no_reflect_apply;
         pub(crate) mod no_runtime_typeof;
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
         pub(crate) mod no_unknown_type_aliases;
         pub(crate) mod no_unsafe_dictionary_type;
         pub(crate) mod no_widen_then_assert;
+        pub(crate) mod reflect_method;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;
