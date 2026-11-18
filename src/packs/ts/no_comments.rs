@@ -13,7 +13,7 @@ use oxc::{
     span::GetSpan,
     syntax::node::NodeId,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-comments",
@@ -112,21 +112,6 @@ fn hidden(kind: AstKind<'_>) -> bool {
     ) || key.is_private_identifier()
 }
 
-fn exposed(ctx: &TsCtx<'_>, id: NodeId, declarations: &HashSet<NodeId>) -> bool {
-    let nodes = ctx.semantic.nodes();
-    for ancestor in std::iter::once(id).chain(nodes.ancestor_ids(id)) {
-        if declarations.contains(&ancestor) {
-            return true;
-        }
-        if hidden(nodes.kind(ancestor))
-            || matches!(nodes.parent_kind(ancestor), AstKind::ArrowFunctionExpression(n) if n.body.node_id() == ancestor)
-        {
-            return false;
-        }
-    }
-    false
-}
-
 fn member(kind: AstKind<'_>) -> bool {
     matches!(
         kind,
@@ -206,31 +191,66 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
             declarations.insert(id);
         }
     }
-    loop {
-        let size = declarations.len();
-        for (id, node) in nodes.iter_enumerated() {
-            if let AstKind::TSTypeReference(r) = node.kind()
-                && let TSTypeName::IdentifierReference(name) = &r.type_name
-                && exposed(ctx, id, &declarations)
-                && let Some(symbol) = name
-                    .reference_id
-                    .get()
-                    .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
-            {
-                declarations.extend(ctx.semantic.scoping().symbol_declarations(symbol).filter(
-                    |id| {
+    declarations
+}
+
+struct Exposure {
+    owners: HashMap<NodeId, NodeId>,
+    public: HashSet<NodeId>,
+}
+
+fn exposure(ctx: &TsCtx<'_>) -> Exposure {
+    let nodes = ctx.semantic.nodes();
+    let mut public = public_declarations(ctx);
+    let mut owners = HashMap::new();
+    let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
+    for (id, node) in nodes.iter_enumerated() {
+        let kind = node.kind();
+        let parent = nodes.parent_id(id);
+        let inherited = owners.get(&parent).copied().filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
+        let owner = if public.contains(&id)
+            || matches!(
+                kind,
+                AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
+            ) {
+            if let Some(parent_owner) = inherited {
+                edges.entry(parent_owner).or_default().push(id);
+            }
+            id
+        } else if let Some(owner) = inherited {
+            owner
+        } else {
+            continue;
+        };
+        owners.insert(id, owner);
+        if let AstKind::TSTypeReference(r) = kind
+            && let TSTypeName::IdentifierReference(name) = &r.type_name
+            && let Some(symbol) = name
+                .reference_id
+                .get()
+                .and_then(|id| ctx.semantic.scoping().get_reference(id).symbol_id())
+        {
+            edges.entry(owner).or_default().extend(
+                ctx.semantic
+                    .scoping()
+                    .symbol_declarations(symbol)
+                    .filter(|id| {
                         matches!(
                             nodes.kind(*id),
                             AstKind::TSInterfaceDeclaration(_) | AstKind::TSTypeAliasDeclaration(_)
                         )
-                    },
-                ));
-            }
-        }
-        if size == declarations.len() {
-            return declarations;
+                    }),
+            );
         }
     }
+    let mut pending: Vec<_> = public.iter().copied().collect();
+    while let Some(owner) = pending.pop() {
+        if let Some(targets) = edges.remove(&owner) {
+            pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
+        }
+    }
+    Exposure { owners, public }
 }
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
@@ -283,14 +303,18 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         })
         .map(|c| c.span.start)
         .collect();
-    let declarations = public_declarations(ctx);
+    let exposure = exposure(ctx);
     let documented: HashSet<_> = ctx
         .semantic
         .nodes()
         .iter_enumerated()
         .filter(|(id, n)| {
-            declarations.contains(id)
-                || (member(n.kind()) && exposed(ctx, *id, &declarations))
+            exposure.public.contains(id)
+                || (member(n.kind())
+                    && exposure
+                        .owners
+                        .get(id)
+                        .is_some_and(|owner| exposure.public.contains(owner)))
                 || matches!(
                     ctx.semantic.nodes().parent_kind(*id),
                     AstKind::ExportDeclaration(_) | AstKind::ExportDefaultDeclaration(_)

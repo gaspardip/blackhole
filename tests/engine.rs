@@ -7,6 +7,26 @@ fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
 }
 
 #[test]
+fn exported_alias_chain_is_judged_in_linear_time() {
+    use std::{
+        fmt::Write as _,
+        time::{Duration, Instant},
+    };
+    let mut text = String::from("/** Public value. */\ntype T0 = number;\n");
+    for i in 1..4000 {
+        writeln!(text, "type T{i} = T{};", i - 1).unwrap();
+    }
+    text.push_str("export type Last = T3999;");
+    let start = Instant::now();
+    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn diagnostic_points_to_the_offending_token() {
     for (text, line, col) in [
         ("let x;\nlet x;", 2, 5),
