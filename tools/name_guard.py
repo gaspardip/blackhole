@@ -85,7 +85,7 @@ def optional(value: object) -> str:
     return "" if value is None else string(value)
 
 
-def sha(value: object) -> str:
+def object_id(value: object) -> str:
     if not SHA.match(string(value)):
         raise CannotRun("the event payload is not what GitHub documents")
     return string(value)
@@ -227,7 +227,7 @@ class Guard:
         match name:
             case "push":
                 ref = string(payload["ref"])
-                before, after = sha(payload["before"]), sha(payload["after"])
+                before, after = object_id(payload["before"]), object_id(payload["after"])
                 self.name("ref", ref)
                 if not ZERO.match(after):
                     self.tag(ref, after)
@@ -244,7 +244,7 @@ class Guard:
                     self.scan("pull request title", string(pull["title"]))
                     self.scan("pull request body", optional(pull["body"]))
                     self.name("ref", string(head["ref"]))
-                    self.range(sha(pull["base"]["sha"]), sha(head["sha"]))
+                    self.range(object_id(pull["base"]["sha"]), object_id(head["sha"]))
             case "issues":
                 issue = payload["issue"]
                 if by_writer(payload, issue):
