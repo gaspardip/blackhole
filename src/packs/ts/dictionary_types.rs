@@ -190,7 +190,6 @@ impl Solver {
 
 struct Equation {
     plan: Plan,
-    parents: Vec<Goal>,
     value: Class,
     queued: bool,
 }
@@ -205,6 +204,7 @@ fn evaluate(
         return Some(*value);
     }
     let mut equations = HashMap::new();
+    let mut parents: HashMap<Goal, Vec<Goal>> = HashMap::new();
     let mut discover = vec![(goal, false)];
     let mut queue = std::collections::VecDeque::new();
     while let Some((g, expanded)) = discover.pop() {
@@ -222,26 +222,21 @@ fn evaluate(
         if !budget.take(p.children().len()) {
             return None;
         }
+        for &child in p.children() {
+            if !memo.contains_key(&child) {
+                parents.entry(child).or_default().push(g);
+            }
+        }
         discover.push((g, true));
         discover.extend(p.children().iter().rev().map(|&child| (child, false)));
         equations.insert(
             g,
             Equation {
                 plan: p,
-                parents: Vec::new(),
                 value: Class::None,
                 queued: true,
             },
         );
-    }
-    let mut edges = Vec::new();
-    for (&parent, eq) in &equations {
-        edges.extend(eq.plan.children().iter().map(|&child| (child, parent)));
-    }
-    for (child, parent) in edges {
-        if let Some(eq) = equations.get_mut(&child) {
-            eq.parents.push(parent);
-        }
     }
     // A recursive group starts at None; a changed answer schedules only its dependents.
     let mut values = Vec::new();
@@ -267,18 +262,19 @@ fn evaluate(
         eq.queued = false;
         if next != eq.value {
             eq.value = next;
-            if !budget.take(eq.parents.len()) {
+            let Some(dependents) = parents.get(&g) else {
+                continue;
+            };
+            if !budget.take(dependents.len()) {
                 return None;
             }
-            let parents = std::mem::take(&mut eq.parents);
-            for parent in &parents {
+            for parent in dependents {
                 let dependent = equations.get_mut(parent).unwrap();
                 if !dependent.queued {
                     dependent.queued = true;
                     queue.push_back(*parent);
                 }
             }
-            equations.get_mut(&g).unwrap().parents = parents;
         }
     }
     let result = equations[&goal].value;
@@ -764,6 +760,37 @@ mod tests {
     use super::{Budget, Class, Combine, Goal, Plan, Query, Term, evaluate};
     use oxc::syntax::node::NodeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn borderline_recursive_goals_have_reproducible_answers() {
+        let goal = |i| Goal {
+            term: Term {
+                node: NodeId::new(i),
+                env: 0,
+                place: 0,
+            },
+            query: Query::UnknownAlias,
+        };
+        let run = |limit| {
+            let mut memo = HashMap::new();
+            let mut budget = Budget {
+                remaining: limit,
+                exhausted: false,
+            };
+            evaluate(&mut memo, goal(0), &mut budget, |g, _| {
+                let i = g.term.node.index();
+                let links = [[1, 4], [0, 2], [0, 3], [3, 3], [5, 3]];
+                links.get(i).map_or(Plan::Done(Class::Broad), |children| {
+                    Plan::many(Combine::Any, children.iter().copied().map(goal).collect())
+                })
+            })
+        };
+        let boundary = (1..2000).find(|&limit| run(limit).is_some()).unwrap();
+        for _ in 0..20 {
+            assert!(run(boundary) == Some(Class::Broad));
+            assert!(run(boundary - 1).is_none());
+        }
+    }
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
