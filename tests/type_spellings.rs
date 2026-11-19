@@ -983,6 +983,122 @@ fn qualified_dictionary_values_include_every_merged_interface() {
 }
 
 #[test]
+fn merged_namespace_members_see_sibling_exports_and_keep_lexical_shadowing() {
+    for (outer, sibling, local, member, reports) in [
+        ("", "export type Empty = never;", "", "Empty", true),
+        (
+            "",
+            "export type Empty = never;",
+            "",
+            "Outer.Inner.Empty",
+            true,
+        ),
+        (
+            "type Empty = number;",
+            "export type Empty = never;",
+            "",
+            "Empty",
+            true,
+        ),
+        ("", "export type Empty = number;", "", "Empty", false),
+        (
+            "",
+            "export type Empty = never;",
+            "type Empty = number;",
+            "Empty",
+            false,
+        ),
+        (
+            "type Empty = number;",
+            "type Empty = never;",
+            "",
+            "Empty",
+            false,
+        ),
+        (
+            "type Empty = never;",
+            "type Empty = number;",
+            "",
+            "Empty",
+            true,
+        ),
+        ("", "export type T = never;", "", "T", false),
+        (
+            "type Empty = number;",
+            "export type Empty = never;",
+            "type Member = Empty;",
+            "Member",
+            true,
+        ),
+        (
+            "",
+            "export namespace Members { export type Empty = never; }",
+            "",
+            "Members.Empty",
+            true,
+        ),
+    ] {
+        let a = format!(
+            "namespace Outer {{ export namespace Inner {{ {sibling} export interface Value<T> {{}} }} }}"
+        );
+        let b = format!(
+            "namespace Outer {{ export namespace Inner {{ {local} export interface Value<T> {{ only?: {member} }} }} }}"
+        );
+        for (first, second) in [(&a, &b), (&b, &a)] {
+            for (import, name) in [
+                ("", "Outer.Inner.Value"),
+                ("import I = Outer.Inner; ", "I.Value"),
+                ("import V = Outer.Inner.Value; ", "V"),
+            ] {
+                let source = format!(
+                    "{outer}\n{first}\n{second}\n{import}type Dict = Record<string, {name}<number>>;\nexport {{}};"
+                );
+                assert_site(
+                    "ts/no-unsafe-dictionary-type",
+                    &source,
+                    reports.then_some((4, import.len() + 13)),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_class_contributes_to_merged_dictionary_values_in_either_order() {
+    let class = "export class Value { id = 1; }";
+    let interface = "export interface Value { only?: never; }";
+    let nested =
+        |declaration| format!("namespace Outer {{ export namespace Inner {{ {declaration} }} }}");
+    for (first, second) in [(class, interface), (interface, class)] {
+        for (import, name) in [
+            ("", "Outer.Inner.Value"),
+            ("import I = Outer.Inner; ", "I.Value"),
+            ("import V = Outer.Inner.Value; ", "V"),
+        ] {
+            let a = nested(first);
+            let b = nested(second);
+            let source =
+                format!("{a}\n{b}\n{import}type Dict = Record<string, {name}>;\nexport {{}};");
+            assert_site("ts/no-unsafe-dictionary-type", &source, None);
+        }
+    }
+    for (first, second) in [(class, interface), (interface, class)] {
+        let source = format!("{first}\n{second}\ntype Dict = Record<string, Value>;");
+        assert_site("ts/no-unsafe-dictionary-type", &source, None);
+    }
+
+    let class = nested("export class Value<T> { constructor(public id: T) {} }");
+    let interface = nested("export interface Value<T> { [key: string]: T; }");
+    for (first, second) in [(&class, &interface), (&interface, &class)] {
+        let source = format!(
+            "{first}\n{second}\nnamespace Outer {{ export namespace Inner {{ type Dict = Value<unknown>; }} }}"
+        );
+        let col = source.lines().nth(2).unwrap().find("Value<").unwrap() + 1;
+        assert_site("ts/no-unsafe-dictionary-type", &source, Some((3, col)));
+    }
+}
+
+#[test]
 fn concrete_heritage_between_generic_interfaces_keeps_the_index_value() {
     for (value, reports) in [("number", false), ("never", true)] {
         let source = format!("type Dict = {{ [key: string]: {{ only?: {value} }} }};");
