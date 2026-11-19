@@ -12,7 +12,7 @@ use oxc::{
         symbol::{SymbolFlags, SymbolId},
     },
 };
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Class {
@@ -126,7 +126,7 @@ struct DictionaryMembers {
 #[derive(Default)]
 struct Environments {
     frames: Vec<Binding>,
-    resolved_names: HashMap<NodeId, Option<SymbolId>>,
+    resolved_names: HashMap<NodeId, Option<ResolvedName>>,
     namespace_exports: HashMap<Vec<SymbolId>, NamespaceExports>,
     interface_indexes: HashMap<NodeId, Vec<NodeId>>,
     literal_members: HashMap<NodeId, DictionaryMembers>,
@@ -534,6 +534,21 @@ fn import_equals(ctx: &TsCtx<'_>, id: SymbolId, budget: &mut Budget) -> Option<N
         matches!(kind, AstKind::TSImportEqualsDeclaration(_))
     })
 }
+#[derive(Clone)]
+enum ResolvedName {
+    Single(SymbolId),
+    MergedInterfaces(Rc<[SymbolId]>),
+}
+
+impl ResolvedName {
+    fn symbols(&self) -> &[SymbolId] {
+        match self {
+            Self::Single(id) => std::slice::from_ref(id),
+            Self::MergedInterfaces(ids) => ids,
+        }
+    }
+}
+
 type NamespaceExports = HashMap<String, Vec<SymbolId>>;
 
 fn namespace_exports(
@@ -618,47 +633,51 @@ impl Environments {
         &mut self,
         ctx: &TsCtx<'_>,
         g: Goal,
-        symbol: SymbolId,
+        symbols: &[SymbolId],
         args: &[TSType<'_>],
         budget: &mut Budget,
     ) -> Plan {
         let mut children = Vec::new();
-        if !budget.take(ctx.semantic.scoping().symbol_redeclarations(symbol).len()) {
+        if !symbols
+            .iter()
+            .all(|&sym| budget.take(ctx.semantic.scoping().symbol_redeclarations(sym).len()))
+        {
             return Plan::Done(Class::None);
         }
-        for id in type_declarations(ctx, symbol) {
+        for id in symbols.iter().flat_map(|&sym| type_declarations(ctx, sym)) {
             let Some(interface) = ctx.semantic.nodes().kind(id).as_ts_interface_declaration()
             else {
                 continue;
             };
-            let Some(params) = &interface.type_parameters else {
-                continue;
-            };
-            let Some(term) = self.application(ctx, g, id, params, args, budget) else {
-                return Plan::Done(Class::None);
-            };
-            let body = Goal { term, ..g };
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                self.interface_indexes.entry(id)
-            {
-                if !budget.take(interface.body.body.len()) {
+            let (body, indexes) = if let Some(params) = &interface.type_parameters {
+                let Some(term) = self.application(ctx, g, id, params, args, budget) else {
                     return Plan::Done(Class::None);
+                };
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.interface_indexes.entry(id)
+                {
+                    if !budget.take(interface.body.body.len()) {
+                        return Plan::Done(Class::None);
+                    }
+                    entry.insert(
+                        interface
+                            .body
+                            .body
+                            .iter()
+                            .filter_map(|m| match m {
+                                TSSignature::TSIndexSignature(i) => {
+                                    Some(i.type_annotation.type_annotation.node_id())
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    );
                 }
-                entry.insert(
-                    interface
-                        .body
-                        .body
-                        .iter()
-                        .filter_map(|m| match m {
-                            TSSignature::TSIndexSignature(i) => {
-                                Some(i.type_annotation.type_annotation.node_id())
-                            }
-                            _ => None,
-                        })
-                        .collect(),
-                );
-            }
-            let indexes = &self.interface_indexes[&id];
+                (Goal { term, ..g }, self.interface_indexes[&id].as_slice())
+            } else {
+                // Index signatures without bindings are checked where written.
+                (Goal::root(id, g.query), &[][..])
+            };
             if !budget.take(indexes.len() + interface.extends.len()) {
                 return Plan::Done(Class::None);
             }
@@ -748,7 +767,7 @@ impl Environments {
         ctx: &TsCtx<'_>,
         name: &TSTypeName<'_>,
         budget: &mut Budget,
-    ) -> Option<SymbolId> {
+    ) -> Option<ResolvedName> {
         use oxc::ast::ast::TSModuleReference;
         let mut members = Vec::new();
         let mut imports = std::collections::HashSet::new();
@@ -785,7 +804,13 @@ impl Environments {
                 continue;
             }
             let Some(member) = members.pop() else {
-                return Some(sym);
+                if symbols.len() > 1 && scopes.symbol_flags(sym).is_interface() {
+                    symbols.retain(|&id| scopes.symbol_flags(id).is_interface());
+                    if symbols.len() > 1 {
+                        return Some(ResolvedName::MergedInterfaces(symbols.into()));
+                    }
+                }
+                return Some(ResolvedName::Single(sym));
             };
             if !self.namespace_exports.contains_key(&symbols) {
                 let exports = namespace_exports(ctx, &symbols, budget)?;
@@ -803,9 +828,9 @@ impl Environments {
         ctx: &TsCtx<'_>,
         name: &TSTypeName<'_>,
         budget: &mut Budget,
-    ) -> Option<SymbolId> {
-        if let Some(&cached) = self.resolved_names.get(&name.node_id()) {
-            return cached;
+    ) -> Option<ResolvedName> {
+        if let Some(cached) = self.resolved_names.get(&name.node_id()) {
+            return cached.clone();
         }
         let resolved = match name {
             TSTypeName::IdentifierReference(i) => {
@@ -813,13 +838,13 @@ impl Environments {
                 if import_equals(ctx, id, budget).is_some() {
                     self.local_name(ctx, name, budget)
                 } else {
-                    Some(id)
+                    Some(ResolvedName::Single(id))
                 }
             }
             _ => self.local_name(ctx, name, budget),
         };
         budget.0?;
-        self.resolved_names.insert(name.node_id(), resolved);
+        self.resolved_names.insert(name.node_id(), resolved.clone());
         resolved
     }
 
@@ -841,8 +866,12 @@ impl Environments {
     ) -> Plan {
         let args = type_arguments.map_or(&[][..], |a| a.params.as_slice());
         let scopes = ctx.semantic.scoping();
-        let resolved = self.resolve_name(ctx, type_name, budget);
-        if let Some(sym) = resolved {
+        if let Some(name) = self.resolve_name(ctx, type_name, budget) {
+            let symbols = name.symbols();
+            if !budget.take(symbols.len() - 1) {
+                return Plan::Done(Class::None);
+            }
+            let sym = symbols[0];
             let flags = scopes.symbol_flags(sym);
             if flags.is_type_parameter() {
                 let Some(term) = self.lookup(g.term.env, sym, budget) else {
@@ -885,26 +914,35 @@ impl Environments {
                     .kind(id)
                     .as_ts_interface_declaration()
                     .is_some_and(|i| i.type_parameters.is_some());
-                if generic
-                    && matches!(
-                        g.query,
-                        Query::UnsafeDictionary
-                            | Query::ContainedDictionary
-                            | Query::NestedDictionary
-                    )
+                if matches!(
+                    g.query,
+                    Query::UnsafeDictionary | Query::ContainedDictionary | Query::NestedDictionary
+                ) && (generic
+                    || matches!(
+                        ctx.semantic.nodes().kind(g.term.node),
+                        AstKind::TSInterfaceHeritage(_)
+                    ))
                 {
-                    return self.interface_dictionary(ctx, g, sym, args, budget);
+                    return self.interface_dictionary(ctx, g, symbols, args, budget);
                 }
                 if g.query == Query::Value {
-                    let query = Query::Interface(sym);
-                    return Plan::child(
-                        Combine::First,
+                    let goal = |symbol, declaration| {
+                        let query = Query::Interface(symbol);
                         if generic {
                             Goal { query, ..g }
                         } else {
-                            Goal::root(id, query)
-                        },
-                    );
+                            Goal::root(declaration, query)
+                        }
+                    };
+                    return match name {
+                        ResolvedName::Single(_) => Plan::child(Combine::First, goal(sym, id)),
+                        ResolvedName::MergedInterfaces(ids) => Plan::many(
+                            Combine::All,
+                            ids.iter()
+                                .map(|&symbol| goal(symbol, scopes.symbol_declaration(symbol)))
+                                .collect(),
+                        ),
+                    };
                 }
             }
             if !flags.is_type_alias() {
@@ -915,12 +953,10 @@ impl Environments {
             else {
                 return Plan::Done(Class::None);
             };
-            match ctx.semantic.nodes().kind(id) {
-                AstKind::TSTypeAliasDeclaration(a) => {
-                    return self.alias(ctx, g, a, args, budget);
-                }
-                _ => return Plan::Done(Class::None),
-            }
+            return match ctx.semantic.nodes().kind(id) {
+                AstKind::TSTypeAliasDeclaration(a) => self.alias(ctx, g, a, args, budget),
+                _ => Plan::Done(Class::None),
+            };
         }
         if g.query == Query::Identity {
             return Plan::Done(Class::Syntax(g.term));
@@ -1188,7 +1224,8 @@ impl Environments {
         if let Query::Interface(sym) = q {
             return self.interface(ctx, g, sym, budget);
         }
-        let kind = ctx.semantic.nodes().kind(g.term.node);
+        let nodes = ctx.semantic.nodes();
+        let kind = nodes.kind(g.term.node);
         if q == Query::BoundValue {
             return Plan::many(
                 Combine::OnlyBound,
@@ -1258,17 +1295,17 @@ impl Environments {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
             }
             (AstKind::BindingIdentifier(i), Query::Identity)
-                if g.term.env != 0
+                if matches!(nodes.parent_kind(g.term.node), AstKind::TSTypeParameter(_))
                     && matches!(
-                        ctx.semantic.nodes().parent_kind(g.term.node),
-                        AstKind::TSTypeParameter(_)
+                        nodes.parent_kind(nodes.parent_id(g.term.node)),
+                        AstKind::TSTypeParameterDeclaration(_)
                     ) =>
             {
-                let bound = i
-                    .symbol_id
-                    .get()
-                    .and_then(|sym| self.lookup(g.term.env, sym, budget));
-                Plan::Done(Class::Syntax(bound.unwrap_or(g.term)))
+                let sym = i.symbol_id.get().unwrap();
+                self.lookup(g.term.env, sym, budget).map_or_else(
+                    || Plan::Done(Class::Declaration(sym, 0)),
+                    |term| Plan::child(Combine::First, Goal { term, ..g }),
+                )
             }
             (_, Query::Identity) => Plan::Done(Class::Syntax(g.term)),
             _ => Self::classify(kind, g, budget),
@@ -1501,9 +1538,13 @@ impl Resolution {
                 .envs
                 .resolved_names
                 .get(&r.type_name.node_id())
-                .copied()
-                .flatten()
-                .is_some_and(|id| ctx.semantic.scoping().symbol_flags(id).is_type_alias())
+                .and_then(Option::as_ref)
+                .is_some_and(|name| {
+                    ctx.semantic
+                        .scoping()
+                        .symbol_flags(name.symbols()[0])
+                        .is_type_alias()
+                })
     }
     pub(super) fn unsafe_dictionary(&self, ctx: &TsCtx<'_>, kind: AstKind<'_>) -> Judged<bool> {
         if !matches!(

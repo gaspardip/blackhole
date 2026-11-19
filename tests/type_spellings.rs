@@ -817,6 +817,11 @@ fn inline_signatures_pair_their_own_type_parameters() {
             false,
         ),
         ("<T>() => Model", "<U>() => Other", false),
+        (
+            "<T>() => T extends infer K ? Model : Other",
+            "<U>() => U extends infer K ? Model : Other",
+            true,
+        ),
     ] {
         let source = format!(
             "type Call = <T>(value: T) => T; interface Model {{}} interface Other {{}}\ndeclare const origin: {origin};\nconst wide: Record<string, unknown> = origin;\nconst back = wide as {target};"
@@ -899,6 +904,101 @@ fn inherited_index_values_keep_the_heritage_arguments() {
                 "ts/no-unsafe-dictionary-type",
                 &source,
                 reports.then_some((3, 13)),
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_signature_identity_distinguishes_shadowed_binders_in_both_orders() {
+    let shadowed = "<T extends string>() => <T extends number>() => T";
+    let outer = "<U extends string>() => <V extends number>() => U";
+    let inner = "<U extends string>() => <V extends number>() => V";
+    let external = "<U extends string>() => <V extends number>() => Model";
+    for (left, right, equal) in [
+        (shadowed, outer, false),
+        (shadowed, inner, true),
+        (shadowed, external, false),
+        (
+            external,
+            "<T extends string>() => <T extends number>() => Model",
+            true,
+        ),
+        (
+            external,
+            "<T extends string>() => <T extends number>() => Other",
+            false,
+        ),
+    ] {
+        for (origin, target) in [(left, right), (right, left)] {
+            let source = format!(
+                "interface Model {{}} interface Other {{}}\ndeclare const original: ({origin}) & Record<string, unknown>;\nconst wide: Record<string, unknown> = original;\nconst back = wide as ({target}) & Record<string, unknown>;"
+            );
+            assert_site("ts/no-widen-then-assert", &source, equal.then_some((4, 14)));
+        }
+    }
+}
+
+#[test]
+fn qualified_dictionary_values_include_every_merged_interface() {
+    for (property, value, reports) in [
+        ("id", "number", false),
+        ("only?", "number", false),
+        ("only?", "never", true),
+    ] {
+        let source = format!("type Dict = Record<string, {{ {property}: {value} }}>;");
+        assert_site(
+            "ts/no-unsafe-dictionary-type",
+            &source,
+            reports.then_some((1, 13)),
+        );
+        let argument = format!("<{value}>");
+        for (parameters, argument, member_type) in
+            [("", "", value), ("<T>", argument.as_str(), "T")]
+        {
+            let declaration = |member: &str| {
+                format!(
+                    "namespace Outer {{ export namespace Inner {{ export interface Value{parameters} {{ {member} }} }} }}"
+                )
+            };
+            let empty = declaration("");
+            let other = declaration(&format!("{property}: {member_type}"));
+            for (a, b) in [(&empty, &other), (&other, &empty)] {
+                for (import, name) in [
+                    ("", "Outer.Inner.Value"),
+                    ("import I = Outer.Inner; ", "I.Value"),
+                    ("import V = Outer.Inner.Value; ", "V"),
+                ] {
+                    let source =
+                        format!("{a}\n{b}\n{import}type Dict = Record<string, {name}{argument}>;");
+                    assert_site(
+                        "ts/no-unsafe-dictionary-type",
+                        &source,
+                        reports.then_some((3, import.len() + 13)),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn concrete_heritage_between_generic_interfaces_keeps_the_index_value() {
+    for (value, reports) in [("number", false), ("never", true)] {
+        let source = format!("type Dict = {{ [key: string]: {{ only?: {value} }} }};");
+        assert_site(
+            "ts/no-unsafe-dictionary-type",
+            &source,
+            reports.then_some((1, 13)),
+        );
+        for parent in [format!("Base<{value}>"), "Middle".to_owned()] {
+            let source = format!(
+                "interface Base<T> {{ [key: string]: {{ only?: T }} }}\ninterface Middle extends Base<{value}> {{}}\ninterface Child<Tag> extends {parent} {{}}\ntype Dict = Child<'tag'>;"
+            );
+            assert_site(
+                "ts/no-unsafe-dictionary-type",
+                &source,
+                reports.then_some((4, 13)),
             );
         }
     }
