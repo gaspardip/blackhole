@@ -3,9 +3,14 @@ use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{TSSignature, TSType, TSTypeName, TSTypeOperatorOperator},
+        ast::{
+            TSSignature, TSType, TSTypeName, TSTypeOperatorOperator, TSTypeParameterDeclaration,
+        },
     },
-    syntax::{node::NodeId, symbol::SymbolId},
+    syntax::{
+        node::{GetNodeId, NodeId},
+        symbol::{SymbolFlags, SymbolId},
+    },
 };
 use std::{cell::RefCell, collections::HashMap};
 
@@ -85,21 +90,22 @@ impl Goal {
             },
         )
     }
-    fn nested<'a>(self, types: impl Iterator<Item = &'a TSType<'a>>) -> Plan {
+    fn nested<'a, T: GetNodeId + 'a>(self, types: impl Iterator<Item = &'a T>) -> Plan {
         Plan::many(
             Combine::First,
             types
-                .map(|ty| self.child(ty, Query::NestedDictionary))
+                .map(|ty| self.at(ty.node_id(), Query::NestedDictionary))
                 .collect(),
         )
     }
 
     fn child(self, ty: &TSType<'_>, query: Query) -> Self {
+        self.at(ty.node_id(), query)
+    }
+
+    fn at(self, node: NodeId, query: Query) -> Self {
         Self {
-            term: Term {
-                node: ty.node_id(),
-                ..self.term
-            },
+            term: Term { node, ..self.term },
             query,
         }
     }
@@ -121,7 +127,7 @@ struct DictionaryMembers {
 struct Environments {
     frames: Vec<Binding>,
     resolved_names: HashMap<NodeId, Option<SymbolId>>,
-    namespace_exports: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    namespace_exports: HashMap<Vec<SymbolId>, NamespaceExports>,
     interface_indexes: HashMap<NodeId, Vec<NodeId>>,
     literal_members: HashMap<NodeId, DictionaryMembers>,
     applications: HashMap<(NodeId, usize, usize, Option<NodeId>), Term>,
@@ -273,6 +279,46 @@ impl Solver {
         }
         self.charge_identity(self.syntax_children[&root].len())?;
         Ok(self.syntax_children[&root].clone())
+    }
+
+    fn pair_signature_parameters(
+        &mut self,
+        ctx: &TsCtx<'_>,
+        left: &mut Term,
+        right: &mut Term,
+    ) -> Judged<bool> {
+        fn parameters(kind: AstKind<'_>) -> Option<&TSTypeParameterDeclaration<'_>> {
+            match kind {
+                AstKind::TSFunctionType(n) => n.type_parameters.as_deref(),
+                AstKind::TSCallSignatureDeclaration(n) => n.type_parameters.as_deref(),
+                AstKind::TSConstructorType(n) => n.type_parameters.as_deref(),
+                AstKind::TSConstructSignatureDeclaration(n) => n.type_parameters.as_deref(),
+                AstKind::TSMethodSignature(n) => n.type_parameters.as_deref(),
+                _ => None,
+            }
+        }
+        let nodes = ctx.semantic.nodes();
+        let (Some(a), Some(b)) = (
+            parameters(nodes.kind(left.node)),
+            parameters(nodes.kind(right.node)),
+        ) else {
+            return Ok(true);
+        };
+        if a.params.len() != b.params.len() {
+            return Ok(false);
+        }
+        self.charge_identity(a.params.len())?;
+        for (x, y) in a.params.iter().zip(&b.params) {
+            let identity = Goal::root(x.name.node_id.get(), Query::Identity).term;
+            for (term, parameter) in [(&mut *left, x), (&mut *right, y)] {
+                term.env = self.envs.bind(Binding {
+                    outer: term.env,
+                    symbol: parameter.name.symbol_id.get().unwrap(),
+                    value: identity,
+                });
+            }
+        }
+        Ok(true)
     }
 
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
@@ -488,6 +534,45 @@ fn import_equals(ctx: &TsCtx<'_>, id: SymbolId, budget: &mut Budget) -> Option<N
         matches!(kind, AstKind::TSImportEqualsDeclaration(_))
     })
 }
+type NamespaceExports = HashMap<String, Vec<SymbolId>>;
+
+fn namespace_exports(
+    ctx: &TsCtx<'_>,
+    symbols: &[SymbolId],
+    budget: &mut Budget,
+) -> Option<NamespaceExports> {
+    let nodes = ctx.semantic.nodes();
+    let scopes = ctx.semantic.scoping();
+    let mut exports = NamespaceExports::new();
+    for (id, _) in symbols.iter().flat_map(|&sym| declarations(ctx, sym)) {
+        if !budget.take(1) {
+            return None;
+        }
+        let AstKind::TSNamespaceDeclaration(ns) = nodes.kind(id) else {
+            continue;
+        };
+        let bindings = scopes.get_bindings(ns.scope_id.get()?);
+        if !budget.take(bindings.len()) {
+            return None;
+        }
+        for (name, &candidate) in bindings {
+            for (decl, _) in declarations(ctx, candidate) {
+                if !budget.take(1) {
+                    return None;
+                }
+                if matches!(
+                    nodes.parent_kind(decl),
+                    AstKind::ExportDeclaration(_) | AstKind::TSNamespaceDeclaration(_)
+                ) {
+                    exports.entry(name.to_string()).or_default().push(candidate);
+                    break;
+                }
+            }
+        }
+    }
+    Some(exports)
+}
+
 impl Environments {
     fn interface(&mut self, ctx: &TsCtx<'_>, g: Goal, sym: SymbolId, budget: &mut Budget) -> Plan {
         let nodes = ctx.semantic.nodes();
@@ -519,13 +604,7 @@ impl Environments {
                 return Plan::Done(Class::None);
             }
             for parent in &i.extends {
-                parents.push(Goal {
-                    term: Term {
-                        node: parent.node_id.get(),
-                        ..body.term
-                    },
-                    query: Query::Value,
-                });
+                parents.push(body.at(parent.node_id.get(), Query::Value));
             }
         }
         if parents.is_empty() {
@@ -580,13 +659,16 @@ impl Environments {
                 );
             }
             let indexes = &self.interface_indexes[&id];
-            if !budget.take(indexes.len()) {
+            if !budget.take(indexes.len() + interface.extends.len()) {
                 return Plan::Done(Class::None);
             }
-            children.extend(indexes.iter().map(|&node| Goal {
-                term: Term { node, ..body.term },
-                query: Query::BoundValue,
-            }));
+            children.extend(indexes.iter().map(|&node| body.at(node, Query::BoundValue)));
+            children.extend(
+                interface
+                    .extends
+                    .iter()
+                    .map(|h| body.at(h.node_id.get(), g.query)),
+            );
         }
         Plan::many(Combine::First, children)
     }
@@ -673,20 +755,25 @@ impl Environments {
         if !budget.take(1) {
             return None;
         }
-        let mut sym = name_root(ctx, name, &mut members, budget)?;
+        let mut symbols = vec![name_root(ctx, name, &mut members, budget)?];
         let nodes = ctx.semantic.nodes();
         let scopes = ctx.semantic.scoping();
         loop {
-            if !budget.take(1) {
+            if !budget.take(symbols.len()) {
                 return None;
             }
+            let sym = *symbols.iter().rev().max_by_key(|&&id| {
+                scopes
+                    .symbol_flags(id)
+                    .intersects(SymbolFlags::Type | SymbolFlags::Import | SymbolFlags::TypeImport)
+            })?;
             if let Some(import) = import_equals(ctx, sym, budget)
                 && let AstKind::TSImportEqualsDeclaration(i) = nodes.kind(import)
             {
                 if !imports.insert(sym) {
                     return None;
                 }
-                sym = match &i.module_reference {
+                let root = match &i.module_reference {
                     TSModuleReference::IdentifierReference(i) => symbol(ctx, i)?,
                     TSModuleReference::QualifiedName(q) => {
                         members.push(q.right.name.as_str());
@@ -694,44 +781,21 @@ impl Environments {
                     }
                     TSModuleReference::ExternalModuleReference(_) => return None,
                 };
+                symbols = vec![root];
                 continue;
             }
             let Some(member) = members.pop() else {
                 return Some(sym);
             };
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                self.namespace_exports.entry(sym)
-            {
-                let mut exports = HashMap::new();
-                for (id, _) in declarations(ctx, sym) {
-                    if !budget.take(1) {
-                        return None;
-                    }
-                    let AstKind::TSNamespaceDeclaration(ns) = nodes.kind(id) else {
-                        continue;
-                    };
-                    let bindings = scopes.get_bindings(ns.scope_id.get()?);
-                    if !budget.take(bindings.len()) {
-                        return None;
-                    }
-                    for (name, &candidate) in bindings {
-                        for (decl, _) in declarations(ctx, candidate) {
-                            if !budget.take(1) {
-                                return None;
-                            }
-                            if matches!(
-                                nodes.parent_kind(decl),
-                                AstKind::ExportDeclaration(_) | AstKind::TSNamespaceDeclaration(_)
-                            ) {
-                                exports.entry(name.to_string()).or_insert(candidate);
-                                break;
-                            }
-                        }
-                    }
-                }
-                entry.insert(exports);
+            if !self.namespace_exports.contains_key(&symbols) {
+                let exports = namespace_exports(ctx, &symbols, budget)?;
+                self.namespace_exports.insert(symbols.clone(), exports);
             }
-            sym = *self.namespace_exports[&sym].get(member)?;
+            let candidates = self.namespace_exports[&symbols].get(member)?;
+            if !budget.take(candidates.len() - 1) {
+                return None;
+            }
+            symbols.clone_from(candidates);
         }
     }
     fn resolve_name(
@@ -1184,7 +1248,7 @@ impl Environments {
             (AstKind::TSTypeReference(r), _) => {
                 self.reference(ctx, g, &r.type_name, r.type_arguments.as_deref(), budget)
             }
-            (AstKind::TSInterfaceHeritage(h), Query::Value) => {
+            (AstKind::TSInterfaceHeritage(h), _) => {
                 self.reference(ctx, g, &h.type_name, h.type_arguments.as_deref(), budget)
             }
             (AstKind::TSParenthesizedType(p), _) => {
@@ -1192,6 +1256,19 @@ impl Environments {
             }
             (AstKind::TSTypeOperator(p), _) if p.operator == TSTypeOperatorOperator::Readonly => {
                 Plan::child(Combine::First, g.child(&p.type_annotation, q))
+            }
+            (AstKind::BindingIdentifier(i), Query::Identity)
+                if g.term.env != 0
+                    && matches!(
+                        ctx.semantic.nodes().parent_kind(g.term.node),
+                        AstKind::TSTypeParameter(_)
+                    ) =>
+            {
+                let bound = i
+                    .symbol_id
+                    .get()
+                    .and_then(|sym| self.lookup(g.term.env, sym, budget));
+                Plan::Done(Class::Syntax(bound.unwrap_or(g.term)))
             }
             (_, Query::Identity) => Plan::Done(Class::Syntax(g.term)),
             _ => Self::classify(kind, g, budget),
@@ -1283,7 +1360,16 @@ impl Environments {
                 g.nested(std::iter::once(&n.element_type))
             }
             (AstKind::TSTupleType(n), Query::ContainedDictionary | Query::NestedDictionary) => {
-                g.nested(n.element_types.iter().filter_map(|t| t.as_ts_type()))
+                g.nested(n.element_types.iter())
+            }
+            (AstKind::TSNamedTupleMember(n), Query::NestedDictionary) => {
+                Plan::child(Combine::First, g.at(n.element_type.node_id(), q))
+            }
+            (AstKind::TSOptionalType(n), Query::NestedDictionary) => {
+                Plan::child(Combine::First, g.child(&n.type_annotation, q))
+            }
+            (AstKind::TSRestType(n), Query::NestedDictionary) => {
+                Plan::child(Combine::First, g.child(&n.type_annotation, q))
             }
             (AstKind::TSUnionType(n), Query::WideKey) => Plan::many(
                 Combine::All,
@@ -1458,7 +1544,7 @@ impl Resolution {
             }
             let a = solver.solve(ctx, left)?;
             let b = solver.solve(ctx, right)?;
-            let (a, b) = match (a, b) {
+            let (mut a, mut b) = match (a, b) {
                 (Class::Declaration(a, mut x), Class::Declaration(b, mut y)) if a == b => {
                     while x != y {
                         solver.charge_identity(1)?;
@@ -1484,18 +1570,13 @@ impl Resolution {
                     continue;
                 }
                 (Class::Declaration(..), _) | (_, Class::Declaration(..)) => return Ok(false),
-                (a, b) => (
-                    if let Class::Syntax(t) = a {
-                        t
-                    } else {
-                        left.term
-                    },
-                    if let Class::Syntax(t) = b {
-                        t
-                    } else {
-                        right.term
-                    },
-                ),
+                (a, b) => {
+                    let syntax = |class, term| match class {
+                        Class::Syntax(resolved) => resolved,
+                        _ => term,
+                    };
+                    (syntax(a, left.term), syntax(b, right.term))
+                }
             };
             let (ak, bk) = (nodes.kind(a.node), nodes.kind(b.node));
             if a == b {
@@ -1508,6 +1589,9 @@ impl Resolution {
             if let (AstKind::IdentifierReference(x), AstKind::IdentifierReference(y)) = (ak, bk)
                 && symbol(ctx, x) != symbol(ctx, y)
             {
+                return Ok(false);
+            }
+            if !solver.pair_signature_parameters(ctx, &mut a, &mut b)? {
                 return Ok(false);
             }
             let xs = solver.syntax_children(ctx, a.node)?;

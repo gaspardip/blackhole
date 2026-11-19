@@ -786,3 +786,120 @@ fn identity_aliases_of_a_function_parameter_report_at_the_assertion() {
         }
     }
 }
+
+fn assert_site(rule: &str, source: &str, site: Option<(usize, usize)>) {
+    let hits = single::run_rule(rule, "types.ts", source);
+    let expected = site.map(|(line, col)| (line, col, None));
+    assert_eq!(positions(&hits), expected.as_slice(), "{source}");
+}
+
+#[test]
+fn inline_signatures_pair_their_own_type_parameters() {
+    for (origin, target, reports) in [
+        ("Call", "Call", true),
+        ("<T>(value: T) => T", "<T>(value: T) => T", true),
+        ("<T>(value: T) => T", "<U>(value: U) => U", true),
+        ("{ <T>(value: T): T }", "{ <U>(value: U): U }", true),
+        ("<T, U>(value: T) => U", "<U, T>(value: T) => U", false),
+        (
+            "<T extends string>(value: T) => T",
+            "<U extends number>(value: U) => U",
+            false,
+        ),
+        (
+            "<T>(value: T) => <U>() => T",
+            "<U>(value: U) => <V>() => U",
+            true,
+        ),
+        (
+            "<T>(value: T) => <U>() => T",
+            "<T>(value: T) => <T>() => T",
+            false,
+        ),
+        ("<T>() => Model", "<U>() => Other", false),
+    ] {
+        let source = format!(
+            "type Call = <T>(value: T) => T; interface Model {{}} interface Other {{}}\ndeclare const origin: {origin};\nconst wide: Record<string, unknown> = origin;\nconst back = wide as {target};"
+        );
+        assert_site(
+            "ts/no-widen-then-assert",
+            &source,
+            reports.then_some((4, 14)),
+        );
+    }
+}
+
+#[test]
+fn tuple_elements_keep_the_bound_dictionary_value() {
+    for element in ["item: V", "V?", "item?: V", "...V[]", "...items: V[]"] {
+        for (value, reports) in [("number", false), ("unknown", true)] {
+            let tuple = format!("[{}]", element.replace('V', "Record<string, T>"));
+            for (source, col) in [
+                (
+                    format!(
+                        "\ntype Result = {};",
+                        tuple.replace(", T>", &format!(", {value}>"))
+                    ),
+                    15 + tuple.find("Record").unwrap(),
+                ),
+                (
+                    format!("type Wrap<T> = {tuple};\ntype Result = Wrap<{value}>;"),
+                    15,
+                ),
+            ] {
+                assert_site(
+                    "ts/no-unsafe-dictionary-type",
+                    &source,
+                    reports.then_some((2, col)),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_merged_namespace_exports_are_independent_of_order() {
+    for (export, ty, reports) in [
+        ("export ", "number", false),
+        ("", "unknown", false),
+        ("export ", "unknown", true),
+    ] {
+        let value = format!(
+            "namespace Outer {{ export namespace Inner {{ {export}type Value = {ty}; }} }}"
+        );
+        let other = "namespace Outer { export namespace Inner { export type Other = string; export const Value = 1; } }";
+        for (a, b) in [(value.as_str(), other), (other, value.as_str())] {
+            for (import, name) in [
+                ("", "Outer.Inner.Value"),
+                ("import I = Outer.Inner; ", "I.Value"),
+            ] {
+                let source = format!("{a}\n{b}\n{import}function read(x: {name}) {{}}");
+                assert_site(
+                    "ts/no-unknown-parameters",
+                    &source,
+                    reports.then_some((3, import.len() + 18)),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn inherited_index_values_keep_the_heritage_arguments() {
+    for (value, reports) in [("number", false), ("never", true)] {
+        for child in [
+            "interface Child<T> { [key: string]: { only?: T } }",
+            "interface Child<T> extends Base<T> {}",
+            "interface Middle<U> extends Base<U> {} interface Child<T> extends Middle<T> {}",
+        ] {
+            let source = format!(
+                "interface Base<T> {{ [key: string]: {{ only?: T }} }}\n{child}\ntype Dict = Child<{value}>;"
+            );
+            assert_site(
+                "ts/no-unsafe-dictionary-type",
+                &source,
+                reports.then_some((3, 13)),
+            );
+        }
+    }
+}

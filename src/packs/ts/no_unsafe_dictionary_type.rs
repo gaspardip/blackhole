@@ -29,7 +29,7 @@ pub(super) fn check_with_resolution(
     resolution: &Resolution,
 ) {
     let nodes = ctx.semantic.nodes();
-    let mut dictionaries = std::collections::HashSet::new();
+    let mut dictionaries = std::collections::HashMap::new();
     for (id, node) in nodes.iter_enumerated() {
         resolution.begin_candidate();
         let kind = node.kind();
@@ -45,25 +45,30 @@ pub(super) fn check_with_resolution(
             }
             continue;
         }
-        match resolution.unsafe_dictionary(ctx, kind) {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(Unjudged) => {
-                report(findings, node.span().start as usize, Err(Unjudged));
-                continue;
-            }
+        let mut verdict = resolution.unsafe_dictionary(ctx, kind);
+        if matches!(verdict, Ok(false)) {
+            continue;
         }
-        dictionaries.insert(id);
+        dictionaries.insert(id, verdict);
+        if verdict.is_err() {
+            report(findings, node.span().start as usize, verdict);
+            continue;
+        }
         let mut needs_alias = resolution.is_bare_alias_use(ctx, kind);
         let hidden = nodes.ancestor_ids(id).any(|id| {
             let parent = nodes.kind(id);
             if matches!(parent, AstKind::TSTypeAliasDeclaration(_)) {
                 needs_alias = false;
             }
-            dictionaries.contains(&id) || inside_constraint(parent, node.span())
+            match dictionaries.get(&id) {
+                Some(Ok(true)) => return true,
+                Some(Err(Unjudged)) => verdict = Err(Unjudged),
+                _ => {}
+            }
+            inside_constraint(parent, node.span())
         });
         if !hidden && !needs_alias {
-            findings.report(node.span().start as usize, None);
+            report(findings, node.span().start as usize, verdict);
         }
     }
 }

@@ -65,8 +65,7 @@ const CASES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-#[test]
-fn each_semantic_question_preserves_its_answer_or_reports_exhaustion() {
+fn stress_chain() -> String {
     let mut chain = String::from("type B0<T> = T;\n");
     for i in 1..=24 {
         writeln!(
@@ -76,6 +75,12 @@ fn each_semantic_question_preserves_its_answer_or_reports_exhaustion() {
         )
         .unwrap();
     }
+    chain
+}
+
+#[test]
+fn each_semantic_question_preserves_its_answer_or_reports_exhaustion() {
+    let chain = stress_chain();
     let mut differences = Vec::new();
     for (rule, endpoint, victim, stress) in CASES {
         let id = format!("ts/{rule}");
@@ -130,4 +135,44 @@ fn each_semantic_question_preserves_its_answer_or_reports_exhaustion() {
         }
     }
     assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn an_unjudged_outer_dictionary_keeps_descendant_suppression_uncertain() {
+    let chain = stress_chain();
+    let wrapped = format!(
+        "{}Record<string, unknown>{}",
+        "Readonly<".repeat(31),
+        ">".repeat(31)
+    );
+    for (prefix, load, expected) in [
+        ("\n".repeat(25), "number", vec![(15, None)]),
+        (
+            chain,
+            "B24<string>",
+            vec![
+                (15, Some("type too complex to judge")),
+                (24, Some("type too complex to judge")),
+            ],
+        ),
+    ] {
+        let source = format!(
+            "{prefix}type Load = Record<string, {load}>;\ntype Result = {wrapped};\ntype Next = Record<string, unknown>;"
+        );
+        let hits = single::run_rule("ts/no-unsafe-dictionary-type", "ancestor.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .filter(|h| h.line == 28)
+                .map(|h| (h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            [(13, None)]
+        );
+        assert_eq!(
+            hits.iter()
+                .filter(|h| h.line == 27)
+                .map(|h| (h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
