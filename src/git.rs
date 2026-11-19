@@ -43,6 +43,15 @@ pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
 fn run(args: &[&str]) -> io::Result<String> {
     String::from_utf8(output(command().args(args))?).map_err(io::Error::other)
 }
+pub(crate) fn repository_root() -> io::Result<std::path::PathBuf> {
+    if run(&["rev-parse", "--is-bare-repository"])? == "true\n" {
+        let git_dir = run(&["rev-parse", "--absolute-git-dir"])?;
+        std::fs::canonicalize(git_dir.strip_suffix('\n').unwrap_or(&git_dir))
+    } else {
+        crate::files::root()
+    }
+}
+
 pub(crate) fn commit(rev: &str) -> io::Result<String> {
     let name = run(&[
         "rev-parse",
@@ -102,12 +111,14 @@ impl Tree {
     }
     // A link to a file is read under the link's name, as a checkout reads it. A directory has nothing to read.
     pub(crate) fn read(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
-        let id = match self.0.get(path) {
+        self.blob(path, batch)?.map(|id| batch.read(id)).transpose()
+    }
+    pub(crate) fn blob(&self, path: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
+        Ok(match self.0.get(path) {
             Some(Entry::File(id)) => Some(id.as_str()),
             Some(Entry::Link(_)) => self.follow(path, batch)?,
             _ => None,
-        };
-        id.map(|id| batch.read(id)).transpose()
+        })
     }
     // A target the commit does not hold could hide a file from the judge, so it is an error.
     fn follow(&self, link: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
@@ -150,6 +161,7 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
         // A rename is scored by the attributes of its files, and the working tree's are not part of either commit.
         &format!("--attr-source={base}"),
         "diff",
+        "--no-relative",
         "--no-ext-diff",
         "--no-textconv",
         "--name-status",
