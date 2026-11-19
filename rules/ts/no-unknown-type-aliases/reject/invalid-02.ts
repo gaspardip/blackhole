@@ -1,0 +1,1 @@
+type Current = unknown;

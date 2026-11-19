@@ -1,4 +1,7 @@
+#[path = "common/run_rule.rs"]
+mod rule_runner;
 use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Rule, Run, registry, run};
+use rule_runner::run_rule;
 
 fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
     for (offset, _) in ctx.text.rmatch_indices('x') {
@@ -272,7 +275,9 @@ fn default_export_documentation_matches_the_expression_span() {
         ("export = /** docs */ (x);", Some(10)),
     ] {
         let text = format!("type T = number; const x = 1;\n{export}");
-        let hits = run(registry(), [("a.ts", text.as_bytes())]);
+        let mut hits = run(registry(), [("a.ts", text.as_bytes())]);
+        // The other TypeScript rules judge these wrappers themselves.
+        hits.retain(|f| f.rule == "ts/no-comments" || !f.rule.starts_with("ts/"));
         assert_eq!(
             locations(&hits),
             col.map(|c| ("ts/no-comments", 2, c)).as_slice(),
@@ -299,28 +304,451 @@ fn deeply_nested_expressions_have_the_same_findings_as_shallow_ones() {
 }
 
 #[test]
-fn exported_alias_chain_is_judged_in_linear_time() {
-    use std::{
-        fmt::Write as _,
-        time::{Duration, Instant},
+fn deeply_parenthesized_parameter_reports_the_keyword() {
+    let prefix = "declare function f(value: ";
+    let depth = 100_000;
+    let source = format!(
+        "{prefix}{}unknown{}): void;",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert_eq!(
+        locations(&run(registry(), [("parameter.ts", source.as_bytes())])),
+        [("ts/no-unknown-parameters", 1, prefix.len() + depth + 1)]
+    );
+}
+
+#[test]
+fn deeply_nested_array_reports_its_element_type() {
+    let prefix = "type Matrix = ";
+    let source = format!("{prefix}any{};", "[]".repeat(100_000));
+    assert_eq!(
+        locations(&run(registry(), [("matrix.ts", source.as_bytes())])),
+        [("ts/no-explicit-any", 1, prefix.len() + 1)]
+    );
+}
+
+#[test]
+fn widening_through_aliases_matches_the_spelled_out_annotation() {
+    let id = "ts/no-widen-then-assert";
+    for annotation in ["Wide", "Record<string, unknown>"] {
+        for (initializer, source_type, reports) in [
+            ("source", "Wide", false),
+            ("source", "Record<string, unknown>", false),
+            ("{ id: 1 }", "Wide", true),
+            ("source", "Narrow", true),
+        ] {
+            let text = format!(
+                "type Wide = Record<string, unknown>;\ntype Narrow = {{ id: number }};\ndeclare const source: {source_type};\nconst value: {annotation} = {initializer};\nconst picked = value as {{ id: number }};"
+            );
+            let hits = run_rule(id, "alias.ts", &text);
+            let expected = if reports { vec![(id, 5, 16)] } else { vec![] };
+            assert_eq!(locations(&hits), expected, "{text}");
+        }
+    }
+    for annotation in ["Generic<unknown>", "Record<string, unknown>"] {
+        let text = format!(
+            "type Generic<T> = Record<string, T>;\nconst value: {annotation} = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert_eq!(locations(&run_rule(id, "alias.ts", &text)), [(id, 3, 16)]);
+    }
+    for (decl, annotation) in [
+        ("import type { External } from './other';", "External"),
+        ("type Loop = Other; type Other = Loop;", "Loop"),
+    ] {
+        let text = format!(
+            "{decl}\nconst value: {annotation} = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert!(run_rule(id, "alias.ts", &text).is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn inherited_interface_members_determine_dictionary_safety() {
+    let cases = [
+        ("interface Base {}", "Base", true),
+        ("interface A {} interface Base extends A {}", "Base", true),
+        ("interface A {} interface B {}", "A, B", true),
+        ("interface A {} interface B { id: string }", "A, B", false),
+        (
+            "interface Base {} interface Base { value: string }",
+            "Base",
+            false,
+        ),
+        ("type Base = {};", "Base", true),
+        ("type Base = {} & {};", "Base", true),
+        ("interface Base<T> {}", "Base<string>", true),
+        ("type Base<T> = {};", "Base<string>", true),
+        (
+            "type Missing = never; interface Base { id?: Missing }",
+            "Base",
+            true,
+        ),
+        ("class Base {}", "Base", false),
+        ("import type { Base } from './other';", "Base", false),
+        ("interface Base<T> { value: T }", "Base<string>", false),
+        ("", "Missing", false),
+    ];
+    for (definitions, parents, empty) in cases {
+        let source = format!(
+            "{definitions}\ninterface Model extends {parents} {{}}\ntype Dict = Record<string, Model>;"
+        );
+        let id = "ts/no-unsafe-dictionary-type";
+        let hits = run_rule(id, "interface.ts", &source);
+        let expected = if empty { vec![(id, 3, 13)] } else { vec![] };
+        assert_eq!(locations(&hits), expected, "{source}");
+    }
+}
+
+#[test]
+fn only_type_contributors_determine_interface_emptiness() {
+    let id = "ts/no-unsafe-dictionary-type";
+    for (decls, col) in [
+        ("interface Model {}\nenum Model { Id }", 6),
+        ("enum Model { Id }\ninterface Model {}", 11),
+    ] {
+        let source = format!("{decls}\ntype Dict = Record<string, Model>;");
+        assert_eq!(
+            locations(&run(registry(), [("merged.ts", source.as_bytes())])),
+            [("core/unparseable", 2, col)]
+        );
+    }
+    for (other, empty) in [
+        ("class Model { id = 0; }", false),
+        ("declare class Model { id: number; }", false),
+        ("namespace Model { export const id = 0; }", true),
+        ("const Model = 1;", true),
+        ("let Model = 1;", true),
+        ("var Model = 1;", true),
+        ("declare const Model: number;", true),
+        ("function Model() {}", true),
+        ("import type { Model } from './other';", false),
+        ("interface Model extends Base {}", false),
+        ("interface Model { id: number }", false),
+        ("interface Model {}", true),
+    ] {
+        let declarations = ["interface Model {}", other];
+        for [first, second] in [declarations, [other, declarations[0]]] {
+            let source = format!("{first}\n{second}\ntype Dict = Record<string, Model>;");
+            let hits = run(registry(), [("merged.ts", source.as_bytes())]);
+            assert!(
+                hits.iter().all(|h| h.rule != "core/unparseable"),
+                "{source}"
+            );
+            let actual: Vec<_> = hits
+                .iter()
+                .filter(|f| f.rule == id)
+                .map(|f| (f.line, f.col))
+                .collect();
+            let expected = if empty { vec![(3, 13)] } else { vec![] };
+            assert_eq!(actual, expected, "{source}");
+        }
+    }
+}
+
+#[test]
+fn guard_evidence_uses_only_an_identifiers_own_annotation() {
+    let id = "ts/no-known-value-widening";
+    let guard = "function guard(v: unknown): v is string { return true; }";
+    let check = |body: &str| {
+        let src = format!("{guard}\n{body}");
+        run_rule(id, "case.ts", &src)
     };
+    let patterns = [
+        "declare const input: object;\nconst { value } = input as { value: unknown };\nguard(value);",
+        "type Foo = { id: number };\ndeclare const src: { a: Foo };\nlet { a }: { a: Foo } = src;\na = { id: 1 };",
+    ];
+    for body in patterns {
+        assert!(check(body).is_empty(), "{body}");
+    }
+    assert!(check("function wrap(...[value]: [unknown]) { guard(value); }").is_empty());
+    for binding in [
+        "[value]: [unknown]",
+        "{ value }: { value: unknown }",
+        "[{ value }]: [{ value: unknown }]",
+        "[value = 0]: [unknown]",
+        "[...value]: unknown[]",
+    ] {
+        assert!(
+            check(&format!("function wrap({binding}) {{ guard(value); }}")).is_empty(),
+            "{binding}"
+        );
+        assert!(
+            check(&format!(
+                "declare const source: object; const {binding} = source; guard(value);"
+            ))
+            .is_empty(),
+            "{binding}"
+        );
+    }
+    for parameter in ["value: string = ''", "...value: string[]"] {
+        let body = format!("function wrap({parameter}) {{ guard(value); }}");
+        assert_eq!(
+            locations(&check(&body)),
+            [(id, 2, body.find("guard(value)").unwrap() + 7)]
+        );
+    }
+}
+
+#[test]
+fn type_only_imports_leave_local_value_evidence_visible() {
+    let id = "ts/no-widen-then-assert";
+    let check = |source: &str| run_rule(id, "value.ts", source);
+    for declaration in [
+        "import type { value } from './types';",
+        "import type value = require('./types');",
+        "import type value from './types';",
+        "import type * as value from './types';",
+        "import { type X as value } from './types';",
+        "export type { value } from './types';",
+    ] {
+        let source = format!(
+            "{declaration}\nconst value: unknown = {{ id: 1 }};\nconst picked = value as {{ id: number }};"
+        );
+        assert_eq!(locations(&check(&source)), [(id, 3, 16)], "{declaration}");
+    }
+    let ambient = "import type { value } from './types';\ndeclare const value: unknown;\nconst picked = value as { id: number };";
+    assert!(check(ambient).is_empty());
+}
+
+#[test]
+fn alias_verdicts_follow_original_reversed_and_rotated_declarations() {
+    let cases: &[(&str, &[(&str, usize)])] = &[
+        (
+            "ts/no-unsafe-dictionary-type",
+            &[
+                ("type Id<T> = T;", 0),
+                ("type Dict<U> = Id<Record<string, Id<U>>>;", 0),
+                ("type Broken = Dict<unknown>;", 15),
+                ("type X = Id<Id<Record<string, unknown>>>;", 10),
+            ],
+        ),
+        (
+            "ts/no-unknown-type-aliases",
+            &[
+                ("type Id<T> = T;", 0),
+                ("type Box<T = unknown> = Id<T>;", 0),
+                ("type Outer<T> = Id<Box>;", 6),
+                ("type Seed = Box;", 6),
+                ("type Check = Outer<string>;", 6),
+            ],
+        ),
+        (
+            "ts/no-unknown-type-aliases",
+            &[
+                ("type L<T> = T | L<T[]>;", 0),
+                ("type A<T> = B<T[]>;", 0),
+                ("type B<T> = A<T[]>;", 0),
+                ("type Json = string | Json[] | { [k: string]: Json };", 0),
+                (
+                    "type DeepPartial<T> = { [K in keyof T]?: DeepPartial<T[K]> };",
+                    0,
+                ),
+                ("type L1 = L<unknown>;", 6),
+                ("type L2 = L<string>;", 0),
+                ("type M = A<string>;", 0),
+                ("type D = DeepPartial<Json>;", 0),
+            ],
+        ),
+        (
+            "ts/no-unsafe-dictionary-type",
+            &[
+                ("type A = B | unknown;", 0),
+                ("type B = A & object;", 0),
+                ("type C = D | E;", 0),
+                ("type D = E & object;", 0),
+                ("type E = C | unknown;", 0),
+                ("type X = Record<string, B>;", 10),
+                ("type Y = Record<string, D>;", 10),
+            ],
+        ),
+    ];
+    for &(id, declarations) in cases {
+        let check = |lines: &[(&str, usize)]| {
+            let source = lines.iter().map(|&(s, _)| s).collect::<Vec<_>>().join("\n");
+            let expected: Vec<_> = lines.iter().copied().filter(|&(_, col)| col > 0).collect();
+            let actual: Vec<_> = run_rule(id, "case.ts", &source)
+                .into_iter()
+                .map(|f| (lines[f.line - 1].0, f.col))
+                .collect();
+            assert_eq!(actual, expected, "{source}");
+        };
+        check(declarations);
+        let mut lines = declarations.to_vec();
+        lines.reverse();
+        check(&lines);
+        lines.reverse();
+        lines.rotate_left(1);
+        check(&lines);
+    }
+}
+
+fn timed_alias_findings(path: &str, source: &str, seconds: u64) -> Vec<Finding> {
+    let start = std::time::Instant::now();
+    let findings = run(registry(), [(path, source.as_bytes())]);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(seconds),
+        "{:?}",
+        start.elapsed()
+    );
+    findings
+}
+
+#[test]
+fn long_alias_chain_fits_the_budget() {
+    assert!(timed_alias_findings("chain.ts", &alias_chain(100_000), 3).is_empty());
+}
+
+fn alias_chain(count: usize) -> String {
+    use std::fmt::Write as _;
+    let mut chain = String::from("type A0 = string;\n");
+    for i in 1..count {
+        writeln!(chain, "type A{i} = A{};", i - 1).unwrap();
+    }
+    chain
+}
+
+#[test]
+fn wide_union_fits_the_budget() {
+    let chain = alias_chain(100);
+    let members = vec!["A99"; 5000].join(" | ");
+    assert!(
+        timed_alias_findings("wide.ts", &format!("{chain}type Wide = {members};"), 3).is_empty()
+    );
+}
+
+#[test]
+fn shared_union_members_fit_the_budget_with_and_without_a_cycle() {
+    use std::fmt::Write as _;
+    for (depth, leaf) in [
+        (27, "string".to_owned()),
+        (20, "A20".to_owned()),
+        (24, "A24".to_owned()),
+    ] {
+        let mut source = format!("type A0 = {leaf};\n");
+        for i in 1..=depth {
+            let prev = i - 1;
+            writeln!(source, "type A{i} = A{prev} | A{prev};").unwrap();
+        }
+        assert!(timed_alias_findings("aliases.ts", &source, 1).is_empty());
+    }
+}
+
+#[test]
+fn generic_forwarders_reuse_the_target_with_distinct_arguments() {
+    use std::fmt::Write as _;
+    let mut src = String::from("type G0<T> = { [key: string]: T };\n");
+    for i in 1..4000 {
+        writeln!(src, "type G{i}<T> = G{}<T>;", i - 1).unwrap();
+    }
+    for i in 0..4000 {
+        writeln!(src, "type V{i} = G3999<{{ v{i}: string }}>;").unwrap();
+    }
+    src.push_str("type Last = G3999<unknown>;");
+    let hits = timed_alias_findings("aliases.ts", &src, 3);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        locations(&hits),
+        [("ts/no-unsafe-dictionary-type", 8001, 13)]
+    );
+    assert!(hits[0].note.is_none());
+}
+
+#[test]
+fn dictionaries_share_a_merged_interface_verdict() {
+    use std::fmt::Write as _;
+    let mut source = "interface X {}\n".repeat(4000);
+    for i in 0..4000 {
+        writeln!(source, "type D{i} = {{ [k: string]: X }};").unwrap();
+    }
+    let hits = timed_alias_findings("aliases.ts", &source, 3);
+    assert_eq!(hits.len(), 4000);
+    for (i, f) in hits.iter().enumerate() {
+        assert_eq!(
+            (f.rule, f.line, f.note.as_deref()),
+            ("ts/no-unsafe-dictionary-type", 4001 + i, None)
+        );
+    }
+}
+
+#[test]
+fn unjudged_generic_aliases_form_a_suffix() {
+    use std::fmt::Write as _;
+    for sibling in ["T[]", "readonly T[]"] {
+        let mut text = String::from("type A0<T> = T;\n");
+        for i in 1..=24 {
+            let prev = i - 1;
+            writeln!(text, "type A{i}<T> = A{prev}<T[]> | A{prev}<{sibling}>;").unwrap();
+        }
+        text.push_str("type Result = A24<string>;");
+        let id = "ts/no-unknown-type-aliases";
+        let hits = run_rule(id, "boundary.ts", &text);
+        let first = hits.first().unwrap().line;
+        assert!(first > 1);
+        let expected: Vec<_> = (first..=text.lines().count())
+            .map(|line| (id, line, 6, Some("type too complex to judge")))
+            .collect();
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.rule, h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn forward_union_members_settle_before_the_union() {
+    use std::fmt::Write as _;
+    let members = (0..4000)
+        .map(|i| format!("A{i}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let mut source = format!("type Hub = {members};\n");
+    for i in 0..3999 {
+        writeln!(source, "type A{i} = A{};", i + 1).unwrap();
+    }
+    source.push_str("type A3999 = unknown;");
+    let hits = timed_alias_findings("aliases.ts", &source, 3);
+    assert_eq!(hits.len(), 4001);
+    assert!(
+        hits.iter()
+            .all(|h| h.rule == "ts/no-unknown-type-aliases" && h.note.is_none())
+    );
+}
+
+#[test]
+fn recursive_node_types_propagate_unknown_to_every_alias() {
+    use std::fmt::Write as _;
+    let mut source = String::from("type Leaf = unknown;\n");
+    for i in 0..40 {
+        let children: Vec<_> = [1, 3, 7, 13]
+            .map(|offset| format!("N{}", (i + offset) % 40))
+            .into();
+        let leaf = if i == 0 { " | Leaf" } else { "" };
+        writeln!(source, "type N{i} = {}{leaf};", children.join(" | ")).unwrap();
+    }
+    let hits = timed_alias_findings("aliases.ts", &source, 1);
+    let expected: Vec<_> = (1..=41)
+        .map(|i| ("ts/no-unknown-type-aliases", i, 6))
+        .collect();
+    assert_eq!(locations(&hits), expected);
+    assert!(hits.iter().all(|f| f.note.is_none()));
+}
+
+#[test]
+fn exported_alias_chain_is_judged_in_linear_time() {
+    use std::fmt::Write as _;
     let mut text = String::from("/** Public value. */\ntype T0 = number;\n");
     for i in 1..4000 {
         writeln!(text, "type T{i} = T{};", i - 1).unwrap();
     }
     text.push_str("export type Last = T3999;");
-    let start = Instant::now();
-    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
-    assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(timed_alias_findings("aliases.ts", &text, 3).is_empty());
 }
 
 #[test]
 fn export_aliases_expand_each_root_binding_once() {
-    use std::time::{Duration, Instant};
     let aliases = (0..4000)
         .map(|i| format!("M as A{i}"))
         .collect::<Vec<_>>()
@@ -329,13 +757,7 @@ fn export_aliases_expand_each_root_binding_once() {
         "/** Public contract. */\n{}export {{ {aliases} }};",
         "interface M {}\n".repeat(4000)
     );
-    let start = Instant::now();
-    assert!(run(registry(), [("aliases.ts", text.as_bytes())]).is_empty());
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(timed_alias_findings("aliases.ts", &text, 2).is_empty());
 }
 
 #[test]
@@ -361,21 +783,12 @@ fn exported_bindings_share_the_walk_to_their_statement() {
 
 #[test]
 fn a_gap_after_a_comment_is_scanned_once() {
-    use std::{
-        fmt::Write as _,
-        time::{Duration, Instant},
-    };
+    use std::fmt::Write as _;
     let mut text = format!("/** Public value. */{}", " ".repeat(100_000));
     for i in 0..2000 {
         writeln!(text, "export const a{i} = 0;").unwrap();
     }
-    let start = Instant::now();
-    assert!(run(registry(), [("gap.ts", text.as_bytes())]).is_empty());
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(timed_alias_findings("gap.ts", &text, 2).is_empty());
 }
 
 #[test]
@@ -393,19 +806,12 @@ fn a_lone_valid_replacement_character_locates_the_binary_verdict() {
 
 #[test]
 fn merged_interfaces_are_expanded_once() {
-    use std::time::{Duration, Instant};
     let text = format!(
         "/** Public tuple. */\nexport type Tuple = [{}];\n{}",
         "Merge,".repeat(8000),
         "interface Merge {}\n".repeat(8000)
     );
-    let start = Instant::now();
-    assert!(run(registry(), [("merge.ts", text.as_bytes())]).is_empty());
-    assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(timed_alias_findings("merge.ts", &text, 3).is_empty());
 }
 
 #[test]
@@ -558,6 +964,52 @@ fn an_attribute_too_long_to_read_is_reported() {
 }
 
 #[test]
+fn shared_generic_types_keep_their_argument_and_query_results_separate() {
+    let source = b"type Wrapped<T> = { item: T };\ntype Identity<T> = T;\ntype User = Wrapped<string>;\ntype Input = Identity<unknown>;\ntype Count = Identity<number>;\ndeclare function fetch(): Promise<Input>;\ndeclare function count(): Promise<Count>;\n";
+    let (send, receive) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let hits = run(registry(), [("contracts.ts", source.as_slice())]);
+        send.send(
+            hits.into_iter()
+                .map(|h| (h.rule, h.line, h.col))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    });
+    let hits = receive
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(
+        hits,
+        [
+            ("ts/no-unknown-type-aliases", 4, 6),
+            ("ts/no-unknown-returns", 6, 27)
+        ]
+    );
+}
+
+#[test]
+fn a_deep_const_chain_keeps_its_original_type_evidence() {
+    use std::fmt::Write;
+    let mut src = String::from("const item0 = {};\n");
+    for i in 1..=10_000 {
+        writeln!(src, "const item{i} = item{};", i - 1).unwrap();
+    }
+    src.push_str("const widened: unknown = item10000;\nconst user = widened as User;\n");
+    let hits = run(registry(), [("values.ts", src.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.rule, h.line, h.col))
+            .collect::<Vec<_>>(),
+        [
+            ("ts/no-known-value-widening", 10_002, 26),
+            ("ts/no-widen-then-assert", 10_003, 14)
+        ]
+    );
+}
+
+#[test]
 fn parsed_kinds_share_the_decoded_source() {
     for ext in ["TS", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"] {
         let path = format!("file.{ext}");
@@ -646,7 +1098,9 @@ fn a_directive_too_long_to_read_is_reported() {
         ]
     );
     // A comment that never closes before the end of the file hides nothing.
-    assert!(run(registry(), [("a.py", &b"# /* notes"[..])]).is_empty());
+    // In two pieces: this file's own scan would read the whole literal as a Rust attribute that never opens.
+    let unclosed = concat!("#", " /* notes");
+    assert!(run(registry(), [("a.py", unclosed.as_bytes())]).is_empty());
 }
 
 #[test]
@@ -765,4 +1219,150 @@ fn a_byte_order_mark_is_a_gap_and_not_part_of_a_name() {
         found.iter().map(|f| (f.line, f.col)).collect::<Vec<_>>(),
         [(1, 1), (2, 2), (3, 1), (4, 1)]
     );
+}
+
+fn generic_budget_chain() -> String {
+    use std::fmt::Write as _;
+    let mut declarations = String::from("type A0<T> = T;\n");
+    for i in 1..=24 {
+        let previous = i - 1;
+        writeln!(
+            declarations,
+            "type A{i}<T> = A{previous}<T[]> | A{previous}<readonly T[]>;"
+        )
+        .unwrap();
+    }
+    declarations
+}
+
+#[test]
+fn only_unresolved_parameters_receive_the_budget_note() {
+    let declarations = generic_budget_chain();
+    let mut differences = Vec::new();
+    for (order, second_alias) in [(0, false), (1, false), (2, false), (0, true)] {
+        let mut lines = vec![
+            "function ordinary1(x: object) {}",
+            "function ordinary2(x: object) {}",
+        ];
+        if second_alias {
+            lines[1] = "function ordinary2(x: A3<unknown>) {}";
+        }
+        lines.insert(order, "function stress(x: A24<string>) {}");
+        let text = format!("{declarations}{}", lines.join("\n"));
+        let hits = run_rule("ts/no-unknown-parameters", "params.ts", &text);
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|h| (h.line, h.col, h.note.as_deref()))
+            .collect();
+        let note = Some("type too complex to judge");
+        let mut expected = vec![(26 + order, 20, note)];
+        if second_alias {
+            expected.push((28, 23, note));
+        }
+        if actual != expected {
+            differences.push(format!("{lines:?}: {actual:?} expected {expected:?}"));
+        }
+    }
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}
+
+#[test]
+fn deep_alias_questions_keep_their_time_and_budget_bounds() {
+    use std::fmt::Write as _;
+    let mut chain = alias_chain(100_000);
+    chain.push_str("function f(x: A99999) {}\nconst v: A99999 = 's';\nconst p = v as string;");
+    assert!(timed_alias_findings("chain.ts", &chain, 3).is_empty());
+
+    let mut nested = String::from("type G0<T> = T;\n");
+    for i in 1..=128 {
+        writeln!(nested, "type G{i}<T> = G{}<T[]>;", i - 1).unwrap();
+    }
+    nested.push_str("type Result = G128<string>;");
+    let hits = run_rule("ts/no-unknown-type-aliases", "nested.ts", &nested);
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.line, h.col, h.note.as_deref()))
+            .collect::<Vec<_>>(),
+        (99..=130)
+            .map(|line| (line, 6, Some("type too complex to judge")))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn unresolved_type_limits() {
+    let chain = generic_budget_chain();
+    for (declarations, ty, expected) in [
+        (
+            "import type { External } from './other';\n",
+            "External",
+            None,
+        ),
+        ("type Loop = Other; type Other = Loop;\n", "Loop", None),
+        (
+            chain.as_str(),
+            "A24<string>",
+            Some("type too complex to judge"),
+        ),
+    ] {
+        let source = format!("{declarations}function f(x: {ty}) {{}}");
+        let hits = run_rule("ts/no-unknown-parameters", "limits.ts", &source);
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect::<Vec<_>>(),
+            expected
+                .map(|note| (source.lines().count(), 15, Some(note)))
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn keyword_answers_survive_an_expensive_neighbor() {
+    let chain = generic_budget_chain();
+    for (rule, stress, ordinary) in [
+        (
+            "ts/no-known-value-widening",
+            "declare function guard(x: unknown): x is string; declare const v: A24<string>; guard(v);",
+            "const nNAME: unknown = 1;",
+        ),
+        (
+            "ts/no-unknown-returns",
+            "function stress(): A24<string> { throw 0; }",
+            "function fNAME(): unknown { throw 0; }",
+        ),
+        (
+            "ts/no-widen-then-assert",
+            "const a: Record<A24<string>, unknown> = { id: 1 }; const p = a as number;",
+            "const aNAME: unknown = 1; const pNAME = aNAME as number;",
+        ),
+    ] {
+        for order in 0..3 {
+            let mut lines = vec![ordinary.replace("NAME", "1"), ordinary.replace("NAME", "2")];
+            let baseline = run_rule(rule, "case.ts", &lines.join("\n"));
+            assert_eq!(baseline.len(), 2);
+            lines.insert(order, stress.into());
+            let hits = run_rule(rule, "case.ts", &format!("{chain}{}", lines.join("\n")));
+            let offset = chain.lines().count();
+            let positions: Vec<_> = hits
+                .iter()
+                .filter(|h| h.line > offset && h.line != offset + order + 1)
+                .map(|h| (h.line, h.col, h.note.as_deref()))
+                .collect();
+            assert_eq!(
+                positions,
+                baseline
+                    .iter()
+                    .map(|h| (
+                        offset + h.line + usize::from(h.line > order),
+                        h.col,
+                        h.note.as_deref()
+                    ))
+                    .collect::<Vec<_>>(),
+                "{rule}, order {order}"
+            );
+        }
+    }
 }

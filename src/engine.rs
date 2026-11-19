@@ -74,7 +74,21 @@ pub fn registry() -> &'static [Rule] {
             fix: "Make the file parse. The judge must be able to read it.",
             run: Run::ParseError,
         },
+        crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
+        crate::packs::ts::no_explicit_any::RULE,
+        crate::packs::ts::no_explicit_return_types::RULE,
+        crate::packs::ts::no_known_value_widening::RULE,
+        crate::packs::ts::no_non_null_assertion::RULE,
+        crate::packs::ts::no_object_parameters::RULE,
+        crate::packs::ts::no_reflect_apply::RULE,
+        crate::packs::ts::no_reflect_get::RULE,
+        crate::packs::ts::no_runtime_typeof::RULE,
+        crate::packs::ts::no_unknown_parameters::RULE,
+        crate::packs::ts::no_unknown_returns::RULE,
+        crate::packs::ts::no_unknown_type_aliases::RULE,
+        crate::packs::ts::no_unsafe_dictionary_type::RULE,
+        crate::packs::ts::no_widen_then_assert::RULE,
     ]
 }
 
