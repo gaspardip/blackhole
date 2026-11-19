@@ -52,6 +52,13 @@ tarball in a clean project with `pnpm add --offline /path/to/package.tgz`,
 then run `pnpm exec blackhole --version` and `pnpm exec blackhole check`
 in a Git repository.
 
+The `packaging` workflow runs on packaging pull requests and manually for a
+selected ref. It builds on Ubuntu 22.04 and macOS 15 for both architectures.
+These runners are provisional test environments. Each runner verifies the
+same tarball by installing offline with scripts disabled and running the CLI.
+After all four pass, the `distribution-<commit SHA>` workflow artifact holds
+the tested npm tarball, verified crate and `SHA256SUMS` for release.
+
 ## Repository checks
 
 `blackhole ci` requires the existing independent head approval for changes to
