@@ -10,6 +10,16 @@ Rules that coding agents cannot talk their way around. A Rust CLI (`blackhole`, 
 
 Once per clone: `git config core.hooksPath .githooks`. The hooks need the list of names from outside the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`) and block the commit without it.
 
+Git 2.45 or newer: every git call the tool makes passes `--no-lazy-fetch`, and an older git stops on the unknown option.
+
+## What the local commands promise
+
+`check`, `ledger` and `object` write only inside the checkout, take policy only from `blackhole.toml`, `.blackhole/ledger` and `.blackhole/objections` inside it, and run no program the checkout's git configuration names. They refuse to run when the root git reports is not the directory that holds the nearest `.git`.
+
+Which untracked files they look at is git's answer: its standard ignore rules apply wherever git keeps them (`.gitignore`, the git directory's `info/exclude`, the user's `core.excludesFile`). An ignore rule never hides a tracked file, and `ci` reads commits, where no ignore rule applies.
+
+Git keeps its own files in the git directory the checkout names. That directory can lie outside the checkout (a linked worktree, a submodule, `--separate-git-dir`), and git may refresh the timestamps of its index files there when it reads them. That is git's bookkeeping, not a write this tool makes.
+
 ## The name guard
 
 A private list of names must never appear in this repository: file contents, file names, commit messages, branch names, tags, pull request and issue text.

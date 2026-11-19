@@ -14,7 +14,13 @@ pub(crate) fn command() -> Command {
             command.env_remove(name);
         }
     }
-    command.arg("--no-replace-objects");
+    command.args([
+        "--no-replace-objects",
+        // The checkout's configuration names a program for each of these, and a call this crate makes would run it.
+        "--no-lazy-fetch",
+        "-c",
+        "core.fsmonitor=false",
+    ]);
     command
 }
 fn failure(out: &Output) -> io::Error {
