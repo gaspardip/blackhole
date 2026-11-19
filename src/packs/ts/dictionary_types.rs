@@ -367,6 +367,14 @@ fn plan_root(
     if !budget.take(children.len()) {
         return None;
     }
+    if let Plan::Children(combine, Children::One(child)) = &root {
+        if let Some(value) = memo.get(child) {
+            return budget
+                .take(2 + children.len())
+                .then(|| Plan::Done(combine.apply(std::slice::from_ref(value))));
+        }
+        return Some(root);
+    }
     if let Plan::Children(combine, _) = &root
         && let Some(values) = children
             .iter()
@@ -823,6 +831,7 @@ impl Environments {
         budget: &mut Budget,
     ) -> Option<NodeId> {
         let mut path = std::collections::HashSet::new();
+        let mut first = None;
         let end = loop {
             if let Some(&cached) = self.forwarded.get(&id) {
                 break cached;
@@ -834,12 +843,15 @@ impl Environments {
                 budget.0?;
                 break Some(id);
             };
-            if !path.insert(id) {
+            // A single hop into a cached tail needs no cycle set.
+            if first.is_none() {
+                first = Some(id);
+            } else if first == Some(id) || !path.insert(id) {
                 break None;
             }
             id = next;
         };
-        for hop in path {
+        for hop in first.into_iter().chain(path) {
             self.forwarded.insert(hop, end);
         }
         end
@@ -901,6 +913,16 @@ impl Environments {
 
     fn enclosing_namespace(&mut self, ctx: &TsCtx<'_>, scope: ScopeId) -> Option<ScopeId> {
         let scopes = ctx.semantic.scoping();
+        let root = scopes.root_scope_id();
+        if scope == root
+            || (scopes.scope_parent_id(scope) == Some(root)
+                && !scopes.scope_flags(scope).is_ts_module_block())
+        {
+            return None;
+        }
+        if let Some(&cached) = self.enclosing_namespaces.get(&scope) {
+            return cached;
+        }
         let mut path = Vec::new();
         let mut enclosing = None;
         for scope in scopes.scope_ancestors(scope) {
@@ -934,9 +956,12 @@ impl Environments {
         let scopes = ctx.semantic.scoping();
         let nodes = ctx.semantic.nodes();
         let bound = symbol(ctx, name);
-        let binding_scope = bound.map(|id| scopes.symbol_scope_id(id));
         let mut enclosing =
             self.enclosing_namespace(ctx, nodes.get_node(name.node_id()).scope_id());
+        if enclosing.is_none() {
+            return bound.map(ResolvedName::Single);
+        }
+        let binding_scope = bound.map(|id| scopes.symbol_scope_id(id));
         let binding_namespace =
             binding_scope.and_then(|scope| self.enclosing_namespace(ctx, scope));
         while let Some(scope) = enclosing {
