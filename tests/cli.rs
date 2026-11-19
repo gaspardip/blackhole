@@ -449,21 +449,26 @@ fn nothing_outside_the_checkout_changes_but_the_shared_index_times() {
     };
     let before = snapshot();
     assert!(before.keys().any(|path| shared_index(path)));
-    baseline(&root, &[("a.py", 1)]);
-    for args in [
-        &["check"][..],
-        &["ledger"],
-        &["object", RULE, "a.py", "reason"],
-    ] {
-        if args[0] == "object" {
-            fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
-        }
-        run(&root, args, 0);
+    let assert_unchanged = |command| {
         assert!(
             snapshot() == before,
-            "{args:?} changed a file outside the checkout"
+            "{command} changed a file outside the checkout"
         );
-    }
+    };
+    baseline(&root, &[("a.py", 2)]);
+    check(&root, &[], 1);
+    assert_unchanged("check");
+
+    regenerate(&root, 0);
+    assert_eq!(
+        fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\ta.py\n")
+    );
+    assert_unchanged("ledger");
+
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    run(&root, &["object", RULE, "a.py", "reason"], 0);
+    assert_unchanged("object");
 }
 
 #[cfg(unix)]
