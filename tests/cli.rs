@@ -565,6 +565,18 @@ fn unknown_config_key_is_an_error() {
 }
 
 #[test]
+fn lcov_requires_a_repository_relative_path() {
+    let dir = repo();
+    let config = dir.path().join("blackhole.toml");
+    for path in ["", "../report", "/tmp/report", "C:/tmp/report", "D:report"] {
+        fs::write(&config, format!("[coverage]\nlcov = {path:?}")).unwrap();
+        check(dir.path(), &[], 2);
+    }
+    fs::write(config, "[coverage]\nlcov = './reports/lcov.info'").unwrap();
+    check(dir.path(), &[], 0);
+}
+
+#[test]
 fn objection_commands_and_shrink() {
     let dir = repo();
     let root = dir.path();

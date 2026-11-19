@@ -102,12 +102,14 @@ impl Tree {
     }
     // A link to a file is read under the link's name, as a checkout reads it. A directory has nothing to read.
     pub(crate) fn read(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
-        let id = match self.0.get(path) {
+        self.blob(path, batch)?.map(|id| batch.read(id)).transpose()
+    }
+    pub(crate) fn blob(&self, path: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
+        Ok(match self.0.get(path) {
             Some(Entry::File(id)) => Some(id.as_str()),
             Some(Entry::Link(_)) => self.follow(path, batch)?,
             _ => None,
-        };
-        id.map(|id| batch.read(id)).transpose()
+        })
     }
     // A target the commit does not hold could hide a file from the judge, so it is an error.
     fn follow(&self, link: &str, batch: &mut Batch) -> io::Result<Option<&str>> {

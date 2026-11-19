@@ -1,0 +1,2 @@
+[coverage]
+lcov = "reports/lcov.info"
