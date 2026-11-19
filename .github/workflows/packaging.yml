@@ -48,6 +48,7 @@ jobs:
           name: ${{ matrix.triple }}
           path: target/${{ matrix.triple }}/release/blackhole
           if-no-files-found: error
+          overwrite: true
 
   package:
     needs: build
@@ -91,6 +92,7 @@ jobs:
           name: distribution-${{ github.sha }}
           path: target/dist/
           if-no-files-found: error
+          overwrite: true
 
   smoke:
     needs: package
