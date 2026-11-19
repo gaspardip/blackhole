@@ -88,7 +88,7 @@ impl Verdict {
     }
 }
 
-fn protected(i: &Inputs<'_>, moved: &Counts, v: &mut Verdict) -> io::Result<()> {
+fn protected(i: &Inputs<'_>, moved: &Counts, guard: &GlobSet, v: &mut Verdict) -> io::Result<()> {
     let judged = |path: &str| !i.excludes.is_match(path);
     // Git reports a move it does not recognise as a deletion and an addition.
     let dropped = i
@@ -112,9 +112,7 @@ fn protected(i: &Inputs<'_>, moved: &Counts, v: &mut Verdict) -> io::Result<()> 
                 !i.head_ledger
                     .is_ok_and(|h| ledger::excess(h, moved).is_empty())
             } else {
-                path == "blackhole.toml"
-                    || path.starts_with(".github/")
-                    || path.starts_with(".blackhole/")
+                crate::judge_files::protected(path) || guard.is_match(path)
             };
             if guarded {
                 paths.insert(path);
@@ -176,6 +174,10 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
 /// # Errors
 /// Propagates diagnostic formatting errors.
 pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
+    judge_with_guard(i, &GlobSet::empty())
+}
+
+pub(crate) fn judge_with_guard(i: &Inputs<'_>, guard: &GlobSet) -> io::Result<Verdict> {
     let mut v = Verdict::default();
     let empty = Counts::new();
     let head = i.head_ledger.unwrap_or(&empty);
@@ -187,7 +189,7 @@ pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
             .filter_map(|c| Some((c.old()?, c.path.as_str())))
             .collect();
         let moved = ledger::moved(i.base_ledger, &renames);
-        protected(i, &moved, &mut v)?;
+        protected(i, &moved, guard, &mut v)?;
         // A count that grew without an approval would otherwise excuse its own findings.
         for (key, n) in &mut allowed {
             *n = (*n).min(moved.get(key).copied().unwrap_or(0));

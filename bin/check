@@ -10,8 +10,8 @@ if [ "${have}" != "${want}" ]; then
   echo "bin/check: rustc is ${have}, rust-toolchain.toml pins ${want}" >&2
   exit 1
 fi
-python3 -I -m unittest discover -s tools
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+python3 -I -m unittest discover -s tools
 cargo run --locked --quiet -- check

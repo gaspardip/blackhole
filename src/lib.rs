@@ -1,8 +1,10 @@
 pub mod ci;
 mod config;
+mod coverage;
 pub mod engine;
 mod files;
 mod git;
+mod judge_files;
 pub mod ledger;
 pub mod objections;
 mod packs {
@@ -135,8 +137,7 @@ struct Scan {
 fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     // The selection is resolved before the working directory moves.
     let (mut names, selection) = files::list(root, paths)?;
-    let excludes =
-        config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
+    let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     let entered = enter(root)?;
     let base = ledger::load(policy(entered, "ledger")?)?;
     let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
@@ -150,7 +151,7 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
             )));
         }
     }
-    names.retain(|name| !excludes.is_match(name));
+    names.retain(|name| !config.exclude.is_match(name));
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
     let findings = scan_files(names.iter().map(String::as_str), |name| {

@@ -14,6 +14,11 @@ fn repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    let out = git_output(dir, args);
+    assert!(out.status.success(), "{out:?}");
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Output {
     let mut command = Command::new("git");
     // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
     for (name, _) in env::vars_os() {
@@ -21,14 +26,7 @@ fn git(dir: &Path, args: &[&str]) {
             command.env_remove(name);
         }
     }
-    assert!(
-        command
-            .current_dir(dir)
-            .args(args)
-            .status()
-            .unwrap()
-            .success()
-    );
+    command.current_dir(dir).args(args).output().unwrap()
 }
 
 fn commit(root: &Path) {
@@ -40,6 +38,15 @@ fn commit(root: &Path) {
         "user.email=fixture@example.org",
     ];
     git(root, &[&identity[..], &["commit", "-qm", "tree"]].concat());
+}
+
+fn names(dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
 }
 
 fn check(dir: &Path, args: &[&str], code: i32) -> Output {
@@ -146,6 +153,19 @@ fn untracked_findings_and_single_fix() {
 }
 
 #[test]
+fn an_ignore_rule_hides_an_untracked_file_and_never_a_tracked_one() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::write(root.join(".git/info/exclude"), "a.py\n").unwrap();
+    assert_eq!(check(root, &[], 0).stdout, b"");
+    check(root, &["a.py"], 2);
+    git(root, &["add", "-f", "a.py"]);
+    check(root, &[], 1);
+    check(root, &["a.py"], 1);
+}
+
+#[test]
 fn path_filters_use_directory_components() {
     let dir = repo();
     let root = dir.path();
@@ -174,6 +194,7 @@ fn invalid_path_is_an_error() {
 
 const HEADER: &str = "blackhole-ledger 1\n";
 const RULE: &str = "core/no-suppression";
+const MISMATCH: &[u8] = b"blackhole: checkout root mismatch\n";
 
 fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
     fs::create_dir_all(dir.join(".blackhole")).unwrap();
@@ -295,8 +316,8 @@ fn over_blocks_the_shrink() {
 #[test]
 fn regeneration_waits_for_the_lock() {
     let other = repo();
-    // Neither the caller's git variables nor a second repository on the same tree may move the lock away from the ledger it guards.
-    for case in ["plain", "variables", "nested"] {
+    // The caller's git variables must not move the lock away from the ledger it guards.
+    for case in ["plain", "variables"] {
         let dir = repo();
         let root = dir.path();
         fs::write(root.join("a.py"), "#noqa").unwrap();
@@ -309,15 +330,6 @@ fn regeneration_waits_for_the_lock() {
             command
                 .env("GIT_DIR", other.path().join(".git"))
                 .env("GIT_WORK_TREE", root);
-        }
-        if case == "nested" {
-            git(root, &["init", "-q", "nested"]);
-            let nested = root.join("nested");
-            git(
-                &nested,
-                &["config", "core.worktree", root.to_str().unwrap()],
-            );
-            command.current_dir(nested);
         }
         let mut child = command.spawn().unwrap();
         thread::sleep(Duration::from_millis(500));
@@ -384,12 +396,79 @@ fn the_lock_is_not_a_file() {
     std::os::unix::fs::symlink(&victim, meta.join("blackhole.lock")).unwrap();
     regenerate(&root, 0);
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
-    let mut left: Vec<_> = fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    left.sort();
-    assert_eq!(left, [".git", "a.py"]);
+    assert_eq!(names(&root), [".git", "a.py"]);
+}
+
+#[cfg(unix)]
+type Outside =
+    std::collections::BTreeMap<std::path::PathBuf, (Vec<u8>, Option<std::time::SystemTime>)>;
+
+#[cfg(unix)]
+fn shared_index(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"sharedindex."))
+}
+
+#[cfg(unix)]
+fn outside(dir: &Path, root: &Path, seen: &mut Outside) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path == root {
+            continue;
+        }
+        if path.is_dir() {
+            outside(&path, root, seen);
+            seen.insert(path, (Vec::new(), None));
+            continue;
+        }
+        // Git refreshes the shared index's timestamps each time it reads a split index.
+        let modified =
+            (!shared_index(&path)).then(|| fs::metadata(&path).unwrap().modified().unwrap());
+        seen.insert(path.clone(), (fs::read(&path).unwrap(), modified));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nothing_outside_the_checkout_changes_but_the_shared_index_times() {
+    let dir = tempdir().unwrap();
+    let (meta, root) = (dir.path().join("meta"), dir.path().join("tree"));
+    let at = |path: &Path| path.to_str().unwrap().to_owned();
+    git(
+        dir.path(),
+        &["init", "-q", "--separate-git-dir", &at(&meta), &at(&root)],
+    );
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["update-index", "--split-index"]);
+    fs::write(dir.path().join("victim"), "kept").unwrap();
+    let snapshot = || {
+        let mut seen = Outside::new();
+        outside(dir.path(), &root, &mut seen);
+        seen
+    };
+    let before = snapshot();
+    assert!(before.keys().any(|path| shared_index(path)));
+    let assert_unchanged = |command| {
+        assert!(
+            snapshot() == before,
+            "{command} changed a file outside the checkout"
+        );
+    };
+    baseline(&root, &[("a.py", 2)]);
+    check(&root, &[], 1);
+    assert_unchanged("check");
+
+    regenerate(&root, 0);
+    assert_eq!(
+        fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
+        format!("{HEADER}{RULE}\t1\ta.py\n")
+    );
+    assert_unchanged("ledger");
+
+    fs::write(root.join("a.py"), "#noqa\n#noqa").unwrap();
+    run(&root, &["object", RULE, "a.py", "reason"], 0);
+    assert_unchanged("object");
 }
 
 #[cfg(unix)]
@@ -483,6 +562,18 @@ fn unknown_config_key_is_an_error() {
     let dir = repo();
     fs::write(dir.path().join("blackhole.toml"), "excludes = []").unwrap();
     check(dir.path(), &[], 2);
+}
+
+#[test]
+fn lcov_requires_a_repository_relative_path() {
+    let dir = repo();
+    let config = dir.path().join("blackhole.toml");
+    for path in ["", "../report", "/tmp/report", "C:/tmp/report", "D:report"] {
+        fs::write(&config, format!("[coverage]\nlcov = {path:?}")).unwrap();
+        check(dir.path(), &[], 2);
+    }
+    fs::write(config, "[coverage]\nlcov = './reports/lcov.info'").unwrap();
+    check(dir.path(), &[], 0);
 }
 
 #[test]
@@ -707,4 +798,176 @@ fn parse_errors_cannot_be_banked_or_objected_to() {
     )
     .unwrap();
     check(root, &[], 2);
+}
+
+#[test]
+fn linked_worktree_locks_and_updates_its_own_ledger() {
+    let main = repo();
+    fs::write(main.path().join("a.py"), "").unwrap();
+    commit(main.path());
+    let outside = tempdir().unwrap();
+    let linked = outside.path().join("linked");
+    git(
+        main.path(),
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    let kept = baseline(main.path(), &[("gone.py", 1)]);
+    let main_lock = fs::File::open(main.path()).unwrap();
+    main_lock.lock().unwrap();
+    let linked_lock = fs::File::open(&linked).unwrap();
+    linked_lock.lock().unwrap();
+    let before = baseline(&linked, &[("gone.py", 1)]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(&linked)
+        .arg("ledger")
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(fs::read(linked.join(".blackhole/ledger")).unwrap(), before);
+    linked_lock.unlock().unwrap();
+    wait_for_exit(&mut child);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        fs::read(linked.join(".blackhole/ledger")).unwrap(),
+        HEADER.as_bytes()
+    );
+    assert_eq!(
+        fs::read(main.path().join(".blackhole/ledger")).unwrap(),
+        kept
+    );
+}
+
+fn wait_for_exit(child: &mut std::process::Child) {
+    let start = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("command did not exit while the lock was held");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn mismatched_root_is_rejected_before_locking() {
+    let main = repo();
+    let nested = main.path().join("nested");
+    git(main.path(), &["init", "-q", "nested"]);
+    git(
+        &nested,
+        &["config", "core.worktree", main.path().to_str().unwrap()],
+    );
+    let before = baseline(main.path(), &[("gone.py", 1)]);
+    let lock = fs::File::open(main.path()).unwrap();
+    lock.lock().unwrap();
+    for args in [
+        &["ledger"][..],
+        &["check"],
+        &["object", RULE, "gone.py", "reason"],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(&nested)
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_exit(&mut child);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(out.stdout, b"");
+        assert_eq!(out.stderr, MISMATCH);
+        assert_eq!(
+            fs::read(main.path().join(".blackhole/ledger")).unwrap(),
+            before
+        );
+        assert_eq!(names(&nested), [".git"]);
+    }
+}
+
+#[test]
+fn configured_worktree_must_resolve_to_the_checkout() {
+    let dir = repo();
+    let other = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    let expected = check(root, &[], 1).stdout;
+    assert_eq!(check(&sub, &[], 1).stdout, expected);
+    // Git walks past an entry named `.git` that is no repository; the root it then answers is not the nearest.
+    let stray = root.join("stray");
+    fs::create_dir_all(stray.join(".git")).unwrap();
+    assert_eq!(check(&stray, &[], 2).stderr, MISMATCH);
+    // A relative value is read from the git directory, so this one names the checkout itself.
+    git(root, &["config", "core.worktree", ".."]);
+    assert_eq!(check(&sub, &[], 1).stdout, expected);
+    for value in [other.path().to_str().unwrap(), sub.to_str().unwrap(), "."] {
+        git(root, &["config", "core.worktree", value]);
+        assert_eq!(check(root, &[], 2).stderr, MISMATCH);
+        assert_eq!(names(other.path()), [".git"]);
+    }
+}
+
+// A program the checkout's configuration names, which leaves a mark outside the checkout when it runs.
+#[cfg(unix)]
+fn program(root: &Path, marker: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    // Git hands the configured value to a shell, as the script does the marker.
+    let quoted = |path: &Path| format!("'{}'", path.to_str().unwrap().replace('\'', r"'\''"));
+    let path = root.join(".git/program.sh");
+    fs::write(&path, format!("#!/bin/sh\ntouch {}\n", quoted(marker))).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    quoted(&path)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_configured_monitor_does_not_run() {
+    let outside = tempdir().unwrap();
+    let marker = outside.path().join("ran");
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    git(root, &["add", "a.py"]);
+    git(root, &["config", "core.fsmonitor", &program(root, &marker)]);
+    // Plain git runs the program here, so a fixture that names it wrongly fails instead of passing.
+    git(root, &["ls-files", "-co", "--exclude-standard"]);
+    fs::remove_file(&marker).unwrap();
+    check(root, &[], 1);
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_object_is_not_fetched() {
+    let outside = tempdir().unwrap();
+    let marker = outside.path().join("ran");
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    commit(root);
+    // Git asks a promisor remote for an object it lacks, with the program the configuration names.
+    for (key, value) in [
+        ("extensions.partialClone", "origin"),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.url", root.to_str().unwrap()),
+        ("remote.origin.uploadpack", &program(root, &marker)),
+    ] {
+        git(root, &["config", key, value]);
+    }
+    // An id of the repository's own length, or git takes it for an abbreviation and never looks the object up.
+    let head = git_output(root, &["rev-parse", "HEAD"]).stdout;
+    let missing = "1".repeat(head.trim_ascii_end().len());
+    // Plain git runs the program here, so a fixture that names it wrongly fails instead of passing.
+    let fetched = git_output(
+        root,
+        &["rev-parse", "--verify", &format!("{missing}^{{commit}}")],
+    );
+    assert!(!fetched.status.success());
+    fs::remove_file(&marker).unwrap();
+    run(root, &["ci", "--base", &missing, "--head", "HEAD"], 2);
+    assert!(!marker.exists());
 }
