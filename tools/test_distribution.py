@@ -1,4 +1,5 @@
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -55,11 +56,12 @@ class Distribution(unittest.TestCase):
             binary.chmod(0o644)
         link = self.root / "linked cli"
         link.symlink_to(self.package / manifest["bin"]["blackhole"])
-        result = subprocess.run([link], capture_output=True)
-        if triple:
-            self.assertEqual(result.returncode, 126, result.stderr)
-        else:
-            self.assertGreater(result.returncode, 0, result.stderr)
+        for env in [os.environ, {**os.environ, "NODE_OPTIONS": "--input-type=module"}]:
+            result = subprocess.run([link], env=env, capture_output=True)
+            if triple:
+                self.assertEqual(result.returncode, 126, result.stderr)
+            else:
+                self.assertGreater(result.returncode, 0, result.stderr)
 
     def test_release_stages_each_native_executable_and_notices(self) -> None:
         for triple in BINARIES:

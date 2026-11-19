@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-binary=$(node -e '
+binary=$(node --input-type=commonjs -e '
   const { realpathSync } = require("node:fs")
   const { dirname, join } = require("node:path")
   const target = process.platform + "-" + process.arch
