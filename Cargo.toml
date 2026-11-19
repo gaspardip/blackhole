@@ -6,6 +6,7 @@ rust-version = "1.99"
 description = "Rules that coding agents cannot talk their way around."
 license = "MIT"
 repository = "https://github.com/gaspardip/blackhole"
+include = ["/src/**/*.rs", "/Cargo.lock", "/README.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md"]
 
 [[bin]]
 name = "blackhole"
