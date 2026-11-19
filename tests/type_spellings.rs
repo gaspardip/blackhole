@@ -1064,6 +1064,52 @@ fn merged_namespace_members_see_sibling_exports_and_keep_lexical_shadowing() {
 }
 
 #[test]
+fn merged_ambient_namespaces_see_implicitly_exported_members_in_either_order() {
+    for member in ["Empty", "Outer.Inner.Empty"] {
+        let sibling =
+            "declare namespace Outer { export namespace Inner { export type Empty = never; } }";
+        let consumer = format!(
+            "declare namespace Outer {{ namespace Inner {{ interface Value {{ only?: {member}; }} type Dict = Record<string, Value>; }} }}"
+        );
+        let col = consumer.find("Record<").unwrap() + 1;
+        for (a, b, line) in [(sibling, consumer.as_str(), 2), (&consumer, sibling, 1)] {
+            let source = format!("{a}\n{b}\nexport {{}};");
+            assert_site("ts/no-unsafe-dictionary-type", &source, Some((line, col)));
+        }
+    }
+}
+
+#[test]
+fn ambient_namespace_export_lists_and_local_members_control_visibility() {
+    for (sibling, local, outer_exports, reports) in [
+        ("type Empty = never;", "", "", true),
+        ("type Empty = never; export {};", "", "", false),
+        ("export type Empty = never; export {};", "", "", true),
+        ("export type Empty = never;", "", "export {};", false),
+        (
+            "export type Empty = never;",
+            "type Empty = number; export {};",
+            "",
+            false,
+        ),
+    ] {
+        let sibling = format!("declare namespace Outer {{ namespace Inner {{ {sibling} }} }}");
+        let consumer = format!(
+            "declare namespace Outer {{ namespace Inner {{ {local} interface Value {{ only?: Empty; }} type Dict = Record<string, Value>; }} {outer_exports} }}"
+        );
+        let col = consumer.find("Record<").unwrap() + 1;
+        for (a, b, line) in [(&sibling, &consumer, 3), (&consumer, &sibling, 2)] {
+            let source = format!("type Empty = number;\n{a}\n{b}\nexport {{}};");
+            assert_site(
+                "ts/no-unsafe-dictionary-type",
+                &source,
+                reports.then_some((line, col)),
+            );
+        }
+    }
+}
+
+#[test]
 fn a_class_contributes_to_merged_dictionary_values_in_either_order() {
     let class = "export class Value { id = 1; }";
     let interface = "export interface Value { only?: never; }";

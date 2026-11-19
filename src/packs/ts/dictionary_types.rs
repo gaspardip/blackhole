@@ -4,8 +4,8 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            IdentifierReference, TSNamespaceDeclaration, TSSignature, TSType, TSTypeName,
-            TSTypeOperatorOperator, TSTypeParameterDeclaration,
+            IdentifierReference, Statement, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
+            TSSignature, TSType, TSTypeName, TSTypeOperatorOperator, TSTypeParameterDeclaration,
         },
     },
     syntax::{
@@ -131,6 +131,7 @@ struct Environments {
     resolved_names: HashMap<NodeId, Option<ResolvedName>>,
     enclosing_namespaces: HashMap<ScopeId, Option<ScopeId>>,
     namespace_exports: HashMap<Vec<SymbolId>, NamespaceExports>,
+    namespace_implicit_exports: HashMap<NodeId, bool>,
     interface_indexes: HashMap<NodeId, Vec<NodeId>>,
     literal_members: HashMap<NodeId, DictionaryMembers>,
     applications: HashMap<(NodeId, usize, usize, Option<NodeId>), Term>,
@@ -561,48 +562,108 @@ impl ResolvedName {
 
 type NamespaceExports = HashMap<String, Vec<SymbolId>>;
 
-fn namespace_exported(ctx: &TsCtx<'_>, decl: NodeId) -> bool {
-    matches!(
-        ctx.semantic.nodes().parent_kind(decl),
-        AstKind::ExportDeclaration(_) | AstKind::TSNamespaceDeclaration(_)
-    )
-}
-
-fn namespace_exports(
+fn implicit_namespace_exports(
     ctx: &TsCtx<'_>,
-    symbols: &[SymbolId],
+    ns: &TSNamespaceDeclaration<'_>,
     budget: &mut Budget,
-) -> Option<NamespaceExports> {
-    let nodes = ctx.semantic.nodes();
-    let scopes = ctx.semantic.scoping();
-    let mut exports = NamespaceExports::new();
-    for (id, _) in symbols.iter().flat_map(|&sym| declarations(ctx, sym)) {
-        if !budget.take(1) {
-            return None;
-        }
-        let AstKind::TSNamespaceDeclaration(ns) = nodes.kind(id) else {
-            continue;
-        };
-        let bindings = scopes.get_bindings(ns.scope_id.get()?);
-        if !budget.take(bindings.len()) {
-            return None;
-        }
-        for (name, &candidate) in bindings {
-            for (decl, _) in declarations(ctx, candidate) {
-                if !budget.take(1) {
-                    return None;
-                }
-                if namespace_exported(ctx, decl) {
-                    exports.entry(name.to_string()).or_default().push(candidate);
-                    break;
-                }
+) -> Option<bool> {
+    let mut ambient = ns.declare || ctx.program.source_type.is_typescript_definition();
+    if !ambient {
+        for ancestor in ctx.semantic.nodes().ancestor_kinds(ns.node_id()) {
+            if !budget.take(1) {
+                return None;
+            }
+            ambient = match ancestor {
+                AstKind::TSNamespaceDeclaration(ns) => ns.declare,
+                AstKind::TSExternalModuleDeclaration(module) => module.declare,
+                AstKind::TSGlobalDeclaration(global) => global.declare,
+                _ => false,
+            };
+            if ambient {
+                break;
             }
         }
     }
-    Some(exports)
+    if ambient && let TSNamespaceDeclarationBody::TSModuleBlock(block) = &ns.body {
+        if !budget.take(block.body.len()) {
+            return None;
+        }
+        // An export list disables implicit exports for this declaration's body.
+        return Some(!block.body.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::ExportNamedDeclaration(_)
+                    | Statement::ExportFromDeclaration(_)
+                    | Statement::ExportAllDeclaration(_)
+                    | Statement::TSExportAssignment(_)
+            )
+        }));
+    }
+    Some(ambient)
 }
 
 impl Environments {
+    fn namespace_exported(
+        &mut self,
+        ctx: &TsCtx<'_>,
+        ns: &TSNamespaceDeclaration<'_>,
+        decl: NodeId,
+        budget: &mut Budget,
+    ) -> Option<bool> {
+        let nodes = ctx.semantic.nodes();
+        if matches!(
+            nodes.parent_kind(decl),
+            AstKind::ExportDeclaration(_) | AstKind::TSNamespaceDeclaration(_)
+        ) {
+            return Some(true);
+        }
+        if matches!(nodes.kind(decl), AstKind::TSImportEqualsDeclaration(_)) {
+            return Some(false);
+        }
+        let implicit = match self.namespace_implicit_exports.entry(ns.node_id()) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                *entry.insert(implicit_namespace_exports(ctx, ns, budget)?)
+            }
+        };
+        Some(implicit)
+    }
+
+    fn namespace_exports(
+        &mut self,
+        ctx: &TsCtx<'_>,
+        symbols: &[SymbolId],
+        budget: &mut Budget,
+    ) -> Option<NamespaceExports> {
+        let nodes = ctx.semantic.nodes();
+        let scopes = ctx.semantic.scoping();
+        let mut exports = NamespaceExports::new();
+        for (id, _) in symbols.iter().flat_map(|&sym| declarations(ctx, sym)) {
+            if !budget.take(1) {
+                return None;
+            }
+            let AstKind::TSNamespaceDeclaration(ns) = nodes.kind(id) else {
+                continue;
+            };
+            let bindings = scopes.get_bindings(ns.scope_id.get()?);
+            if !budget.take(bindings.len()) {
+                return None;
+            }
+            for (name, &candidate) in bindings {
+                for (decl, _) in declarations(ctx, candidate) {
+                    if !budget.take(1) {
+                        return None;
+                    }
+                    if self.namespace_exported(ctx, ns, decl, budget)? {
+                        exports.entry(name.to_string()).or_default().push(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+        Some(exports)
+    }
+
     fn interface(&mut self, ctx: &TsCtx<'_>, g: Goal, sym: SymbolId, budget: &mut Budget) -> Plan {
         let nodes = ctx.semantic.nodes();
         let args = match nodes.kind(g.term.node) {
@@ -792,7 +853,7 @@ impl Environments {
         budget: &mut Budget,
     ) -> Option<&[SymbolId]> {
         if !self.namespace_exports.contains_key(symbols) {
-            let exports = namespace_exports(ctx, symbols, budget)?;
+            let exports = self.namespace_exports(ctx, symbols, budget)?;
             self.namespace_exports.insert(symbols.to_vec(), exports);
         }
         let candidates = self.namespace_exports[symbols].get(member)?;
@@ -814,7 +875,7 @@ impl Environments {
             let AstKind::TSNamespaceDeclaration(parent) = nodes.kind(owner) else {
                 break sym;
             };
-            if !namespace_exported(ctx, ns.node_id()) {
+            if !self.namespace_exported(ctx, parent, ns.node_id(), budget)? {
                 break sym;
             }
             if !budget.take(1) {
