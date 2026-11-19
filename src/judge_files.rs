@@ -25,6 +25,7 @@ static CONFIG_NAMES: LazyLock<GlobSet> = LazyLock::new(|| {
         ".pre-commit-config.y*ml",
         ".{clippy,rustfmt}.toml",
         "{clippy,rustfmt,ruff,pyproject,Cargo,rust-toolchain}.toml",
+        "rust-toolchain",
         "pytest.ini",
         "tox.ini",
         "setup.cfg",

@@ -31,6 +31,7 @@ fn gate_table() {
         ("x", None, 0, 0, 0, ""),
         (".github/x", None, 0, 0, 0, "protected"),
         ("app/tsconfig.strict.json", None, 0, 0, 0, "protected"),
+        ("rust-toolchain", None, 0, 0, 0, "protected"),
         ("rust-toolchain.toml", None, 0, 0, 0, "protected"),
         (".cargo/config.toml", None, 0, 0, 0, "protected"),
         ("app/eslint.config.mjs", None, 0, 0, 0, "protected"),
