@@ -24,7 +24,7 @@ Without the list the guard refuses to run and the commit is blocked.
 `cargo package --locked` to build and verify the crate.
 
 The npm package `@gaspardip/blackhole` bundles the same CLI and requires
-Node.js 24 or later. Both distributions use Git on the user's PATH.
+Node.js 24 or later. Both distributions require Git 2.45 or later on the user's PATH.
 The prebuilt targets are:
 
 | Platform | x64 | Arm64 |

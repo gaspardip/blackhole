@@ -29,7 +29,7 @@ def stage(target_dir: Path, package: Path, smoke_target: str | None) -> None:
         binary.parent.mkdir(parents=True)
         shutil.copyfile(target_dir / triple / "release" / "blackhole", binary)
         binary.chmod(0o755)
-    launcher = package / "blackhole.cjs"
+    launcher = package / "blackhole"
     shutil.copyfile(ROOT / "npm" / launcher.name, launcher)
     launcher.chmod(0o755)
     for name in ["README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]:

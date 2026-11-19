@@ -1,4 +1,5 @@
 import json
+import platform
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,23 @@ class Distribution(unittest.TestCase):
             "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
             *(p.relative_to(ROOT).as_posix() for p in (ROOT / "src").rglob("*.rs")),
         })
+
+    def test_launcher_reports_an_unexecutable_binary_without_a_signal(self) -> None:
+        arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+        triple = next((t for t, name in BINARIES.items() if name == f"{sys.platform}-{arch}"), None)
+        for target in BINARIES:
+            self.write_input(target)
+        self.stage()
+        manifest = json.loads((self.package / "package.json").read_text())
+        for binary in (self.package / "native").glob("*/blackhole"):
+            binary.chmod(0o644)
+        link = self.root / "linked cli"
+        link.symlink_to(self.package / manifest["bin"]["blackhole"])
+        result = subprocess.run([link], capture_output=True)
+        if triple:
+            self.assertEqual(result.returncode, 126, result.stderr)
+        else:
+            self.assertGreater(result.returncode, 0, result.stderr)
 
     def test_release_stages_each_native_executable_and_notices(self) -> None:
         for triple in BINARIES:

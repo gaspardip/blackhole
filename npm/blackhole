@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+binary=$(node -e '
+  const { realpathSync } = require("node:fs")
+  const { dirname, join } = require("node:path")
+  const target = process.platform + "-" + process.arch
+  if (process.platform === "linux" && !process.report.getReport().header.glibcVersionRuntime) {
+    console.error("blackhole: the Linux binary requires glibc")
+    process.exit(1)
+  }
+  console.log(join(dirname(realpathSync(process.argv[1])), "native", target, "blackhole"))
+' -- "$0")
+exec "$binary" "$@"
