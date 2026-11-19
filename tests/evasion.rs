@@ -127,6 +127,39 @@ fn coverage_verdict(
 }
 
 #[test]
+fn coverage_follows_repository_paths_in_subdirectories_and_bare_clones() -> Result<()> {
+    let repo = tempdir()?;
+    let root = repo.path();
+    let case = Path::new("evasion/coverage-changed");
+    let (base, head) = revisions(case, root)?;
+    let artifacts = tempdir()?;
+    let dir = artifacts.path().join(&head).join("reports");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("lcov.info"),
+        "SF:src/value.ts\nDA:2,0\nend_of_record\n",
+    )?;
+    let mirror = tempdir()?;
+    git(
+        root,
+        &["clone", "--bare", ".", mirror.path().to_str().unwrap()],
+    )?;
+    git(root, &["config", "diff.relative", "true"])?;
+    for cwd in [root.join("src"), mirror.path().to_owned()] {
+        coverage_verdict(
+            &cwd,
+            &base,
+            &head,
+            artifacts.path(),
+            "src/value.ts:2: changed line",
+        )?;
+    }
+    fs::copy(case.join("lcov.info"), dir.join("lcov.info"))?;
+    coverage_verdict(mirror.path(), &base, &head, artifacts.path(), "")?;
+    Ok(())
+}
+
+#[test]
 fn coverage_requires_complete_line_records_for_the_changed_source() -> Result<()> {
     let repo = tempdir()?;
     let root = repo.path();

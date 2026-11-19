@@ -45,6 +45,7 @@ fn source(path: &str, bytes: &[u8]) -> bool {
 fn hunks(old: &str, new: &str) -> io::Result<Vec<Range<usize>>> {
     let patch = git::output(git::command().args([
         "diff",
+        "--no-relative",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
@@ -156,7 +157,7 @@ pub(crate) fn check(
         )
     })?;
     // The producer owns these directories. A link must never select a different revision or a checkout.
-    if actual.starts_with(files::root()?) || actual != path {
+    if actual.starts_with(git::repository_root()?) || actual != path {
         return Err(io::Error::other(
             "report must be outside the checkout at its exact head path",
         ));

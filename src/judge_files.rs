@@ -1,5 +1,5 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::sync::LazyLock;
+use std::{path::Path, sync::LazyLock};
 
 static CONFIG_NAMES: LazyLock<GlobSet> = LazyLock::new(|| {
     let mut names = GlobSetBuilder::new();
@@ -24,7 +24,7 @@ static CONFIG_NAMES: LazyLock<GlobSet> = LazyLock::new(|| {
         ".lefthook.{yml,yaml,toml,json}",
         ".pre-commit-config.y*ml",
         ".{clippy,rustfmt}.toml",
-        "{clippy,rustfmt,ruff,pyproject,Cargo}.toml",
+        "{clippy,rustfmt,ruff,pyproject,Cargo,rust-toolchain}.toml",
         "pytest.ini",
         "tox.ini",
         "setup.cfg",
@@ -41,6 +41,8 @@ pub(crate) fn protected(path: &str) -> bool {
     let name = parts.next().unwrap_or_default();
     path == "blackhole.toml"
         || path == "bin/check"
+        || Path::new(path).ends_with(".cargo/config.toml")
+        || Path::new(path).ends_with(".cargo/config")
         || path.starts_with(".github/")
         || path.starts_with(".blackhole/")
         || path.starts_with("eslint/rules/")
