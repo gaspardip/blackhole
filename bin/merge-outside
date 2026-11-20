@@ -3,11 +3,18 @@
 set -eu
 number="$1"
 cd "$(dirname "$0")/.."
-# Only main is fetched and rescanned below, so a merge into any other branch would land unseen.
-if [ "$(gh pr view "${number}" --json baseRefName --jq .baseRefName)" != main ]; then
-  echo "merge-outside: pull request ${number} does not target main" >&2
+require_main() {
+  if ! target="$(gh pr view "${number}" --json baseRefName --jq .baseRefName 2>/dev/null)" ||
+    [ "${target}" != main ]; then
+    echo "merge-outside: pull request ${number} does not target main" >&2
+    exit 1
+  fi
+}
+merge_unconfirmed() {
+  echo "merge-outside: could not confirm merge of pull request ${number}" >&2
   exit 1
-fi
+}
+require_main
 # A tag named main can shadow the branch when Git resolves a fetch source.
 main_ref=refs/remotes/origin/main
 main_refspec="+refs/heads/main:${main_ref}"
@@ -27,7 +34,20 @@ preview_commit="$(git -c user.name=blackhole -c user.email=blackhole@localhost c
   "${preview_tree}" -p "${base}" --no-gpg-sign -m "${subject}" -m "${body}")"
 python3 -I tools/name_guard.py range "${base}" "${preview_commit}"
 # The subject and body are passed back so an edit made after the scan cannot reach main.
-gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}"
+require_main
+# shortcut: a retarget after this check can land unscanned on another branch until the daily scan.
+gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}" \
+  >/dev/null 2>&1 || merge_unconfirmed
+merge_status="$(gh pr view "${number}" --json state,baseRefName,mergeCommit \
+  --jq '[.state, .baseRefName, .mergeCommit.oid] | join(" ")' 2>/dev/null)" || merge_unconfirmed
+case "${merge_status}" in
+  "MERGED main "*) landed="${merge_status#MERGED main }" ;;
+  *) merge_unconfirmed ;;
+esac
+git fetch -q origin "${main_refspec}" >/dev/null 2>&1 || merge_unconfirmed
+resolved="$(git rev-parse --verify --end-of-options "${landed}^{commit}" 2>/dev/null)" || merge_unconfirmed
+[ "${landed}" = "${resolved}" ] || merge_unconfirmed
+GIT_NO_REPLACE_OBJECTS=1 git merge-base --is-ancestor "${landed}" "${main_ref}" \
+  >/dev/null 2>&1 || merge_unconfirmed
 # GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
-git fetch -q origin "${main_refspec}"
-python3 -I tools/name_guard.py range "${base}" "${main_ref}"
+python3 -I tools/name_guard.py range "${base}" "${landed}"
