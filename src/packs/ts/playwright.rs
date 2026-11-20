@@ -52,11 +52,9 @@ fn page_fixture(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
     else {
         return false;
     };
-    let Some(param) = super::test_context::test_callback_parameter(
-        ctx,
-        symbol,
-        super::test_context::Runner::is_playwright,
-    ) else {
+    let Some(param) = super::test_context::callback_parameter(ctx, symbol, |site| {
+        site.runner.is_playwright() && (site.test() || site.runner.hook().is_some())
+    }) else {
         return false;
     };
     let BindingPattern::ObjectPattern(pattern) = &param.pattern else {

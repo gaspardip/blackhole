@@ -673,10 +673,10 @@ pub(super) fn callback_sites<'ctx, 'a>(
         .chain(named.into_iter().flatten().copied())
 }
 
-pub(super) fn test_callback_parameter<'a>(
+pub(super) fn callback_parameter<'a>(
     ctx: &TsCtx<'a>,
     symbol: oxc::syntax::symbol::SymbolId,
-    runner_kind: impl Fn(&Runner<'a>) -> bool,
+    accepts: impl Fn(CallbackSite<'a>) -> bool,
 ) -> Option<&'a oxc::ast::ast::FormalParameter<'a>> {
     let declaration = ctx.semantic.symbol_declaration(symbol);
     let function = super::values::enclosing_functions(ctx, declaration.id()).next()?;
@@ -693,6 +693,6 @@ pub(super) fn test_callback_parameter<'a>(
         return None;
     }
     callback_sites(ctx, function.id())
-        .any(|site| site.test() && runner_kind(&site.runner))
+        .any(accepts)
         .then_some(parameter)
 }

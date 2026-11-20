@@ -73,6 +73,7 @@ struct Sleep {
 struct Setup {
     all: Option<(NodeId, bool)>,
     each: Option<(NodeId, bool)>,
+    restores_after_each: bool,
 }
 
 fn setup_timers(
@@ -80,20 +81,26 @@ fn setup_timers(
     site: CallbackSite<'_>,
     setups: &HashMap<Option<NodeId>, Setup>,
 ) -> Option<bool> {
-    if !site.test() {
-        return None;
-    }
+    let test = site.test();
     let scopes = enclosing_functions(ctx, site.at)
         .map(|node| Some(node.id()))
         .chain(std::iter::once(None));
     let mut before_all = None;
+    let mut restores_after_each = false;
     for setup in scopes.filter_map(|scope| setups.get(&scope)) {
-        if let Some((_, enabled)) = setup.each {
-            return Some(enabled);
+        if test {
+            if let Some((_, enabled)) = setup.each {
+                return Some(enabled);
+            }
+            before_all = before_all.or(setup.all.map(|(_, enabled)| enabled));
         }
-        before_all = before_all.or(setup.all.map(|(_, enabled)| enabled));
+        restores_after_each |= setup.restores_after_each;
     }
-    before_all
+    if restores_after_each {
+        Some(false)
+    } else {
+        before_all
+    }
 }
 
 fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mut Findings) {
@@ -137,6 +144,10 @@ fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mu
             let setup = match site.runner.hook() {
                 Some("beforeAll") => &mut setups.entry(suite).or_default().all,
                 Some("beforeEach") => &mut setups.entry(suite).or_default().each,
+                Some("afterEach") if !enabled => {
+                    setups.entry(suite).or_default().restores_after_each = true;
+                    continue;
+                }
                 _ => continue,
             };
             if setup.is_none_or(|(at, _)| at < site.at) {

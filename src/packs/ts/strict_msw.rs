@@ -113,7 +113,7 @@ fn empty_or_warning_only<'a>(ctx: &TsCtx<'a>, callback: &'a Expression<'a>) -> b
             Statement::ReturnStatement(s) => s
                 .argument
                 .as_ref()
-                .is_some_and(|expr| warning_call(ctx, params, expr)),
+                .is_none_or(|expr| warning_call(ctx, params, expr)),
             _ => false,
         })
     })

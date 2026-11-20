@@ -859,3 +859,65 @@ fn round2_r18_native_shorthand_target() {
         &["ts/no-test-doubles"],
     );
 }
+
+#[test]
+fn round3_r26_playwright_hook_page_fixture() {
+    let source = r#"import {test, expect} from "@playwright/test"; test.beforeEach(async ({page}) => { await page.route("**/api", route => route.fulfill({json: {data: []}})); await page.goto("/rows"); expect(await page.title()).toBe("rows"); })"#;
+    for hook in ["beforeEach", "afterEach", "beforeAll", "afterAll"] {
+        let source = source.replace("beforeEach", hook);
+        let col = source.find("route.fulfill").unwrap() + 1;
+        let hits = run(registry(), [("case.test.ts", source.as_bytes())]);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.rule, hit.line, hit.col))
+                .collect::<Vec<_>>(),
+            [("ts/no-test-doubles", 1, col)],
+            "{hook}"
+        );
+    }
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {beforeEach} from "node:test"; beforeEach(t => { t.skip(); });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round3_r28_after_each_restores_once_timers() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"beforeAll(() => { vi.useFakeTimers(); }); afterEach(() => { vi.useRealTimers(); }); test("first", () => assert(read())); test("second", async () => { await new Promise(r => setTimeout(r, 10)); assert(read()); });"#,
+        &["ts/no-fixed-sleep"],
+    );
+    for source in [
+        r#"vi.useFakeTimers(); afterEach(() => { vi.useRealTimers(); }); test("first", () => assert(read())); test("second", async () => { await scheduler.wait(10); assert(read()); });"#,
+        r#"describe("outer", () => { afterEach(() => { vi.useRealTimers(); }); describe("nested", () => { beforeAll(() => { vi.useFakeTimers(); }); test("first", () => assert(read())); test("second", async () => { await scheduler.wait(10); assert(read()); }); }); });"#,
+    ] {
+        assert_review_rules("case.test.ts", source, &["ts/no-fixed-sleep"]);
+    }
+}
+
+#[test]
+fn round3_r20_default_config_function() {
+    let source = "export default function config() { return {test: {retry: 2}}; }";
+    assert_review_rules("vitest.config.ts", source, &[FLAKE]);
+    assert_review_rules("src/build.ts", source, &[]);
+}
+
+#[test]
+fn round3_r20_default_config_arrow() {
+    assert_review_rules(
+        "vitest.config.ts",
+        "export default () => ({test: {retry: 2}})",
+        &["ts/no-flake-masking"],
+    );
+}
+
+#[test]
+fn round3_r06_warning_then_bare_return() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {setupServer} from "msw/node"; const network = setupServer(); network.listen({ onUnhandledRequest(req) { console.warn(req.url); return; } });"#,
+        &["ts/strict-msw"],
+    );
+}

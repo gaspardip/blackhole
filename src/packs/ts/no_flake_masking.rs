@@ -4,7 +4,10 @@ use super::test_context::{
 use super::values::{Origin, Properties, origin_path, properties, resolve};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
-    ast::{AstKind, ast::Expression},
+    ast::{
+        AstKind,
+        ast::{ExportDefaultDeclarationKind, Expression},
+    },
     span::GetSpan,
 };
 pub(crate) const RULE: Rule = Rule {
@@ -55,15 +58,26 @@ pub(super) fn api(runner: &Runner<'_>) -> Option<Api> {
     }
 }
 
-fn config_retries<'a>(ctx: &TsCtx<'a>, root: &'a Expression<'a>, findings: &mut Findings) {
-    let mut pending = Vec::new();
-    match callback_kind(ctx, root) {
-        Some(AstKind::ArrowFunctionExpression(f)) if let Some(value) = f.body.as_expression() => {
-            pending.push(value);
-        }
-        Some(callback) => returned_values(ctx, callback.node_id(), &mut pending),
-        None => pending.push(root),
+fn config_returns<'a>(ctx: &TsCtx<'a>, callback: AstKind<'a>) -> Vec<&'a Expression<'a>> {
+    if let AstKind::ArrowFunctionExpression(f) = callback
+        && let Some(value) = f.body.as_expression()
+    {
+        return vec![value];
     }
+    let mut values = Vec::new();
+    returned_values(ctx, callback.node_id(), &mut values);
+    values
+}
+
+fn config_roots<'a>(ctx: &TsCtx<'a>, root: &'a Expression<'a>) -> Vec<&'a Expression<'a>> {
+    callback_kind(ctx, root).map_or_else(|| vec![root], |callback| config_returns(ctx, callback))
+}
+
+fn config_retries<'a>(
+    ctx: &TsCtx<'a>,
+    mut pending: Vec<&'a Expression<'a>>,
+    findings: &mut Findings,
+) {
     let mut seen = std::collections::HashSet::new();
     while let Some(value) = pending.pop() {
         let value = resolve(ctx, value);
@@ -96,10 +110,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
             AstKind::ExportDefaultDeclaration(export)
-                if super::config_responses::config(ctx.path)
-                    && let Some(value) = export.declaration.as_expression() =>
+                if super::config_responses::config(ctx.path) =>
             {
-                config_retries(ctx, value, findings);
+                let roots = match &export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        config_returns(ctx, AstKind::Function(f))
+                    }
+                    declaration => declaration
+                        .as_expression()
+                        .map_or_else(Vec::new, |value| config_roots(ctx, value)),
+                };
+                config_retries(ctx, roots, findings);
             }
             kind if let Some(c) = super::values::site(ctx, kind) => {
                 let call = c.call;
@@ -115,7 +136,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         )
                     })
                 {
-                    config_retries(ctx, arg, findings);
+                    config_retries(ctx, config_roots(ctx, arg), findings);
                 }
                 let p = runner(ctx, &call);
                 match api(&p) {
