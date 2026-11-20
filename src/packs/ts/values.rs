@@ -166,6 +166,7 @@ pub(super) fn initializer<'a>(
 
 struct Write<'a> {
     value: &'a Expression<'a>,
+    owner: Option<oxc::syntax::node::NodeId>,
     overwritten: Option<(oxc::span::Span, Option<oxc::syntax::node::NodeId>)>,
 }
 
@@ -229,6 +230,7 @@ fn assignments<'a>(ctx: &TsCtx<'a>) -> HashMap<SymbolId, Vec<Write<'a>>> {
         }
         writes.push(Write {
             value,
+            owner: boundary(ctx, node.id()),
             overwritten: None,
         });
     }
@@ -245,13 +247,28 @@ fn live_writes<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'a>) -> Vec<&'a Exp
         return Vec::new();
     };
     let owner = OnceCell::new();
+    let loops = OnceCell::new();
     writes
         .iter()
         .filter(|w| {
-            !w.overwritten.is_some_and(|(range, b)| {
-                range.contains_inclusive(id.span)
-                    && *owner.get_or_init(|| boundary(ctx, id.node_id.get())) == b
-            })
+            let owner = || *owner.get_or_init(|| boundary(ctx, id.node_id.get()));
+            (w.value.span().end <= id.span.start
+                || w.owner != owner()
+                || loops
+                    .get_or_init(|| {
+                        ctx.semantic
+                            .nodes()
+                            .ancestors(id.node_id.get())
+                            .take_while(|node| Some(node.id()) != owner())
+                            .filter(|node| node.kind().is_iteration_statement())
+                            .map(oxc::semantic::AstNode::span)
+                            .collect::<Vec<_>>()
+                    })
+                    .iter()
+                    .any(|span| span.contains_inclusive(w.value.span())))
+                && !w
+                    .overwritten
+                    .is_some_and(|(range, b)| range.contains_inclusive(id.span) && owner() == b)
         })
         .map(|w| w.value)
         .collect()

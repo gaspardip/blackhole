@@ -130,9 +130,9 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     }
                     None if p.is_playwright()
                         && p == ["test", "setTimeout"]
-                        && enclosing_runners(ctx, n.id())
-                            .next()
-                            .is_some_and(|owner| owner.is_playwright() && owner.test()) =>
+                        && enclosing_runners(ctx, n.id()).next().is_some_and(|owner| {
+                            owner.is_playwright() && owner.test() && owner.hook().is_none()
+                        }) =>
                     {
                         findings.report(c.span.start as usize, None);
                     }

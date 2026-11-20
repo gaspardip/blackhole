@@ -694,3 +694,96 @@ fn review_r19_named_assertionless_callback() {
         &["ts/no-assertionless-tests"],
     );
 }
+
+#[test]
+fn round2_r21_fake_timers_in_hooks() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"beforeEach(() => { vi.useFakeTimers(); }); afterEach(() => { vi.useRealTimers(); }); test("timer", async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; assert(read()); });"#,
+        &[],
+    );
+    assert_review_rules(
+        "case.test.ts",
+        r#"describe("fake", () => { beforeAll(() => { vi.useFakeTimers(); }); test("fake", async () => { await scheduler.wait(10); assert(read()); }); }); describe("real", () => { test("real", async () => { await scheduler.wait(10); assert(read()); }); });"#,
+        &["ts/no-fixed-sleep"],
+    );
+    assert_review_rules(
+        "case.test.ts",
+        r#"vi.useFakeTimers(); test("fake", async () => { await scheduler.wait(10); assert(read()); });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r22_constant_threshold_dynamic_result() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"test("rows", async () => { const minimum = 2; expect(minimum).toBeLessThan(await countRows()); });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r23_playwright_hook_timeout() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test, expect} from "@playwright/test"; test.beforeAll(async () => { test.setTimeout(60_000); await seedDatabase(); expect(await isDatabaseReady()).toBe(true); });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r24_escape_before_assignment() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "@playwright/test"; let callback = save; handoff(callback); callback = test; callback("x", () => assert(read()));"#,
+        &[],
+    );
+    for source in [
+        r#"import {test} from "@playwright/test"; let callback = save; for (const item of items) { handoff(callback); callback = test; }"#,
+        r#"import {test} from "@playwright/test"; let callback = save; install(); handoff(callback); function install() { callback = test; }"#,
+    ] {
+        assert_review_rules("case.test.ts", source, &[SKIP]);
+    }
+}
+
+#[test]
+fn round2_r25_named_callback_local_helper() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"function checkDatabase() { expect(read()).toBe("ready"); } function exercise() { checkDatabase(); } test("reads database", exercise);"#,
+        &[],
+    );
+    assert_review_rules(
+        "case.test.ts",
+        r#"function checkDatabase() { expect(read()).toBe("ready"); } test("reads database", () => checkDatabase());"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r14_conditional_forwarded_route_metadata() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import type {Route} from "@playwright/test"; async function forward(route: Route) { const response = await route.fetch(); await route.fulfill(useJson ? {response, contentType: "application/json"} : {response, contentType: "text/plain"}); }"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r13_class_method_this() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"class Renderer { withImplementation(mode: string) { render(mode); } setup() { this.withImplementation("fast"); } }"#,
+        &[],
+    );
+}
+
+#[test]
+fn round2_r10_node_string_title_alias() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "node:test"; const callback = () => assert(read()); function register(name: string) { const title = name; test(title, callback); }"#,
+        &[],
+    );
+}

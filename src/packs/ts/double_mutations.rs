@@ -148,21 +148,41 @@ pub(super) fn banned_mock_method(method: &str) -> bool {
     )
 }
 
+fn local_class<'a>(
+    ctx: &TsCtx<'a>,
+    receiver: &'a Expression<'a>,
+) -> Option<(&'a oxc::ast::ast::Class<'a>, bool)> {
+    match resolve(ctx, receiver) {
+        Expression::NewExpression(new) => {
+            let id = super::values::binding_value(ctx, &new.callee).get_identifier_reference()?;
+            match super::values::declaration(ctx, id)? {
+                AstKind::Class(class) => Some((class, false)),
+                _ => None,
+            }
+        }
+        Expression::ThisExpression(this) => {
+            let function = super::values::enclosing_functions(ctx, this.node_id.get())
+                .find(|node| matches!(node.kind(), AstKind::Function(_)))?;
+            let nodes = ctx.semantic.nodes();
+            let AstKind::MethodDefinition(method) = nodes.parent_kind(function.id()) else {
+                return None;
+            };
+            nodes
+                .ancestors(method.node_id.get())
+                .find_map(|node| match node.kind() {
+                    AstKind::Class(class) => Some((class, method.r#static)),
+                    _ => None,
+                })
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn replacement_method<'a>(
     ctx: &TsCtx<'a>,
     receiver: &'a Expression<'a>,
     method: &str,
 ) -> bool {
-    if let Expression::NewExpression(new) = resolve(ctx, receiver)
-        && let Some(id) = super::values::binding_value(ctx, &new.callee).get_identifier_reference()
-        && let Some(AstKind::Class(class)) = super::values::declaration(ctx, id)
-        && class.body.body.iter().any(|element| {
-            matches!(element, oxc::ast::ast::ClassElement::MethodDefinition(m)
-                if !m.r#static && m.key.static_name() == Some(method.into()))
-        })
-    {
-        return false;
-    }
     matches!(
         method,
         "mockImplementation"
@@ -177,7 +197,12 @@ pub(super) fn replacement_method<'a>(
             | "withImplementation"
             | "mockStepResult"
             | "mockStepError"
-    )
+    ) && !local_class(ctx, receiver).is_some_and(|(class, is_static)| {
+        class.body.body.iter().any(|element| {
+            matches!(element, oxc::ast::ast::ClassElement::MethodDefinition(m)
+                if m.r#static == is_static && m.key.static_name() == Some(method.into()))
+        })
+    })
 }
 
 pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {

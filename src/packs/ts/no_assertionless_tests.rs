@@ -1,3 +1,4 @@
+use super::test_context::{callback_body, callback_kind};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,11 +69,18 @@ fn tautology<'a>(
         super::test_context::runner(ctx, &expect).short(),
         Some(["expect"] | ["expect", "soft"])
     ) && expect.arg(0).is_some_and(|subject| {
-        literal(resolve(ctx, subject)) || first.is_some_and(|arg| same(ctx, subject, arg))
+        literal(resolve(ctx, subject))
+            && call.unreadable_args.is_none()
+            && call
+                .args
+                .iter()
+                .all(|arg| arg.is_some_and(|value| literal(resolve(ctx, value))))
+            || first.is_some_and(|arg| same(ctx, subject, arg))
     })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, Option<usize>>::new();
+    let mut helpers = BTreeMap::new();
     let mut tests = Vec::new();
     for n in ctx.semantic.nodes().iter() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
@@ -84,6 +92,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             _ => c.span.start as usize,
         };
         let parts = super::test_context::runner(ctx, &inv);
+        if parts.is_empty()
+            && let Some(body) = callback_kind(ctx, inv.callee).and_then(callback_body)
+        {
+            helpers.insert(c.span.start, body);
+        }
         if parts.is_empty()
             && let Some(id) = c.callee.get_identifier_reference()
         {
@@ -153,13 +166,35 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             tests.push((position(), body));
         }
     }
+    report_assertions(tests, &assertions, &helpers, findings);
+}
+
+fn report_assertions(
+    tests: Vec<(usize, oxc::span::Span)>,
+    assertions: &BTreeMap<u32, Option<usize>>,
+    helpers: &BTreeMap<u32, oxc::span::Span>,
+    findings: &mut Findings,
+) {
     let mut at = BTreeSet::new();
     for (start, body) in tests {
-        let mut scope = assertions.range(body.start..body.end).peekable();
-        if scope.peek().is_none() {
-            at.insert(start);
-        } else {
+        let mut pending = vec![body];
+        let mut seen = std::collections::HashSet::new();
+        let mut asserted = false;
+        while let Some(body) = pending.pop() {
+            if !seen.insert(body) {
+                continue;
+            }
+            let mut scope = assertions.range(body.start..body.end).peekable();
+            asserted |= scope.peek().is_some();
             at.extend(scope.filter_map(|(_, &finding)| finding));
+            pending.extend(
+                helpers
+                    .range(body.start..body.end)
+                    .map(|(_, &helper)| helper),
+            );
+        }
+        if !asserted {
+            at.insert(start);
         }
     }
     for pos in at {

@@ -277,6 +277,18 @@ impl Runner<'_> {
     pub(super) fn is_playwright(&self) -> bool {
         self.option_syntax == OptionSyntax::Playwright
     }
+
+    pub(super) fn hook(&self) -> Option<&str> {
+        match self.short()? {
+            [name @ ("beforeEach" | "beforeAll" | "afterEach" | "afterAll")] => Some(name),
+            [
+                "test",
+                name @ ("beforeEach" | "beforeAll" | "afterEach" | "afterAll"),
+            ] if self.is_playwright() => Some(name),
+            [name @ ("before" | "after")] if self.is_node() => Some(name),
+            _ => None,
+        }
+    }
 }
 
 pub(super) enum TestOption<'a> {
@@ -418,19 +430,27 @@ fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
     let mut pending = vec![arg];
     let mut seen = std::collections::HashSet::new();
     while let Some(expr) = pending.pop() {
-        if let Some(id) = unwrapped(expr).get_identifier_reference()
-            && let Some(kind @ (AstKind::VariableDeclarator(_) | AstKind::FormalParameter(_))) =
-                declaration(ctx, id)
-            && super::function_types::direct_binding(kind)
-                .and_then(|binding| binding.annotation)
-                .is_some_and(string_type)
-        {
-            return true;
-        }
-        let value = resolve(ctx, expr);
-        if !seen.insert(value.span()) {
+        let expr = unwrapped(expr);
+        if !seen.insert(expr.span()) {
             continue;
         }
+        if let Some(id) = expr.get_identifier_reference()
+            && let Some(kind @ (AstKind::VariableDeclarator(_) | AstKind::FormalParameter(_))) =
+                declaration(ctx, id)
+            && let Some(binding) = super::function_types::direct_binding(kind)
+        {
+            if binding.annotation.is_some_and(string_type) {
+                return true;
+            }
+            if let Some(init) = binding.initializer
+                && unwrapped(init).get_identifier_reference().is_some()
+                && symbol(ctx, id)
+                    .is_some_and(|s| ctx.semantic.scoping().symbol_flags(s).is_const_variable())
+            {
+                pending.push(init);
+            }
+        }
+        let value = resolve(ctx, expr);
         match value {
             Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => return true,
             Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => {
@@ -530,20 +550,31 @@ impl<'a> Runner<'a> {
     }
 }
 
+pub(super) fn callback_kind<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> Option<AstKind<'a>> {
+    match binding_value(ctx, arg) {
+        Expression::ArrowFunctionExpression(f) => Some(AstKind::ArrowFunctionExpression(f)),
+        Expression::FunctionExpression(f) => Some(AstKind::Function(f)),
+        Expression::Identifier(id) => {
+            declaration(ctx, id).filter(|kind| matches!(kind, AstKind::Function(_)))
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn callback_body(kind: AstKind<'_>) -> Option<oxc::span::Span> {
+    match kind {
+        AstKind::ArrowFunctionExpression(f) => Some(f.body.span()),
+        AstKind::Function(f) => Some(f.body.as_ref()?.span),
+        _ => None,
+    }
+}
+
 impl<'a> Invocation<'a> {
     pub(super) fn test_body(&self, ctx: &TsCtx<'a>) -> Option<oxc::span::Span> {
         self.args
             .iter()
             .flatten()
-            .find_map(|arg| match binding_value(ctx, arg) {
-                Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
-                Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
-                Expression::Identifier(id) => match declaration(ctx, id)? {
-                    AstKind::Function(f) => Some(f.body.as_ref()?.span),
-                    _ => None,
-                },
-                _ => None,
-            })
+            .find_map(|arg| callback_kind(ctx, arg).and_then(callback_body))
     }
 }
 pub(super) fn enclosing_runners<'ctx, 'a>(

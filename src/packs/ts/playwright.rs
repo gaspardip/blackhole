@@ -128,14 +128,11 @@ pub(super) fn canned<'a>(
     if !route(ctx, receiver) {
         return false;
     }
-    let forwarded = super::values::properties(ctx, arg)
-        .and_then(|options| options.named.get("response").copied())
-        .is_some_and(|p| forwarded_response(ctx, receiver, &p.value));
-    let mut pending = vec![(arg, false)];
+    let mut pending = vec![(arg, false, None)];
     let mut seen = HashSet::new();
-    while let Some((e, field)) = pending.pop() {
+    while let Some((e, field, forwarded)) = pending.pop() {
         let e = resolve(ctx, e);
-        if !seen.insert((e.span(), field)) {
+        if !seen.insert((e.span(), field, forwarded)) {
             continue;
         }
         if field
@@ -151,22 +148,30 @@ pub(super) fn canned<'a>(
         }
         match e {
             Expression::ObjectExpression(o) => {
+                let forwarded = forwarded.unwrap_or_else(|| {
+                    super::values::properties(ctx, e)
+                        .and_then(|options| options.named.get("response").copied())
+                        .is_some_and(|p| forwarded_response(ctx, receiver, &p.value))
+                });
                 for p in &o.properties {
                     match p {
-                        ObjectPropertyKind::SpreadProperty(s) => pending.push((&s.argument, false)),
+                        ObjectPropertyKind::SpreadProperty(s) => {
+                            pending.push((&s.argument, false, Some(forwarded)));
+                        }
                         ObjectPropertyKind::ObjectProperty(p)
                             if matches!(
                                 key(ctx, &p.key),
                                 Some("body" | "json" | "status") | None
                             ) || !forwarded && key(ctx, &p.key) == Some("contentType") =>
                         {
-                            pending.push((&p.value, true));
+                            pending.push((&p.value, true, None));
                         }
                         ObjectPropertyKind::ObjectProperty(_) => (),
                     }
                 }
             }
-            _ => pending.extend(super::values::alternatives(e).map(|branch| (branch, field))),
+            _ => pending
+                .extend(super::values::alternatives(e).map(|branch| (branch, field, forwarded))),
         }
     }
     false

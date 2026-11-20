@@ -5,7 +5,8 @@ use oxc::ast::{
     AstKind,
     ast::{Expression, NewExpression},
 };
-use std::collections::{HashMap, HashSet};
+use oxc::syntax::node::NodeId;
+use std::collections::{BTreeMap, HashMap};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
@@ -62,6 +63,90 @@ fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
         .and_then(|id| symbol(ctx, id))
         == Some(resolver)
 }
+
+struct Sleep {
+    function: NodeId,
+    at: usize,
+    test: bool,
+}
+
+#[derive(Default)]
+struct Setup {
+    all: Option<bool>,
+    each: Option<bool>,
+}
+
+fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mut Findings) {
+    let nodes = ctx.semantic.nodes();
+    let mut active = BTreeMap::new();
+    let mut pending = Vec::new();
+    for (id, node) in nodes.iter_enumerated() {
+        if let Some(sleep) = sleeps.get(&id) {
+            pending.push((sleep, active.get(&Some(sleep.function)).copied()));
+        } else if let AstKind::CallExpression(call) = node.kind() {
+            let runner = runner(ctx, &invoked(ctx, call));
+            let next = match runner.short() {
+                Some(["vi", "useRealTimers"]) => false,
+                Some(["vi", "useFakeTimers"])
+                    if matches!(nodes.parent_kind(id), AstKind::ExpressionStatement(_))
+                        && matches!(
+                            nodes.parent_kind(nodes.parent_id(id)),
+                            AstKind::FunctionBody(_) | AstKind::Program(_)
+                        ) =>
+                {
+                    true
+                }
+                _ => continue,
+            };
+            active.insert(
+                enclosing_functions(ctx, id)
+                    .next()
+                    .map(oxc::semantic::AstNode::id),
+                next,
+            );
+        }
+    }
+
+    let mut setups = HashMap::<_, Setup>::new();
+    for (&function, &enabled) in &active {
+        let Some(function) = function else { continue };
+        let Some(call) = enclosing_call(ctx, function) else {
+            continue;
+        };
+        let suite = enclosing_functions(ctx, function)
+            .next()
+            .map(oxc::semantic::AstNode::id);
+        match runner(ctx, &call).hook() {
+            Some("beforeAll") => setups.entry(suite).or_default().all = Some(enabled),
+            Some("beforeEach") => setups.entry(suite).or_default().each = Some(enabled),
+            _ => (),
+        }
+    }
+    for (sleep, local) in pending {
+        let enabled = local
+            .or_else(|| {
+                if !sleep.test {
+                    return None;
+                }
+                let scopes = enclosing_functions(ctx, sleep.function)
+                    .map(|node| Some(node.id()))
+                    .chain(std::iter::once(None));
+                let mut before_all = None;
+                for setup in scopes.filter_map(|scope| setups.get(&scope)) {
+                    if setup.each.is_some() {
+                        return setup.each;
+                    }
+                    before_all = before_all.or(setup.all);
+                }
+                before_all
+            })
+            .or_else(|| active.get(&None).copied());
+        if enabled != Some(true) {
+            findings.report(sleep.at, None);
+        }
+    }
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if super::test_context::test_file(ctx.path) {
         super::values::tracked_uses::report(ctx, RULE.id, findings);
@@ -97,44 +182,20 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             && let Some(call) = enclosing_call(ctx, function.id())
         {
             let owner = runner(ctx, &call);
-            if owner.test()
-                || matches!(
-                    owner.first().copied(),
-                    Some("beforeEach" | "beforeAll" | "afterEach" | "afterAll")
-                )
-                || owner.is_node() && matches!(owner.first().copied(), Some("before" | "after"))
-            {
-                sleeps.insert(id, (function.id(), a.span.start as usize));
+            let test = owner.test() && owner.hook().is_none();
+            if test || owner.hook().is_some() {
+                sleeps.insert(
+                    id,
+                    Sleep {
+                        function: function.id(),
+                        at: a.span.start as usize,
+                        test,
+                    },
+                );
             }
         }
     }
-    if sleeps.is_empty() {
-        return;
-    }
-    let mut active = HashSet::new();
-    for (id, node) in nodes.iter_enumerated() {
-        if let Some(&(function, at)) = sleeps.get(&id) {
-            if !active.contains(&function) {
-                findings.report(at, None);
-            }
-        } else if let AstKind::CallExpression(call) = node.kind()
-            && let Some(function) = enclosing_functions(ctx, id).next()
-        {
-            match runner(ctx, &invoked(ctx, call)).short() {
-                Some(["vi", "useRealTimers"]) => {
-                    active.remove(&function.id());
-                }
-                Some(["vi", "useFakeTimers"])
-                    if matches!(nodes.parent_kind(id), AstKind::ExpressionStatement(_))
-                        && matches!(
-                            nodes.parent_kind(nodes.parent_id(id)),
-                            AstKind::FunctionBody(_)
-                        ) =>
-                {
-                    active.insert(function.id());
-                }
-                _ => (),
-            }
-        }
+    if !sleeps.is_empty() {
+        report_sleeps(ctx, &sleeps, findings);
     }
 }
