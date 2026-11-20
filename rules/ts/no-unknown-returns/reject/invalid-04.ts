@@ -1,0 +1,1 @@
+interface Loader { load(): unknown }

@@ -1,0 +1,30 @@
+[package]
+name = "blackhole-check"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Rules that coding agents cannot talk their way around."
+license = "MIT"
+repository = "https://github.com/gaspardip/blackhole"
+include = ["/src/**/*.rs", "/Cargo.lock", "/README.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md"]
+
+[[bin]]
+name = "blackhole"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+serde_json = "1"
+oxc = { version = "0.158.0", default-features = false, features = ["regular_expression", "semantic"] }

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Everything the check workflow runs. Green here means green there.
+set -eu
+cd "$(dirname "$0")/.."
+# Without rustup nothing applies rust-toolchain.toml, so a newer local Rust would pass here and fail in CI.
+# rustfmt and clippy must come from the same release as rustc; only rustc is checked.
+want="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+have="$(rustc --version | cut -d' ' -f2)"
+if [ "${have}" != "${want}" ]; then
+  echo "bin/check: rustc is ${have}, rust-toolchain.toml pins ${want}" >&2
+  exit 1
+fi
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+python3 -I -m unittest discover -s tools
+cargo run --locked --quiet -- check

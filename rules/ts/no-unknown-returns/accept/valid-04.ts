@@ -1,0 +1,1 @@
+function infer() { return input; }

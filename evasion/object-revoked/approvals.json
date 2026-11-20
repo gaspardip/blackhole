@@ -1,0 +1,17 @@
+{
+  "authors": ["author"],
+  "reviews": [
+    {
+      "login": "peer",
+      "state": "APPROVED",
+      "commit": "HEAD",
+      "permission": "write"
+    },
+    {
+      "login": "PEER",
+      "state": "CHANGES_REQUESTED",
+      "commit": "HEAD",
+      "permission": "write"
+    }
+  ]
+}
