@@ -111,10 +111,12 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 let p = runner(ctx, &call);
                 match api(&p) {
                     Some(Api::Config(keys)) => {
-                        if let Some(arg) = call.arg(0)
-                            && !inspect(ctx, arg, keys, findings)
-                        {
-                            findings.report(arg.span().start as usize, None);
+                        if let Some(arg) = call.arg(0) {
+                            if !inspect(ctx, arg, keys, findings) {
+                                findings.report(arg.span().start as usize, None);
+                            }
+                        } else if let Some(spread) = call.unreadable_args {
+                            findings.report(spread.start as usize, None);
                         }
                     }
                     Some(Api::Slow) => {

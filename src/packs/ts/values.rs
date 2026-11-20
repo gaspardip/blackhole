@@ -272,8 +272,10 @@ pub(super) fn any_value<'a>(
         if matches(value) {
             return true;
         }
-        if let Expression::Identifier(id) = value {
-            pending.extend(live_writes(ctx, id));
+        match value {
+            Expression::Identifier(id) => pending.extend(live_writes(ctx, id)),
+            Expression::ConditionalExpression(c) => pending.extend([&c.consequent, &c.alternate]),
+            _ => (),
         }
     }
     false

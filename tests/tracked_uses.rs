@@ -516,3 +516,57 @@ fn review_r14_forwarded_route_response_metadata() {
         &[],
     );
 }
+
+#[test]
+fn review_r01_bare_expect_without_matcher() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"test("x", () => { expect(read()); })"#,
+        &["ts/no-assertionless-tests"],
+    );
+}
+
+#[test]
+fn review_r03_node_context_skip_and_todo() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "node:test"; import assert from "node:assert/strict"; test("x", t => { t.skip(); assert.equal(read(), 1); }); test("todo", t => { t.todo(); assert.equal(read(), 1); });"#,
+        &["ts/no-skipped-tests", "ts/no-skipped-tests"],
+    );
+}
+
+#[test]
+fn review_r04_conditional_call_targets() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"const run = disabled ? test.skip : test; run("x", () => assert(read())); const create = fake ? vi.fn : factory; create(() => 1);"#,
+        &["ts/no-skipped-tests", "ts/no-test-doubles"],
+    );
+}
+
+#[test]
+fn review_r05_fake_timers_do_not_leak_between_tests() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"test("timer control", () => { vi.useFakeTimers(); vi.useRealTimers(); assert(read()); }); test("real sleep", async () => { await new Promise(r => setTimeout(r, 10)); assert(read()); });"#,
+        &["ts/no-fixed-sleep"],
+    );
+}
+
+#[test]
+fn review_r07_unreadable_config_spread() {
+    assert_review_rules(
+        "case.test.ts",
+        "vi.setConfig(...configArgs())",
+        &["ts/no-flake-masking"],
+    );
+}
+
+#[test]
+fn review_r08_playwright_page_fixture_route() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "@playwright/test"; test("x", async ({page}) => { await page.route("**/api", route => route.fulfill({ json: { success: true } })); assert(read()); });"#,
+        &["ts/no-test-doubles"],
+    );
+}

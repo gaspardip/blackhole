@@ -22,6 +22,24 @@ fn body_skip<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<usize> {
     }
     super::values::resolves_to_global(ctx, e, "pending").then_some(e.span().start as usize)
 }
+
+fn node_context_skip<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<usize> {
+    use super::values::{member_span, receiver, resolve, symbol};
+    let (owner, "skip" | "todo") = receiver(ctx, callee)? else {
+        return None;
+    };
+    let id = resolve(ctx, owner).get_identifier_reference()?;
+    let (parameter, runner) = super::test_context::test_callback_parameter(ctx, symbol(ctx, id)?)?;
+    if !runner.is_node() || parameter.pattern.get_binding_identifier().is_none() {
+        return None;
+    }
+    Some(
+        callee
+            .get_member_expr()
+            .map_or_else(|| callee.span(), |m| member_span(ctx, m))
+            .start as usize,
+    )
+}
 fn truthy<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<bool> {
     match super::values::resolve(ctx, value) {
         Expression::BooleanLiteral(v) => Some(v.value),
@@ -104,6 +122,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 })
         {
             Some(call.callee.span().start as usize)
+        } else if let Some(at) = node_context_skip(ctx, call.callee) {
+            Some(at)
         } else if is_test_file
             && let Some(at) = body_skip(ctx, call.callee)
             && enclosing_runners(ctx, id).any(|r| r.test())

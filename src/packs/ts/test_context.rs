@@ -269,6 +269,14 @@ impl Runner<'_> {
             Some("xit" | "xtest" | "xdescribe" | "fit" | "fdescribe")
         )
     }
+
+    pub(super) fn is_node(&self) -> bool {
+        self.option_syntax == OptionSyntax::Node
+    }
+
+    pub(super) fn is_playwright(&self) -> bool {
+        self.option_syntax == OptionSyntax::Playwright
+    }
 }
 
 pub(super) enum TestOption<'a> {
@@ -542,4 +550,33 @@ pub(super) fn enclosing_runners<'ctx, 'a>(
         super::values::enclosing_call(ctx, f.id())
             .map_or_else(Runner::default, |call| runner(ctx, &call))
     })
+}
+
+pub(super) fn test_callback_parameter<'a>(
+    ctx: &TsCtx<'a>,
+    symbol: oxc::syntax::symbol::SymbolId,
+) -> Option<(&'a oxc::ast::ast::FormalParameter<'a>, Runner<'a>)> {
+    let declaration = ctx.semantic.symbol_declaration(symbol);
+    let function = super::values::enclosing_functions(ctx, declaration.id()).next()?;
+    let params = match function.kind() {
+        AstKind::Function(f) => &f.params,
+        AstKind::ArrowFunctionExpression(f) => &f.params,
+        _ => return None,
+    };
+    let parameter = params.items.first()?;
+    if !parameter
+        .pattern
+        .any_binding_identifiers(&mut |id| id.symbol_id.get() == Some(symbol))
+    {
+        return None;
+    }
+    let call = super::values::enclosing_call(ctx, function.id())?;
+    let runner = runner(ctx, &call);
+    (runner.test()
+        && call
+            .args
+            .iter()
+            .flatten()
+            .any(|arg| resolve(ctx, arg).span() == function.span()))
+    .then_some((parameter, runner))
 }

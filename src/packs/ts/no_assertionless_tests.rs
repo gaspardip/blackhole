@@ -114,15 +114,24 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             ) {
                 continue;
             }
-            let bare_literal = parts == ["expect"]
-                && inv
-                    .arg(0)
-                    .is_some_and(|value| literal(super::values::resolve(ctx, value)))
-                && super::values::outer(ctx, n.id())
-                    .and_then(|kind| kind.as_member_expression_kind())
-                    .is_none();
+            if matches!(
+                parts.short(),
+                Some(["expect"] | ["expect", "soft" | "poll"])
+            ) {
+                if parts == ["expect"]
+                    && inv
+                        .arg(0)
+                        .is_some_and(|value| literal(super::values::resolve(ctx, value)))
+                    && super::values::outer(ctx, n.id())
+                        .and_then(|kind| kind.as_member_expression_kind())
+                        .is_none()
+                {
+                    assertions.insert(c.span.start, Some(position()));
+                }
+                continue;
+            }
             let finding = assertions.entry(c.span.start).or_default();
-            if bare_literal || tautology(ctx, &inv, parts) {
+            if tautology(ctx, &inv, parts) {
                 *finding = Some(position());
             }
         }

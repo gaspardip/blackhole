@@ -147,7 +147,9 @@ pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool
         let origin = super::values::origin_path(ctx, call.callee).map(|(origin, _)| origin);
         return framework_path(ctx, call, origin, parts);
     }
-    super::values::receiver(ctx, call.callee).is_some_and(|(owner, method)| {
+    super::values::any_assigned_path(ctx, call.callee, |origin, path| {
+        framework_path(ctx, call, Some(origin), path)
+    }) || super::values::receiver(ctx, call.callee).is_some_and(|(owner, method)| {
         super::values::any_assigned_path(ctx, owner, |origin, path| {
             let mut parts = path.to_vec();
             parts.push(method);

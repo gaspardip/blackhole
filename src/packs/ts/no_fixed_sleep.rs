@@ -1,9 +1,11 @@
-use super::test_context::{enclosing_runners, single_effect};
+use super::test_context::{runner, single_effect};
+use super::values::{enclosing_call, enclosing_functions, invoked};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{Expression, NewExpression},
 };
+use std::collections::{HashMap, HashSet};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
@@ -65,7 +67,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         super::values::tracked_uses::report(ctx, RULE.id, findings);
     }
     let nodes = ctx.semantic.nodes();
-    let mut sleeps = Vec::new();
+    let mut sleeps = HashMap::new();
     for (id, n) in nodes.iter_enumerated() {
         let AstKind::AwaitExpression(a) = n.kind() else {
             continue;
@@ -91,29 +93,47 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             })
         };
         if sleep
-            && enclosing_runners(ctx, id).next().is_some_and(|owner| {
-                owner.test()
-                    || matches!(
-                        owner.first().copied(),
-                        Some("beforeEach" | "beforeAll" | "afterEach" | "afterAll")
-                    )
-            })
+            && let Some(function) = enclosing_functions(ctx, id).next()
+            && let Some(call) = enclosing_call(ctx, function.id())
         {
-            sleeps.push(a.span.start as usize);
+            let owner = runner(ctx, &call);
+            if owner.test()
+                || matches!(
+                    owner.first().copied(),
+                    Some("beforeEach" | "beforeAll" | "afterEach" | "afterAll")
+                )
+            {
+                sleeps.insert(id, (function.id(), a.span.start as usize));
+            }
         }
     }
     if sleeps.is_empty() {
         return;
     }
-    if nodes.iter().any(|n| {
-        let AstKind::CallExpression(c) = n.kind() else {
-            return false;
-        };
-        super::test_context::runner(ctx, &super::values::invoked(ctx, c)) == ["vi", "useFakeTimers"]
-    }) {
-        return;
-    }
-    for at in sleeps {
-        findings.report(at, None);
+    let mut active = HashSet::new();
+    for (id, node) in nodes.iter_enumerated() {
+        if let Some(&(function, at)) = sleeps.get(&id) {
+            if !active.contains(&function) {
+                findings.report(at, None);
+            }
+        } else if let AstKind::CallExpression(call) = node.kind()
+            && let Some(function) = enclosing_functions(ctx, id).next()
+        {
+            match runner(ctx, &invoked(ctx, call)).short() {
+                Some(["vi", "useRealTimers"]) => {
+                    active.remove(&function.id());
+                }
+                Some(["vi", "useFakeTimers"])
+                    if matches!(nodes.parent_kind(id), AstKind::ExpressionStatement(_))
+                        && matches!(
+                            nodes.parent_kind(nodes.parent_id(id)),
+                            AstKind::FunctionBody(_)
+                        ) =>
+                {
+                    active.insert(function.id());
+                }
+                _ => (),
+            }
+        }
     }
 }

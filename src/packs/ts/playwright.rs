@@ -3,7 +3,7 @@ use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{Expression, ObjectPropertyKind, TSType, TSTypeName},
+        ast::{BindingPattern, Expression, ObjectPropertyKind, TSType, TSTypeName},
     },
     span::GetSpan,
 };
@@ -45,6 +45,23 @@ fn typed<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
 fn browser_engine(parts: &[&str]) -> bool {
     matches!(parts,[source,"chromium"|"firefox"|"webkit"] if library(source))
 }
+fn page_fixture(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
+    let Some(symbol) = value
+        .get_identifier_reference()
+        .and_then(|id| super::values::symbol(ctx, id))
+    else {
+        return false;
+    };
+    let Some((param, runner)) = super::test_context::test_callback_parameter(ctx, symbol) else {
+        return false;
+    };
+    let BindingPattern::ObjectPattern(pattern) = &param.pattern else {
+        return false;
+    };
+    runner.is_playwright()
+        && super::values::destructured(ctx, pattern, |id| id.symbol_id.get() == Some(symbol))
+            == Some("page")
+}
 fn page<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let mut pending = vec![initial];
     let mut seen = HashSet::new();
@@ -57,7 +74,8 @@ fn page<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
             ctx,
             e,
             &["Page", "BrowserContext", "Browser", "BrowserType"],
-        ) || path(ctx, e).is_some_and(|p| browser_engine(&p))
+        ) || page_fixture(ctx, e)
+            || path(ctx, e).is_some_and(|p| browser_engine(&p))
         {
             return true;
         }
