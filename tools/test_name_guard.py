@@ -624,6 +624,49 @@ class Event(Repo):
         self.assertEqual(self.pull_request(head="0" * 40).returncode, 2)
         self.assertEqual(run(["event"], self.dir).returncode, 2)
 
+    def test_review_text_is_scanned_for_writers_only(self) -> None:
+        events = (
+            ("pull_request_review_comment", "comment", ("created", "edited")),
+            ("pull_request_review", "review", ("submitted", "edited")),
+        )
+        for event, item, actions in events:
+            for action in actions:
+                for association, expected in (("OWNER", 1), ("NONE", 0)):
+                    with self.subTest(event=event, action=action, association=association):
+                        payload = {
+                            "action": action,
+                            item: {"author_association": association, "body": "Quokka"},
+                        }
+                        done = self.event(event, payload)
+                        self.assertEqual(done.returncode, expected, done.stderr)
+                        self.assertNotIn("Quokka", done.stdout + done.stderr)
+        approval = {"action": "submitted", "review": {"author_association": "OWNER", "body": None}}
+        self.assertEqual(self.event("pull_request_review", approval).returncode, 0)
+
+    def test_push_event_rejects_invalid_refs_and_two_zero_tips(self) -> None:
+        valid = {"ref": "refs/heads/main", "before": self.base, "after": self.base}
+        zero = "0" * 40
+        invalid = (
+            valid | {"ref": ""},
+            valid | {"ref": "refs/pull/7/head"},
+            valid | {"ref": "refs/heads/"},
+            valid | {"before": zero, "after": zero},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                done = self.event("push", payload)
+                self.assertEqual(done.returncode, 2, done.stderr)
+
+    def test_git_ref_records_keep_unicode_line_separators(self) -> None:
+        ref = "refs/heads/quo\u2028kka"
+        git(self.dir, "update-ref", ref, self.base)
+        line = f"{ref} {self.base} refs/heads/destination {'0' * 40}\n"
+        scans = {"schedule": self.event("schedule", {}), "pre-push": run(["push"], self.dir, stdin=line)}
+        for scan, done in scans.items():
+            with self.subTest(scan=scan):
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertIn("banned name #1", done.stderr)
+
 
 class Errors(Repo):
     def test_a_git_failure_does_not_echo_its_input(self) -> None:

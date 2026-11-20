@@ -16,6 +16,7 @@ import sys
 import traceback
 import unicodedata
 from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -32,6 +33,8 @@ LIST = ("ls-tree", "-r", "-t", "-z")
 # The `types` of the workflow. Any other action means the two files disagree.
 ACTIONS = {
     "pull_request_target": {"opened", "edited", "reopened", "synchronize"},
+    "pull_request_review_comment": {"created", "edited"},
+    "pull_request_review": {"submitted", "edited"},
     "issues": {"opened", "edited"},
     "issue_comment": {"created", "edited"},
     "release": {"created", "edited", "published"},
@@ -249,8 +252,8 @@ class Guard:
 
     def everything(self) -> None:
         listed = decode(git("for-each-ref", "--format=%(objectname) %(refname)"))
-        for line in listed.splitlines():
-            target, ref = line.split(" ", 1)
+        for line in StringIO(listed, newline="\n"):
+            target, ref = line.removesuffix("\n").split(" ", 1)
             self.name("ref", ref)
             self.target(ref, target)
         self.commits("--all")
@@ -281,6 +284,11 @@ class Guard:
             case "push":
                 ref = string(payload["ref"])
                 before, after = object_id(payload["before"]), object_id(payload["after"])
+                if not ref.startswith(("refs/heads/", "refs/tags/")) or (
+                    ZERO.fullmatch(before) and ZERO.fullmatch(after)
+                ):
+                    raise invalid_event()
+                git("check-ref-format", ref)
                 self.update_ref(ref, before, after)
             case "pull_request_target":
                 pull = payload["pull_request"]
@@ -297,9 +305,11 @@ class Guard:
                     self.update_ref(string(head["ref"]), object_id(pull["base"]["sha"]), tip)
             case "issues":
                 self.written(payload["issue"], "issue", title=string, body=optional)
-            case "issue_comment":
-                # The issue a comment sits on can be a stranger's, so only the comment is scanned.
+            case "issue_comment" | "pull_request_review_comment":
+                # The issue or pull request under a comment can be a stranger's.
                 self.written(payload["comment"], "comment", body=string)
+            case "pull_request_review":
+                self.written(payload["review"], "review", body=optional)
             case "release":
                 release = payload["release"]
                 self.scan("release name", optional(release["name"]))
@@ -312,8 +322,8 @@ class Guard:
                 raise CannotRun("no scan is defined for this event")
 
     def push(self, lines: str) -> None:
-        for line in lines.splitlines():
-            local_ref, local_sha, remote_ref, remote_sha = line.split()
+        for line in StringIO(lines, newline="\n"):
+            local_ref, local_sha, remote_ref, remote_sha = line.removesuffix("\n").split(" ")
             self.update_ref(remote_ref, remote_sha, local_sha, local_ref=local_ref)
 
 
