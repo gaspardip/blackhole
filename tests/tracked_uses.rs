@@ -921,3 +921,43 @@ fn round3_r06_warning_then_bare_return() {
         &["ts/strict-msw"],
     );
 }
+
+#[test]
+fn round4_r30_first_test_precedes_timer_restore() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"beforeAll(() => { vi.useFakeTimers(); }); afterEach(() => { vi.useRealTimers(); }); test("timer", async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; assert(read()); });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round4_r31_before_all_precedes_timer_restore() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"vi.useFakeTimers(); beforeAll(async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; }); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read()));"#,
+        &[],
+    );
+    assert_review_rules(
+        "case.test.ts",
+        r#"vi.useFakeTimers(); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read())); beforeAll(async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; });"#,
+        &[],
+    );
+}
+
+#[test]
+fn round4_timer_hooks_use_test_run_points() {
+    for hook in ["beforeEach", "afterEach"] {
+        let first = format!(
+            r#"vi.useFakeTimers(); {hook}(async () => {{ await scheduler.wait(10); }}); afterEach(() => vi.useRealTimers()); test("first", () => assert(read()));"#
+        );
+        assert_review_rules("case.test.ts", &first, &[]);
+        let second = format!(r#"{first} test("second", () => assert(read()));"#);
+        assert_review_rules("case.test.ts", &second, &["ts/no-fixed-sleep"]);
+    }
+    assert_review_rules(
+        "case.test.ts",
+        r#"vi.useFakeTimers(); afterAll(async () => { await scheduler.wait(10); }); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read()));"#,
+        &["ts/no-fixed-sleep"],
+    );
+}

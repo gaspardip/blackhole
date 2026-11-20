@@ -5,8 +5,11 @@ use oxc::ast::{
     AstKind,
     ast::{Expression, NewExpression},
 };
-use oxc::syntax::node::NodeId;
-use std::collections::HashMap;
+use oxc::{
+    span::{GetSpan, Span},
+    syntax::node::NodeId,
+};
+use std::collections::{BTreeSet, HashMap};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
@@ -76,42 +79,106 @@ struct Setup {
     restores_after_each: bool,
 }
 
+fn enclosing_suites<'ctx>(
+    ctx: &'ctx TsCtx<'_>,
+    at: NodeId,
+) -> impl Iterator<Item = Option<NodeId>> + 'ctx {
+    enclosing_functions(ctx, at)
+        .map(|node| Some(node.id()))
+        .chain(std::iter::once(None))
+}
+
+#[derive(Default)]
+struct TestOrder {
+    last: HashMap<Option<NodeId>, u32>,
+    restores: BTreeSet<u32>,
+}
+
+impl TestOrder {
+    fn record(
+        &mut self,
+        ctx: &TsCtx<'_>,
+        setups: &HashMap<Option<NodeId>, Setup>,
+        at: NodeId,
+        start: u32,
+    ) {
+        for suite in enclosing_suites(ctx, at) {
+            let last = self.last.entry(suite).or_default();
+            *last = (*last).max(start);
+            if setups
+                .get(&suite)
+                .is_some_and(|setup| setup.restores_after_each)
+            {
+                self.restores.insert(start);
+            }
+        }
+    }
+}
+
 fn setup_timers(
     ctx: &TsCtx<'_>,
-    site: CallbackSite<'_>,
+    callback: CallbackSite<'_>,
     setups: &HashMap<Option<NodeId>, Setup>,
-) -> Option<bool> {
-    let test = site.test();
-    let scopes = enclosing_functions(ctx, site.at)
-        .map(|node| Some(node.id()))
-        .chain(std::iter::once(None));
-    let mut before_all = None;
-    let mut restores_after_each = false;
-    for setup in scopes.filter_map(|scope| setups.get(&scope)) {
-        if test {
-            if let Some((_, enabled)) = setup.each {
-                return Some(enabled);
-            }
-            before_all = before_all.or(setup.all.map(|(_, enabled)| enabled));
+    order: &TestOrder,
+    file_timers: bool,
+) -> bool {
+    let mut suites = enclosing_suites(ctx, callback.at);
+    let suite = suites.next().flatten();
+    let extent = |scope: Option<NodeId>| {
+        scope.map_or(Span::new(0, u32::MAX), |id| {
+            ctx.semantic.nodes().get_node(id).span()
+        })
+    };
+    let point = match callback.runner.hook() {
+        Some("beforeAll" | "before") => extent(suite).start,
+        Some("afterAll" | "after") => extent(suite).end,
+        // The last run can observe every restore that precedes a per-test hook.
+        Some("beforeEach" | "afterEach") => {
+            order.last.get(&suite).copied().unwrap_or(callback.start)
         }
-        restores_after_each |= setup.restores_after_each;
+        _ => callback.start,
+    };
+    let mut before_all = None;
+    for scope in std::iter::once(suite).chain(suites) {
+        let Some(setup) = setups.get(&scope) else {
+            continue;
+        };
+        if callback.test()
+            && let Some((_, enabled)) = setup.each
+        {
+            return enabled;
+        }
+        if before_all.is_none()
+            && let Some((_, enabled)) = setup.all
+        {
+            let start = extent(scope).start;
+            if start < point {
+                before_all = Some((start, enabled));
+            }
+        }
     }
-    if restores_after_each {
-        Some(false)
-    } else {
-        before_all
-    }
+    let (installed, enabled) = before_all.unwrap_or((0, file_timers));
+    enabled && order.restores.range(installed..point).next().is_none()
 }
 
 fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
     let mut active = HashMap::new();
     let mut pending = Vec::new();
+    let mut tests = Vec::new();
     for (id, node) in nodes.iter_enumerated() {
         if let Some(sleep) = sleeps.get(&id) {
             pending.push((sleep, active.get(&Some(sleep.function)).copied()));
         } else if let AstKind::CallExpression(call) = node.kind() {
-            let runner = runner(ctx, &invoked(ctx, call));
+            let invocation = invoked(ctx, call);
+            let runner = runner(ctx, &invocation);
+            if runner.test()
+                && runner.hook().is_none()
+                && !matches!(runner.last, Some("skip" | "todo" | "fixme"))
+                && (runner.first().copied() == runner.last || invocation.test_body(ctx).is_some())
+            {
+                tests.push((id, invocation.span.start));
+            }
             let next = match runner.short() {
                 Some(["vi", "useRealTimers"]) => false,
                 Some(["vi", "useFakeTimers"])
@@ -155,14 +222,16 @@ fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mu
             }
         }
     }
+    let mut order = TestOrder::default();
+    for (at, start) in tests {
+        order.record(ctx, &setups, at, start);
+    }
+    let file_timers = active.get(&None) == Some(&true);
     for (sleep, local) in pending {
         let enabled = local.unwrap_or_else(|| {
             callback_sites(ctx, sleep.function)
                 .filter(|site| site.test() || site.runner.hook().is_some())
-                .all(|site| {
-                    setup_timers(ctx, site, &setups).or_else(|| active.get(&None).copied())
-                        == Some(true)
-                })
+                .all(|site| setup_timers(ctx, site, &setups, &order, file_timers))
         });
         if !enabled {
             findings.report(sleep.at, None);
