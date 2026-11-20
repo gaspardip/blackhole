@@ -1,4 +1,6 @@
-use super::test_context::{Runner, TestOption, enclosing_runners, runner};
+use super::test_context::{
+    Runner, TestOption, callback_kind, enclosing_runners, returned_values, runner,
+};
 use super::values::{Origin, Properties, origin_path, properties, resolve};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
@@ -54,7 +56,14 @@ pub(super) fn api(runner: &Runner<'_>) -> Option<Api> {
 }
 
 fn config_retries<'a>(ctx: &TsCtx<'a>, root: &'a Expression<'a>, findings: &mut Findings) {
-    let mut pending = vec![root];
+    let mut pending = Vec::new();
+    match callback_kind(ctx, root) {
+        Some(AstKind::ArrowFunctionExpression(f)) if let Some(value) = f.body.as_expression() => {
+            pending.push(value);
+        }
+        Some(callback) => returned_values(ctx, callback.node_id(), &mut pending),
+        None => pending.push(root),
+    }
     let mut seen = std::collections::HashSet::new();
     while let Some(value) = pending.pop() {
         let value = resolve(ctx, value);

@@ -1,12 +1,12 @@
-use super::test_context::{runner, single_effect};
-use super::values::{enclosing_call, enclosing_functions, invoked};
+use super::test_context::{CallbackSite, callback_sites, runner, single_effect};
+use super::values::{enclosing_functions, invoked};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{Expression, NewExpression},
 };
 use oxc::syntax::node::NodeId;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
@@ -67,18 +67,38 @@ fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
 struct Sleep {
     function: NodeId,
     at: usize,
-    test: bool,
 }
 
 #[derive(Default)]
 struct Setup {
-    all: Option<bool>,
-    each: Option<bool>,
+    all: Option<(NodeId, bool)>,
+    each: Option<(NodeId, bool)>,
+}
+
+fn setup_timers(
+    ctx: &TsCtx<'_>,
+    site: CallbackSite<'_>,
+    setups: &HashMap<Option<NodeId>, Setup>,
+) -> Option<bool> {
+    if !site.test() {
+        return None;
+    }
+    let scopes = enclosing_functions(ctx, site.at)
+        .map(|node| Some(node.id()))
+        .chain(std::iter::once(None));
+    let mut before_all = None;
+    for setup in scopes.filter_map(|scope| setups.get(&scope)) {
+        if let Some((_, enabled)) = setup.each {
+            return Some(enabled);
+        }
+        before_all = before_all.or(setup.all.map(|(_, enabled)| enabled));
+    }
+    before_all
 }
 
 fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
-    let mut active = BTreeMap::new();
+    let mut active = HashMap::new();
     let mut pending = Vec::new();
     for (id, node) in nodes.iter_enumerated() {
         if let Some(sleep) = sleeps.get(&id) {
@@ -110,38 +130,30 @@ fn report_sleeps(ctx: &TsCtx<'_>, sleeps: &HashMap<NodeId, Sleep>, findings: &mu
     let mut setups = HashMap::<_, Setup>::new();
     for (&function, &enabled) in &active {
         let Some(function) = function else { continue };
-        let Some(call) = enclosing_call(ctx, function) else {
-            continue;
-        };
-        let suite = enclosing_functions(ctx, function)
-            .next()
-            .map(oxc::semantic::AstNode::id);
-        match runner(ctx, &call).hook() {
-            Some("beforeAll") => setups.entry(suite).or_default().all = Some(enabled),
-            Some("beforeEach") => setups.entry(suite).or_default().each = Some(enabled),
-            _ => (),
+        for site in callback_sites(ctx, function) {
+            let suite = enclosing_functions(ctx, site.at)
+                .next()
+                .map(oxc::semantic::AstNode::id);
+            let setup = match site.runner.hook() {
+                Some("beforeAll") => &mut setups.entry(suite).or_default().all,
+                Some("beforeEach") => &mut setups.entry(suite).or_default().each,
+                _ => continue,
+            };
+            if setup.is_none_or(|(at, _)| at < site.at) {
+                *setup = Some((site.at, enabled));
+            }
         }
     }
     for (sleep, local) in pending {
-        let enabled = local
-            .or_else(|| {
-                if !sleep.test {
-                    return None;
-                }
-                let scopes = enclosing_functions(ctx, sleep.function)
-                    .map(|node| Some(node.id()))
-                    .chain(std::iter::once(None));
-                let mut before_all = None;
-                for setup in scopes.filter_map(|scope| setups.get(&scope)) {
-                    if setup.each.is_some() {
-                        return setup.each;
-                    }
-                    before_all = before_all.or(setup.all);
-                }
-                before_all
-            })
-            .or_else(|| active.get(&None).copied());
-        if enabled != Some(true) {
+        let enabled = local.unwrap_or_else(|| {
+            callback_sites(ctx, sleep.function)
+                .filter(|site| site.test() || site.runner.hook().is_some())
+                .all(|site| {
+                    setup_timers(ctx, site, &setups).or_else(|| active.get(&None).copied())
+                        == Some(true)
+                })
+        });
+        if !enabled {
             findings.report(sleep.at, None);
         }
     }
@@ -179,20 +191,16 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         if sleep
             && let Some(function) = enclosing_functions(ctx, id).next()
-            && let Some(call) = enclosing_call(ctx, function.id())
+            && callback_sites(ctx, function.id())
+                .any(|site| site.test() || site.runner.hook().is_some())
         {
-            let owner = runner(ctx, &call);
-            let test = owner.test() && owner.hook().is_none();
-            if test || owner.hook().is_some() {
-                sleeps.insert(
-                    id,
-                    Sleep {
-                        function: function.id(),
-                        at: a.span.start as usize,
-                        test,
-                    },
-                );
-            }
+            sleeps.insert(
+                id,
+                Sleep {
+                    function: function.id(),
+                    at: a.span.start as usize,
+                },
+            );
         }
     }
     if !sleeps.is_empty() {

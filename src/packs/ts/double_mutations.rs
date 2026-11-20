@@ -7,7 +7,7 @@ use oxc::ast::{
     AstKind,
     ast::{
         AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, Expression,
-        MemberExpression,
+        IdentifierReference, MemberExpression,
     },
 };
 
@@ -16,6 +16,10 @@ fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<fn(&str) -> b
 }
 fn protected_member<'a>(ctx: &TsCtx<'a>, m: &'a MemberExpression<'a>) -> bool {
     native(ctx, m.object()).is_some_and(|protected| MemberKeys(ctx).read(m).is_none_or(protected))
+}
+
+fn protected_identifier(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> bool {
+    ctx.semantic.is_reference_to_global_variable(id) && protected_global(id.name.as_str())
 }
 
 fn assignment_writes<'a>(ctx: &TsCtx<'a>, root: &'a AssignmentTarget<'a>) -> bool {
@@ -29,9 +33,7 @@ fn assignment_writes<'a>(ctx: &TsCtx<'a>, root: &'a AssignmentTarget<'a>) -> boo
     while let Some(next) = pending.pop() {
         match next {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                if ctx.semantic.is_reference_to_global_variable(id)
-                    && protected_global(id.name.as_str())
-                {
+                if protected_identifier(ctx, id) {
                     return true;
                 }
             }
@@ -41,17 +43,18 @@ fn assignment_writes<'a>(ctx: &TsCtx<'a>, root: &'a AssignmentTarget<'a>) -> boo
             }
             AssignmentTarget::ObjectAssignmentTarget(object) => {
                 pending.extend(object.rest.iter().map(|rest| &rest.target));
-                pending.extend(
-                    object
-                        .properties
-                        .iter()
-                        .filter_map(|property| match property {
-                            AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
-                                target(&p.binding)
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                            pending.extend(target(&p.binding));
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
+                            if protected_identifier(ctx, &p.binding) {
+                                return true;
                             }
-                            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(_) => None,
-                        }),
-                );
+                        }
+                    }
+                }
             }
             target => {
                 if target

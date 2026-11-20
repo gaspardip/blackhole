@@ -1,4 +1,7 @@
-use super::values::{Origin, declaration, origin_path, resolve};
+use super::{
+    test_context::returned_values,
+    values::{Origin, declaration, origin_path, resolve},
+};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -6,7 +9,6 @@ use oxc::{
         ast::{ArrowFunctionBody, Expression, ObjectProperty},
     },
     span::GetSpan,
-    syntax::node::NodeId,
 };
 use std::collections::HashSet;
 
@@ -25,19 +27,6 @@ pub(super) fn config(path: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         })
-}
-
-fn returns<'a>(ctx: &TsCtx<'a>, function: NodeId, pending: &mut Vec<&'a Expression<'a>>) {
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
-        if let AstKind::ReturnStatement(ret) = node.kind()
-            && let Some(arg) = &ret.argument
-            && super::values::enclosing_functions(ctx, id)
-                .next()
-                .is_some_and(|n| n.id() == function)
-        {
-            pending.push(arg);
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -89,12 +78,16 @@ fn raw_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, kinds: ResponseK
             }
             Expression::Identifier(id) => {
                 if let Some(AstKind::Function(f)) = declaration(ctx, id) {
-                    returns(ctx, f.node_id.get(), &mut pending);
+                    returned_values(ctx, f.node_id.get(), &mut pending);
                 }
             }
-            Expression::FunctionExpression(f) => returns(ctx, f.node_id.get(), &mut pending),
+            Expression::FunctionExpression(f) => {
+                returned_values(ctx, f.node_id.get(), &mut pending);
+            }
             Expression::ArrowFunctionExpression(f) => match &f.body {
-                ArrowFunctionBody::FunctionBody(_) => returns(ctx, f.node_id.get(), &mut pending),
+                ArrowFunctionBody::FunctionBody(_) => {
+                    returned_values(ctx, f.node_id.get(), &mut pending);
+                }
                 body => pending.extend(body.as_expression()),
             },
             _ => pending.extend(super::values::alternatives(expr)),

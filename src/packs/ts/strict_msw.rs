@@ -1,7 +1,7 @@
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{ArrowFunctionBody, Expression, FormalParameters, Statement},
+    ast::{ArrowFunctionBody, BindingPattern, Expression, FormalParameters, Statement},
 };
 
 pub(crate) const RULE: Rule = Rule {
@@ -59,33 +59,39 @@ fn starts(factory: Option<Factory>, key: &str) -> bool {
 
 fn warning_call<'a>(
     ctx: &TsCtx<'a>,
-    params: &FormalParameters<'_>,
+    params: &'a FormalParameters<'a>,
     expr: &'a Expression<'a>,
 ) -> bool {
-    use super::values::{Origin, call_expr, invoked, origin_path, receiver, resolve, symbol};
+    use super::values::{
+        Origin, call_expr, destructured, invoked, origin_path, receiver, resolve, symbol,
+    };
     let Some(call) = call_expr(resolve(ctx, expr)) else {
         return false;
     };
     let callee = invoked(ctx, call).callee;
     if origin_path(ctx, callee).is_some_and(|(origin, path)| {
-        origin == Origin::Global && matches!(path.as_slice(), ["console", "warn" | "log" | "info"])
+        origin == Origin::Global && matches!(path.as_slice(), ["console", _])
     }) {
         return true;
     }
-    let Some((owner, "warning")) = receiver(ctx, callee) else {
+    let Some(print) = params.items.get(1) else {
         return false;
     };
-    let print = params
-        .items
-        .get(1)
-        .and_then(|param| param.pattern.get_binding_identifier())
-        .and_then(|id| id.symbol_id.get());
-    print.is_some_and(|print| {
-        resolve(ctx, owner)
+    let binding = |value| {
+        resolve(ctx, value)
             .get_identifier_reference()
             .and_then(|id| symbol(ctx, id))
-            == Some(print)
-    })
+    };
+    match &print.pattern {
+        BindingPattern::BindingIdentifier(id) => id.symbol_id.get().is_some_and(|print| {
+            receiver(ctx, callee)
+                .is_some_and(|(owner, method)| method == "warning" && binding(owner) == Some(print))
+        }),
+        BindingPattern::ObjectPattern(pattern) => binding(callee).is_some_and(|warning| {
+            destructured(ctx, pattern, |id| id.symbol_id.get() == Some(warning)) == Some("warning")
+        }),
+        _ => false,
+    }
 }
 
 fn empty_or_warning_only<'a>(ctx: &TsCtx<'a>, callback: &'a Expression<'a>) -> bool {
@@ -102,8 +108,13 @@ fn empty_or_warning_only<'a>(ctx: &TsCtx<'a>, callback: &'a Expression<'a>) -> b
         _ => return false,
     };
     body.is_some_and(|body| {
-        body.statements.iter().all(|statement| {
-            matches!(statement, Statement::ExpressionStatement(s) if warning_call(ctx, params, &s.expression))
+        body.statements.iter().all(|statement| match statement {
+            Statement::ExpressionStatement(s) => warning_call(ctx, params, &s.expression),
+            Statement::ReturnStatement(s) => s
+                .argument
+                .as_ref()
+                .is_some_and(|expr| warning_call(ctx, params, expr)),
+            _ => false,
         })
     })
 }

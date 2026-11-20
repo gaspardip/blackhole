@@ -29,10 +29,9 @@ fn node_context_skip<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> Option<
         return None;
     };
     let id = resolve(ctx, owner).get_identifier_reference()?;
-    let (parameter, runner) = super::test_context::test_callback_parameter(ctx, symbol(ctx, id)?)?;
-    if !runner.is_node() || parameter.pattern.get_binding_identifier().is_none() {
-        return None;
-    }
+    let parameter =
+        super::test_context::test_callback_parameter(ctx, symbol(ctx, id)?, Runner::is_node)?;
+    parameter.pattern.get_binding_identifier()?;
     Some(
         callee
             .get_member_expr()

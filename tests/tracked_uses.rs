@@ -787,3 +787,75 @@ fn round2_r10_node_string_title_alias() {
         &[],
     );
 }
+
+#[test]
+fn round2_r20_config_callback_return() {
+    assert_review_rules(
+        "vitest.config.ts",
+        r#"import {defineConfig} from "vitest/config"; export default defineConfig(() => ({test: {retry: 2}}));"#,
+        &["ts/no-flake-masking"],
+    );
+}
+
+#[test]
+fn round2_r20_config_block_return() {
+    assert_review_rules(
+        "vitest.config.ts",
+        r#"import {defineConfig} from "vitest/config"; export default defineConfig(() => { if (process.env.CI) return {test: {retry: 2}}; return {}; });"#,
+        &[FLAKE],
+    );
+}
+
+#[test]
+fn round2_r03_named_node_context() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test, type TestContext} from "node:test"; test("x", exercise); function exercise(t: TestContext) { t.skip(); }"#,
+        &["ts/no-assertionless-tests", "ts/no-skipped-tests"],
+    );
+}
+
+#[test]
+fn round2_r08_named_playwright_fixture() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test, type Page} from "@playwright/test"; test("x", exercise); async function exercise({page}: {page: Page}) { await page.route("**/api", r => r.fulfill({json: {ok: true}})); }"#,
+        &["ts/no-assertionless-tests", "ts/no-test-doubles"],
+    );
+}
+
+#[test]
+fn round2_r15_named_playwright_test_timeout() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "@playwright/test"; test("x", exercise); function exercise() { test.setTimeout(60_000); assert(read()); }"#,
+        &["ts/no-flake-masking"],
+    );
+}
+
+#[test]
+fn round2_r17_named_node_hook_sleep() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {before} from "node:test"; before(setup); async function setup() { await new Promise(r => setTimeout(r, 10)); }"#,
+        &["ts/no-fixed-sleep"],
+    );
+}
+
+#[test]
+fn round2_r06_returned_console_and_destructured_warning() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {setupServer} from "msw/node"; const network = setupServer(); network.listen({ onUnhandledRequest(req) { return console.warn(req.url); } }); network.listen({ onUnhandledRequest(req) { console.error(req.url); } }); network.listen({ onUnhandledRequest: (_, {warning}) => warning() }); network.listen({ onUnhandledRequest: (_, {error}) => error() }); network.listen({ onUnhandledRequest() { throw Error("unhandled"); } });"#,
+        &["ts/strict-msw", "ts/strict-msw", "ts/strict-msw"],
+    );
+}
+
+#[test]
+fn round2_r18_native_shorthand_target() {
+    assert_review_rules(
+        "case.test.ts",
+        "({fetch} = {fetch: fakeFetch})",
+        &["ts/no-test-doubles"],
+    );
+}

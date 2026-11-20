@@ -12,7 +12,7 @@ use oxc::ast::{
     },
 };
 use oxc::span::GetSpan;
-use oxc::syntax::operator::BinaryOperator;
+use oxc::syntax::{node::NodeId, operator::BinaryOperator};
 
 pub(super) fn test_file(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
@@ -569,6 +569,23 @@ pub(super) fn callback_body(kind: AstKind<'_>) -> Option<oxc::span::Span> {
     }
 }
 
+pub(super) fn returned_values<'a>(
+    ctx: &TsCtx<'a>,
+    function: NodeId,
+    pending: &mut Vec<&'a Expression<'a>>,
+) {
+    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+        if let AstKind::ReturnStatement(ret) = node.kind()
+            && let Some(arg) = &ret.argument
+            && super::values::enclosing_functions(ctx, id)
+                .next()
+                .is_some_and(|n| n.id() == function)
+        {
+            pending.push(arg);
+        }
+    }
+}
+
 impl<'a> Invocation<'a> {
     pub(super) fn test_body(&self, ctx: &TsCtx<'a>) -> Option<oxc::span::Span> {
         self.args
@@ -582,15 +599,85 @@ pub(super) fn enclosing_runners<'ctx, 'a>(
     id: oxc::syntax::node::NodeId,
 ) -> impl Iterator<Item = Runner<'a>> + 'ctx {
     super::values::enclosing_functions(ctx, id).map(|f| {
-        super::values::enclosing_call(ctx, f.id())
-            .map_or_else(Runner::default, |call| runner(ctx, &call))
+        callback_sites(ctx, f.id())
+            .max_by_key(CallbackSite::test)
+            .map_or_else(Runner::default, |site| site.runner)
     })
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CallbackSite<'a> {
+    pub(super) at: NodeId,
+    pub(super) runner: Runner<'a>,
+}
+
+impl CallbackSite<'_> {
+    pub(super) fn test(&self) -> bool {
+        self.runner.test() && self.runner.hook().is_none()
+    }
+}
+
+fn callback_owner(runner: Runner<'_>) -> bool {
+    runner.test_or_suite() || runner.hook().is_some()
+}
+
+pub(super) fn callback_sites<'ctx, 'a>(
+    ctx: &'ctx TsCtx<'a>,
+    function: NodeId,
+) -> impl Iterator<Item = CallbackSite<'a>> + 'ctx {
+    let direct =
+        super::values::enclosing_call(ctx, function).and_then(|call| {
+            let runner = runner(ctx, &call);
+            (callback_owner(runner)
+                && call.args.iter().flatten().any(|arg| {
+                    callback_kind(ctx, arg).is_some_and(|kind| kind.node_id() == function)
+                }))
+            .then_some(CallbackSite {
+                at: function,
+                runner,
+            })
+        });
+    let named = direct
+        .is_none()
+        .then(|| {
+            ctx.resolution
+                .named_callbacks
+                .get_or_init(|| {
+                    let mut sites = std::collections::HashMap::<_, Vec<_>>::new();
+                    for (at, node) in ctx.semantic.nodes().iter_enumerated() {
+                        let Some(site) = super::values::site(ctx, node.kind()) else {
+                            continue;
+                        };
+                        let runner = runner(ctx, &site.call);
+                        if !callback_owner(runner) {
+                            continue;
+                        }
+                        for arg in site.call.args.iter().flatten() {
+                            if unwrapped(arg).get_identifier_reference().is_some()
+                                && let Some(callback) = callback_kind(ctx, arg)
+                            {
+                                sites
+                                    .entry(callback.node_id())
+                                    .or_default()
+                                    .push(CallbackSite { at, runner });
+                            }
+                        }
+                    }
+                    sites
+                })
+                .get(&function)
+        })
+        .flatten();
+    direct
+        .into_iter()
+        .chain(named.into_iter().flatten().copied())
 }
 
 pub(super) fn test_callback_parameter<'a>(
     ctx: &TsCtx<'a>,
     symbol: oxc::syntax::symbol::SymbolId,
-) -> Option<(&'a oxc::ast::ast::FormalParameter<'a>, Runner<'a>)> {
+    runner_kind: impl Fn(&Runner<'a>) -> bool,
+) -> Option<&'a oxc::ast::ast::FormalParameter<'a>> {
     let declaration = ctx.semantic.symbol_declaration(symbol);
     let function = super::values::enclosing_functions(ctx, declaration.id()).next()?;
     let params = match function.kind() {
@@ -605,13 +692,7 @@ pub(super) fn test_callback_parameter<'a>(
     {
         return None;
     }
-    let call = super::values::enclosing_call(ctx, function.id())?;
-    let runner = runner(ctx, &call);
-    (runner.test()
-        && call
-            .args
-            .iter()
-            .flatten()
-            .any(|arg| resolve(ctx, arg).span() == function.span()))
-    .then_some((parameter, runner))
+    callback_sites(ctx, function.id())
+        .any(|site| site.test() && runner_kind(&site.runner))
+        .then_some(parameter)
 }

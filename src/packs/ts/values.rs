@@ -26,6 +26,8 @@ use std::{
 pub(crate) struct Resolution<'a> {
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
     array_callbacks: OnceCell<HashMap<oxc::span::Span, Vec<Rc<Invocation<'a>>>>>,
+    pub(super) named_callbacks:
+        OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,

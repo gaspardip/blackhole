@@ -52,15 +52,18 @@ fn page_fixture(ctx: &TsCtx<'_>, value: &Expression<'_>) -> bool {
     else {
         return false;
     };
-    let Some((param, runner)) = super::test_context::test_callback_parameter(ctx, symbol) else {
+    let Some(param) = super::test_context::test_callback_parameter(
+        ctx,
+        symbol,
+        super::test_context::Runner::is_playwright,
+    ) else {
         return false;
     };
     let BindingPattern::ObjectPattern(pattern) = &param.pattern else {
         return false;
     };
-    runner.is_playwright()
-        && super::values::destructured(ctx, pattern, |id| id.symbol_id.get() == Some(symbol))
-            == Some("page")
+    super::values::destructured(ctx, pattern, |id| id.symbol_id.get() == Some(symbol))
+        == Some("page")
 }
 fn page<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> bool {
     let mut pending = vec![initial];
