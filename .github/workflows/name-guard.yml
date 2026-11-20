@@ -29,19 +29,24 @@ jobs:
       - name: scan
         run: |
           set -eu
-          git init -q repo
-          cd repo
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch -q origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          setup_failed() {
+            echo "name guard cannot run: git setup failed" >&2
+            exit 2
+          }
+          git init -q repo >/dev/null 2>&1 || setup_failed
+          cd repo 2>/dev/null || setup_failed
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" >/dev/null 2>&1 || setup_failed
+          git fetch -q origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*" >/dev/null 2>&1 || setup_failed
           if [ -n "${PR_NUMBER}" ]; then
-            git fetch -q origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head"
+            git fetch -q origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/head" >/dev/null 2>&1 || setup_failed
           fi
-          # The guard always comes from the default branch; the scanned refs are data.
-          # The remote is asked which branch that is, because a scheduled event does not say.
-          git remote set-head origin --auto > /dev/null
+          # An origin/HEAD alias can shadow a branch from the fetched namespace.
+          remote_head="$(git ls-remote --symref origin HEAD 2>/dev/null)" || setup_failed
+          tab="$(printf '\t')"
+          default_ref="$(printf '%s\n' "${remote_head}" | sed -n "s|^ref: \(refs/heads/.*\)${tab}HEAD\$|\1|p")"
+          git check-ref-format "${default_ref}" >/dev/null 2>&1 || setup_failed
           guard="${RUNNER_TEMP}/name_guard.py"
-          # The full ref name: a tag called origin/HEAD would win over the short one.
-          git show "refs/remotes/origin/HEAD:tools/name_guard.py" > "${guard}"
+          git show "refs/remotes/origin/${default_ref#refs/heads/}:tools/name_guard.py" 2>/dev/null > "${guard}" || setup_failed
           # The guard reads the event file itself and decides whose text to scan. Event text
           # passed through `env:` would be printed in this public log before the guard ran.
           python3 -I "${guard}" event

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from textwrap import dedent
 
 import name_guard
 
@@ -109,6 +110,46 @@ class Repo(unittest.TestCase):
         git(self.dir, "add", "-A")
         git(self.dir, "commit", "-q", "--allow-empty", "-m", message)
         return git(self.dir, "rev-parse", "HEAD")
+
+
+class WorkflowScan(Repo):
+    def test_workflow_scans_head_named_branches_without_logging_them(self) -> None:
+        workflow = GUARD.parents[1] / ".github" / "workflows" / "name-guard.yml"
+        script = dedent(workflow.read_text(encoding="utf-8").split("        run: |\n", 1)[1])
+        self.write("tools/name_guard.py", GUARD.read_text(encoding="utf-8"))
+        base = self.commit("chore: install guard")
+
+        for branch in ("HEAD/topic", "HEAD"):
+            for expected in (0, 1):
+                with self.subTest(branch=branch, expected=expected), tempfile.TemporaryDirectory() as tmp:
+                    directory = Path(tmp)
+                    origin = directory / "origin.git"
+                    git(self.dir, "clone", "--bare", "-q", ".", str(origin))
+                    tip = base
+                    if expected == 1:
+                        blob = git(origin, "hash-object", "-w", "--stdin", stdin="Quokka\n")
+                        tree = git(origin, "mktree", stdin=f"100644 blob {blob}\texample.txt\n")
+                        tip = git(origin, "commit-tree", tree, "-p", base, "-m", "chore: add fixture")
+                    git(origin, "update-ref", f"refs/heads/{branch}", tip)
+                    event = directory / "event.json"
+                    event.write_text('{"repository":{"owner":{"type":"User"}}}', encoding="utf-8")
+                    env = isolated_env(directory) | {
+                        "BLACKHOLE_BANNED": WORDS,
+                        "GITHUB_SERVER_URL": directory.as_uri(),
+                        "GITHUB_REPOSITORY": "origin",
+                        "GITHUB_EVENT_NAME": "schedule",
+                        "GITHUB_EVENT_PATH": str(event),
+                        "PR_NUMBER": "",
+                        "RUNNER_TEMP": str(directory),
+                    }
+                    done = subprocess.run(
+                        ["sh", "-c", script], cwd=directory, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(done.returncode, expected, done.stderr)
+                    self.assertNotIn(branch, done.stdout + done.stderr)
+                    if expected == 1:
+                        self.assertIn("banned name #1", done.stderr)
 
 
 class Text(Repo):
