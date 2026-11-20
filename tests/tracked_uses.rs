@@ -223,6 +223,21 @@ fn runner_option_slots_follow_the_api() {
             &[],
         ),
         (
+            "concatenated Node title",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; test('renders' + ' sample', () => equal(2+2, 4));",
+            &[],
+        ),
+        (
+            "Node title from a string-returning function",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; function title(): string { return 'declared sample'; } test(title(), () => equal(2+2, 4));",
+            &[],
+        ),
+        (
+            "Node title factory shadowed by an options factory",
+            "import {test} from 'node:test'; function title(): string { return 'outer'; } function register(title: () => object) { test(title(), () => assert(read())); }",
+            &[flake, skip],
+        ),
+        (
             "global known options first",
             "test({skip: true}, () => assert(read()));",
             &[skip],
@@ -231,6 +246,21 @@ fn runner_option_slots_follow_the_api() {
             "bound callback",
             "import {test} from 'node:test'; function check() { assert(read()); } test('sample', check.bind(null));",
             &[],
+        ),
+        (
+            "bound imported callback",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; test('sample', equal.bind(null, 2+2, 4));",
+            &[],
+        ),
+        (
+            "shadowed bound imported callback",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; function register(equal) { test('sample', equal.bind(null, 2+2, 4)); }",
+            &[skip],
+        ),
+        (
+            "bound opaque options from an unrelated module",
+            "import {test} from 'node:test'; import {equal} from './options'; test('sample', equal.bind(null), () => assert(read()));",
+            &[flake, skip],
         ),
         (
             "options first",
@@ -273,8 +303,7 @@ fn runner_option_slots_follow_the_api() {
         .map(|(case, source, _)| {
             let mut hits: Vec<_> = run(registry(), [("case.test.ts", source.as_bytes())])
                 .into_iter()
-                .map(|f| f.rule)
-                .filter(|&rule| rule == skip || rule == flake)
+                .filter_map(|f| [flake, skip].contains(&f.rule).then_some(f.rule))
                 .collect();
             hits.sort_unstable();
             (*case, hits)

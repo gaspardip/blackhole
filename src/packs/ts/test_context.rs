@@ -9,6 +9,7 @@ use oxc::ast::{
     ast::{ArrowFunctionBody, Expression, FunctionBody, Statement, TSType},
 };
 use oxc::span::GetSpan;
+use oxc::syntax::operator::BinaryOperator;
 
 pub(super) fn test_file(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
@@ -268,7 +269,7 @@ fn declared_callback(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
     annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSFunctionType(_)))
 }
 
-fn callback<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> bool {
+fn callback<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>, syntax: OptionSyntax) -> bool {
     let mut seen = std::collections::HashSet::new();
     loop {
         let value = resolve(ctx, expr);
@@ -285,15 +286,59 @@ fn callback<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> bool {
             return false;
         }
         expr = member.object();
+        if syntax == OptionSyntax::Node
+            && origin_path(ctx, expr).is_some_and(|(origin, path)| {
+                origin == Origin::Module
+                    && matches!(
+                        path.split_first(),
+                        Some((
+                            &("node:assert" | "node:assert/strict" | "assert" | "assert/strict"),
+                            ["equal"] | ["default" | "strict", "equal"]
+                        ))
+                    )
+            })
+        {
+            return true;
+        }
     }
 }
 
-fn opaque_option<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
-    let value = resolve(ctx, arg);
-    !value.is_literal()
-        && !matches!(value, Expression::TemplateLiteral(_))
-        && !resolves_to_global(ctx, value, "undefined")
-        && !callback(ctx, arg)
+fn returns_string<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
+    let Some(call) = call_expr(expr) else {
+        return false;
+    };
+    let function = match resolve(ctx, &call.callee) {
+        Expression::Identifier(id) => declaration(ctx, id),
+        Expression::FunctionExpression(f) => Some(AstKind::Function(f)),
+        Expression::ArrowFunctionExpression(f) => Some(AstKind::ArrowFunctionExpression(f)),
+        _ => None,
+    };
+    let annotation = match function {
+        Some(AstKind::Function(f)) if !f.r#async && !f.generator => f.return_type.as_deref(),
+        Some(AstKind::ArrowFunctionExpression(f)) if !f.r#async => f.return_type.as_deref(),
+        _ => None,
+    };
+    annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSStringKeyword(_)))
+}
+
+fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
+    let mut pending = vec![arg];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(expr) = pending.pop() {
+        let value = resolve(ctx, expr);
+        if !seen.insert(value.span()) {
+            continue;
+        }
+        match value {
+            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => return true,
+            Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => {
+                pending.extend([&b.right, &b.left]);
+            }
+            _ if returns_string(ctx, value) => return true,
+            _ => (),
+        }
+    }
+    false
 }
 
 impl<'a> Runner<'a> {
@@ -303,6 +348,14 @@ impl<'a> Runner<'a> {
         call: &Invocation<'a>,
     ) -> [Option<TestOption<'a>>; 2] {
         let object = |arg| properties(ctx, arg).map(|props| TestOption::Object(arg, props));
+        let is_callback = |arg| callback(ctx, arg, self.option_syntax);
+        let opaque = |arg| {
+            let value = resolve(ctx, arg);
+            !value.is_literal()
+                && !matches!(value, Expression::TemplateLiteral(_))
+                && !resolves_to_global(ctx, value, "undefined")
+                && !is_callback(arg)
+        };
         let [first, second, third] = [call.arg(0), call.arg(1), call.arg(2)];
         if (self.option_syntax == OptionSyntax::Node
             || self.option_syntax == OptionSyntax::Flexible && self.length == 1)
@@ -313,8 +366,9 @@ impl<'a> Runner<'a> {
             }
             if self.option_syntax == OptionSyntax::Node
                 && third.is_none()
-                && second.is_some_and(|arg| callback(ctx, arg))
-                && opaque_option(ctx, first)
+                && second.is_some_and(is_callback)
+                && opaque(first)
+                && !string_title(ctx, first)
             {
                 return [
                     Some(TestOption::Opaque {
@@ -332,10 +386,10 @@ impl<'a> Runner<'a> {
                 OptionSyntax::Node | OptionSyntax::Flexible
             )
         {
-            let before_callback = third.is_some_and(|arg| callback(ctx, arg));
+            let before_callback = third.is_some_and(is_callback);
             if let Some(arg) = second
                 && (self.length == 1 || before_callback)
-                && opaque_option(ctx, arg)
+                && opaque(arg)
             {
                 options = Some(TestOption::Opaque {
                     at: arg.span().start as usize,
@@ -361,7 +415,7 @@ impl<'a> Runner<'a> {
             object(arg).or_else(|| {
                 (second.is_some()
                     && !matches!(options, Some(TestOption::Object(..)))
-                    && !callback(ctx, arg))
+                    && !is_callback(arg))
                 .then_some(TestOption::Timeout(arg.span().start as usize))
             })
         });
