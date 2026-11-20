@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import name_guard
 
 GUARD = Path(__file__).with_name("name_guard.py")
 WORDS = "quokka\nzebrafish\n"
@@ -64,6 +67,20 @@ ACTIONS = {
     "issue_comment": "created",
     "release": "published",
 }
+
+
+class Workflow(unittest.TestCase):
+    def test_workflow_event_types_match_guard_actions(self) -> None:
+        workflow = GUARD.parents[1] / ".github" / "workflows" / "name-guard.yml"
+        types = re.findall(
+            r"^  (\w+):\n    types: \[([^\]\n]*)\]$",
+            workflow.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        self.assertEqual(
+            {event: {action.strip() for action in actions.split(",")} for event, actions in types},
+            name_guard.ACTIONS,
+        )
 
 
 class Repo(unittest.TestCase):
