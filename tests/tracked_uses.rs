@@ -298,6 +298,12 @@ fn runner_option_slots_follow_the_api() {
             &[flake],
         ),
     ];
+    assert_option_slots(cases);
+}
+
+fn assert_option_slots(cases: &[(&str, &str, &[&str])]) {
+    let skip = "ts/no-skipped-tests";
+    let flake = "ts/no-flake-masking";
     let actual: Vec<_> = cases
         .iter()
         .map(|(case, source, _)| {
@@ -314,4 +320,33 @@ fn runner_option_slots_follow_the_api() {
         .map(|(case, _, hits)| (*case, hits.to_vec()))
         .collect();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn node_titles_trust_only_stable_string_signatures() {
+    let skip = "ts/no-skipped-tests";
+    let flake = "ts/no-flake-masking";
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "Node title method replaced after its declaration",
+            "import {test} from 'node:test'; const provider = { title(): string { return 'sample'; } }; Object.assign(provider, { title: () => ({skip: true}) }); test(provider.title(), () => assert(read()));",
+            &[flake, skip],
+        ),
+        (
+            "Node title from a parameter typed to return a string",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; function register(title: () => string) { test(title(), () => equal(2+2, 4)); }",
+            &[],
+        ),
+        (
+            "Node title from a variable typed to return a string",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; const title: () => string = makeTitle; test(title(), () => equal(2+2, 4));",
+            &[],
+        ),
+        (
+            "Node title from a reassigned parameter typed to return a string",
+            "import {test} from 'node:test'; function register(title: () => string, other) { title = other; test(title(), () => assert(read())); }",
+            &[flake, skip],
+        ),
+    ];
+    assert_option_slots(cases);
 }

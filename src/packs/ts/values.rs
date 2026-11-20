@@ -309,7 +309,10 @@ pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> 
     }
 }
 
-fn binding_value<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+pub(super) fn binding_value<'a>(
+    ctx: &TsCtx<'a>,
+    mut expr: &'a Expression<'a>,
+) -> &'a Expression<'a> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
     loop {

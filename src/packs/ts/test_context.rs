@@ -1,12 +1,15 @@
 use super::values::MemberKeys;
 use super::values::{
-    Invocation, Origin, Properties, call_expr, declaration, invoked, origin_path, properties,
-    resolve, resolves_to_global,
+    Invocation, Origin, Properties, binding_value, call_expr, declaration, invoked, origin_path,
+    properties, resolve, resolves_to_global, unwrapped,
 };
 use crate::engine::TsCtx;
 use oxc::ast::{
     AstKind,
-    ast::{ArrowFunctionBody, Expression, FunctionBody, Statement, TSType},
+    ast::{
+        ArrowFunctionBody, Expression, FunctionBody, Statement, TSFunctionType, TSType,
+        TSTypeAnnotation,
+    },
 };
 use oxc::span::GetSpan;
 use oxc::syntax::operator::BinaryOperator;
@@ -253,20 +256,26 @@ pub(super) enum TestOption<'a> {
     Timeout(usize),
 }
 
-fn declared_callback(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
-    let Some(decl) = expr
-        .get_identifier_reference()
-        .and_then(|id| declaration(ctx, id))
-    else {
-        return false;
-    };
-    let annotation = match decl {
-        AstKind::Function(_) => return true,
+fn declared_signature<'a>(
+    ctx: &TsCtx<'a>,
+    expr: &Expression<'_>,
+) -> Option<&'a TSFunctionType<'a>> {
+    let annotation = match declaration(ctx, expr.get_identifier_reference()?)? {
         AstKind::FormalParameter(p) => p.type_annotation.as_deref(),
         AstKind::VariableDeclarator(v) => v.type_annotation.as_deref(),
         _ => None,
-    };
-    annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSFunctionType(_)))
+    }?;
+    match &annotation.type_annotation {
+        TSType::TSFunctionType(f) => Some(f),
+        _ => None,
+    }
+}
+
+fn declared_callback(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
+    expr.get_identifier_reference()
+        .and_then(|id| declaration(ctx, id))
+        .is_some_and(|d| matches!(d, AstKind::Function(_)))
+        || declared_signature(ctx, expr).is_some()
 }
 
 fn callback<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>, syntax: OptionSyntax) -> bool {
@@ -307,7 +316,12 @@ fn returns_string<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
     let Some(call) = call_expr(expr) else {
         return false;
     };
-    let function = match resolve(ctx, &call.callee) {
+    let string = |a: &TSTypeAnnotation<'_>| matches!(a.type_annotation, TSType::TSStringKeyword(_));
+    // Bindings only: an object member can be replaced after its declaration.
+    if declared_signature(ctx, unwrapped(&call.callee)).is_some_and(|f| string(&f.return_type)) {
+        return true;
+    }
+    let function = match binding_value(ctx, &call.callee) {
         Expression::Identifier(id) => declaration(ctx, id),
         Expression::FunctionExpression(f) => Some(AstKind::Function(f)),
         Expression::ArrowFunctionExpression(f) => Some(AstKind::ArrowFunctionExpression(f)),
@@ -318,7 +332,7 @@ fn returns_string<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
         Some(AstKind::ArrowFunctionExpression(f)) if !f.r#async => f.return_type.as_deref(),
         _ => None,
     };
-    annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSStringKeyword(_)))
+    annotation.is_some_and(string)
 }
 
 fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
