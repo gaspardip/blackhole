@@ -527,6 +527,20 @@ class Event(Repo):
         payload = {"repository": {"full_name": "o/r", "owner": {"type": "Organization"}}}
         self.assertEqual(self.event("issues", payload | {"issue": issue}).returncode, 2)
 
+    def test_ungated_events_reject_an_organization_repository(self) -> None:
+        repository = {"full_name": "o/r", "owner": {"type": "Organization"}}
+        events = {
+            "push": {"ref": "refs/heads/main", "before": self.base, "after": self.base},
+            "release": {"release": {"name": "v1", "tag_name": "v1", "body": None}},
+            "schedule": {},
+            "workflow_dispatch": {},
+        }
+        for name, payload in events.items():
+            with self.subTest(name=name):
+                done = self.event(name, payload | {"repository": repository})
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertIn("repository owned by a user", done.stderr)
+
     def test_a_field_of_the_wrong_type_fails_closed(self) -> None:
         owner = {"title": "bug", "body": None, "author_association": "OWNER"}
         unknown = owner | {"author_association": "UNRECOGNIZED", "body": "Quokka"}

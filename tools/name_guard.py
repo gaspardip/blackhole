@@ -105,11 +105,7 @@ def object_id(value: object) -> str:
     return string(value)
 
 
-def by_writer(payload: dict[str, Any], item: dict[str, Any]) -> bool:
-    # Under a user, owners and collaborators can all write and only they can edit someone
-    # else's text. An organization's roles break both, so the guard refuses to guess there.
-    if string(payload["repository"]["owner"]["type"]) != "User":
-        raise CannotRun("the trust rule only holds for a repository owned by a user")
+def by_writer(item: dict[str, Any]) -> bool:
     association = string(item["author_association"])
     if association not in WRITERS | STRANGERS:
         raise CannotRun("the event payload is not what GitHub documents")
@@ -244,12 +240,12 @@ class Guard:
         self.commits("--all")
 
     def written(
-        self, payload: dict[str, Any], item: dict[str, Any], kind: str, **fields: Callable[[object], str]
+        self, item: dict[str, Any], kind: str, **fields: Callable[[object], str]
     ) -> bool:
         """Scans an item's text if its author can write here, and says whether they can."""
         # A writer's edit of a stranger's text is left alone too: whatever the scan compared,
         # its public result would depend on what the stranger had written.
-        if not by_writer(payload, item):
+        if not by_writer(item):
             return False
         for key, read in fields.items():
             self.scan(f"{kind} {key}", read(item[key]))
@@ -260,6 +256,9 @@ class Guard:
 
         A public pass or fail on a stranger's text would tell them whether a guessed name is banned.
         """
+        # Organization roles do not give the same guarantees about who can write or edit.
+        if string(payload["repository"]["owner"]["type"]) != "User":
+            raise CannotRun("the trust rule only holds for a repository owned by a user")
         if name in ACTIONS and string(payload["action"]) not in ACTIONS[name]:
             raise CannotRun("the event payload is not what GitHub documents")
         match name:
@@ -277,14 +276,14 @@ class Guard:
                 local = source is not None and string(source["full_name"]) == string(
                     payload["repository"]["full_name"]
                 )
-                if self.written(payload, pull, "pull request", title=string, body=optional) and local:
+                if self.written(pull, "pull request", title=string, body=optional) and local:
                     self.name("ref", string(head["ref"]))
                     self.range(object_id(pull["base"]["sha"]), object_id(head["sha"]))
             case "issues":
-                self.written(payload, payload["issue"], "issue", title=string, body=optional)
+                self.written(payload["issue"], "issue", title=string, body=optional)
             case "issue_comment":
                 # The issue a comment sits on can be a stranger's, so only the comment is scanned.
-                self.written(payload, payload["comment"], "comment", body=string)
+                self.written(payload["comment"], "comment", body=string)
             case "release":
                 release = payload["release"]
                 self.scan("release name", optional(release["name"]))

@@ -8,10 +8,12 @@ if [ "$(gh pr view "${number}" --json baseRefName --jq .baseRefName)" != main ];
   echo "merge-outside: pull request ${number} does not target main" >&2
   exit 1
 fi
-# Full ref names throughout: a tag or branch called origin/main would win over the short one.
-git fetch -q origin main
-base="$(git rev-parse refs/remotes/origin/main)"
-git fetch -q origin "pull/${number}/head"
+# A tag named main can shadow the branch when Git resolves a fetch source.
+main_ref=refs/remotes/origin/main
+main_refspec="+refs/heads/main:${main_ref}"
+git fetch -q origin "${main_refspec}"
+base="$(git rev-parse "${main_ref}")"
+git fetch -q origin "refs/pull/${number}/head"
 head="$(git rev-parse FETCH_HEAD)"
 title="$(gh pr view "${number}" --json title --jq .title)"
 body="$(gh pr view "${number}" --json body --jq .body)"
@@ -20,5 +22,5 @@ GUARD_TEXT_SUBJECT="${subject}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_
 # The subject and body are passed back so an edit made after the scan cannot reach main.
 gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}"
 # GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
-git fetch -q origin main
-python3 -I tools/name_guard.py range "${base}" refs/remotes/origin/main
+git fetch -q origin "${main_refspec}"
+python3 -I tools/name_guard.py range "${base}" "${main_ref}"
