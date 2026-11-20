@@ -388,3 +388,14 @@ fn spellings() {
         missing.join("\n")
     );
 }
+
+#[test]
+fn tagged_calls_without_an_offence() {
+    for (import, callee) in [("test", "test"), ("vi", "vi.waitFor")] {
+        for call in [format!("{callee}`tag`"), format!("{callee}([\"tag\"])")] {
+            let source = format!("import {{ {import} }} from 'vitest'; {call};");
+            let findings = run(registry(), [(TEST_FILE, source.as_bytes())]);
+            assert!(findings.is_empty(), "{source}");
+        }
+    }
+}

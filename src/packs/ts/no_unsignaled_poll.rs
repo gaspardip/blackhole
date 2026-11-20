@@ -1,7 +1,7 @@
 use super::test_context::single_value;
-use super::values::MemberKeys;
+use super::values::{MemberKeys, call_expr, invoked, receiver, resolve, unwrapped};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::ast::{AstKind, ast::Expression};
+use oxc::ast::ast::Expression;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unsignaled-poll",
     family: Family::Tests,
@@ -10,6 +10,11 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
+    e = unwrapped(e);
+    let resolved = resolve(ctx, e);
+    if resolved.get_member_expr().is_some() {
+        e = resolved;
+    }
     let mut first = true;
     let mut reads = false;
     loop {
@@ -32,31 +37,35 @@ fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
     }
 }
 fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
-    let Some(c) = super::values::call_expr(e) else {
+    let Some(call) = call_expr(resolve(ctx, e)) else {
         return false;
     };
-    let Some(m) = c.callee.get_member_expr() else {
+    let matcher = invoked(ctx, call);
+    let (object, name) = if let Some(member) = matcher.callee.get_member_expr() {
+        (member.object(), MemberKeys(ctx).read(member))
+    } else if let Some((object, name)) = receiver(ctx, matcher.callee) {
+        (object, Some(name))
+    } else {
         return false;
     };
-    let object = m.object().get_inner_expression();
-    let subject = object
-        .get_member_expr()
-        .filter(|n| MemberKeys(ctx).read(n) == Some("not"))
-        .map_or(object, |n| n.object().get_inner_expression());
-    let Expression::CallExpression(call) = subject else {
+    let object = resolve(ctx, object);
+    let subject = receiver(ctx, object)
+        .filter(|&(_, key)| key == "not")
+        .map_or(object, |(object, _)| resolve(ctx, object));
+    let Some(call) = call_expr(subject) else {
         return false;
     };
-    if super::test_context::runner(ctx, &super::values::invoked(ctx, call)) != ["expect"] {
+    let expect = invoked(ctx, call);
+    if super::test_context::runner(ctx, &expect) != ["expect"] {
         return false;
     }
-    call.arguments
-        .first()
-        .and_then(|a| a.as_expression())
+    expect
+        .arg(0)
         .and_then(|e| recorder(ctx, e))
         .is_some_and(|reads| {
             reads
                 || matches!(
-                    MemberKeys(ctx).read(m).unwrap_or(""),
+                    name.unwrap_or_default(),
                     "toHaveLength"
                         | "toHaveBeenCalled"
                         | "toHaveBeenCalledOnce"
@@ -81,10 +90,10 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
     for (id, n) in nodes.iter_enumerated() {
-        let AstKind::CallExpression(c) = n.kind() else {
+        let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
-        let call = super::values::invoked(ctx, c);
+        let call = c.call;
         let path = super::test_context::runner(ctx, &call);
         let poll = path == ["expect", "poll"];
         if !poll && path != ["vi", "waitFor"] {

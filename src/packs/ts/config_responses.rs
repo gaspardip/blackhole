@@ -1,4 +1,4 @@
-use super::values::{declaration, resolve, resolves_to_global};
+use super::values::{Origin, declaration, origin_path, resolve};
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -79,10 +79,11 @@ fn raw_response<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, kinds: ResponseK
         }
         match expr {
             Expression::NewExpression(n)
-                if resolves_to_global(ctx, &n.callee, "Response")
-                    || matches!(kinds, ResponseKinds::WithMsw)
-                        && super::values::path(ctx, &n.callee)
-                            .is_some_and(|p| p == ["msw", "HttpResponse"]) =>
+                if origin_path(ctx, &n.callee).is_some_and(|(origin, path)| {
+                    origin == Origin::Global && path == ["Response"]
+                }) || matches!(kinds, ResponseKinds::WithMsw)
+                    && super::values::path(ctx, &n.callee)
+                        .is_some_and(|p| p == ["msw", "HttpResponse"]) =>
             {
                 return true;
             }

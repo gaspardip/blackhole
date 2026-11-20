@@ -1,8 +1,5 @@
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::{
-    ast::{AstKind, ast::Expression},
-    span::GetSpan,
-};
+use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-assertionless-tests",
@@ -16,8 +13,22 @@ fn literal(e: &Expression<'_>) -> bool {
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
 fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
-    match (a.get_inner_expression(), b.get_inner_expression()) {
-        (Expression::Identifier(x), Expression::Identifier(y)) => x.name == y.name,
+    use super::values::{resolve, symbol, unwrapped};
+    let (a, b) = (unwrapped(a), unwrapped(b));
+    match (a, b) {
+        (Expression::Identifier(_), Expression::Identifier(_)) => {
+            let (a, b) = (resolve(ctx, a), resolve(ctx, b));
+            match (a, b) {
+                (Expression::Identifier(x), Expression::Identifier(y)) => {
+                    match (symbol(ctx, x), symbol(ctx, y)) {
+                        (Some(x), Some(y)) => x == y,
+                        (None, None) => x.name == y.name,
+                        _ => false,
+                    }
+                }
+                _ => a.span() == b.span(),
+            }
+        }
         (Expression::StringLiteral(x), Expression::StringLiteral(y)) => x.value == y.value,
         (Expression::NumericLiteral(x), Expression::NumericLiteral(y)) => {
             x.value.to_bits() == y.value.to_bits()
@@ -62,10 +73,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, bool>::new();
     let mut tests = Vec::new();
     for n in ctx.semantic.nodes().iter() {
-        let AstKind::CallExpression(c) = n.kind() else {
+        let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
-        let inv = super::values::invoked(ctx, c);
+        let inv = c.call;
         let parts = super::test_context::runner(ctx, &inv);
         if parts.is_empty()
             && let Some(id) = c.callee.get_identifier_reference()
@@ -109,6 +120,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         }
         if !parts.test()
             || parts.todo
+            || super::no_skipped_tests::skip_option(ctx, &inv, parts).is_some_and(|(_, todo)| todo)
             || c.callee.get_member_expr().is_some_and(|m| {
                 matches!(
                     super::values::MemberKeys(ctx).read(m),
@@ -120,7 +132,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         }
         // shortcut: callbacks passed by reference need interprocedural analysis before their assertions can be judged.
         if let Some(body) = inv.inline_test_body() {
-            tests.push((c.span.start, body));
+            let at = match n.kind() {
+                oxc::ast::AstKind::CallExpression(call) => super::values::call_position(ctx, call),
+                _ => c.span.start as usize,
+            };
+            tests.push((at, body));
         }
     }
     let mut at = BTreeSet::new();
@@ -129,10 +145,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if scope.peek().is_none() {
             at.insert(start);
         } else {
-            at.extend(scope.filter_map(|(&pos, &bad)| bad.then_some(pos)));
+            at.extend(scope.filter_map(|(&pos, &bad)| bad.then_some(pos as usize)));
         }
     }
     for pos in at {
-        findings.report(pos as usize, None);
+        findings.report(pos, None);
     }
 }

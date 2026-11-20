@@ -10,7 +10,7 @@ use oxc::span::GetSpan;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-test-doubles",
     family: Family::Tests,
-    provenance: "Ports of landmines testing/no-test-doubles and anti-slop no-module-mocking. Spy-only module mocks follow landmines as observation.",
+    provenance: "Ports of landmines testing/no-test-doubles and anti-slop no-module-mocking. Spy-only module mocks follow landmines as observation. Unlike upstream case 303, passing vi.mock and vi to a shadowed Reflect.apply reports both uses.",
     fix: "Exercise the real implementation. Intercept network requests with MSW and use spies only to observe calls.",
     run: Run::Ts(check),
 };
@@ -152,6 +152,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             .nodes()
             .iter()
             .any(|n| runner_import(ctx, n.kind()));
+    super::values::tracked_uses::report(ctx, RULE.id, findings);
     if test_code {
         super::saved_methods::check(ctx, findings);
     }
@@ -180,14 +181,23 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             findings.report(property.span.start as usize, None);
         }
-        let AstKind::CallExpression(call) = node.kind() else {
+        let Some(call) = super::values::site(ctx, node.kind()) else {
             continue;
         };
-        let invocation = super::values::invoked(ctx, call);
-        if super::double_mutations::framework_call(ctx, &invocation)
-            || (test_code
-                && (super::bindings::mutation(ctx, &invocation)
-                    || super::double_mutations::call_writes(ctx, &invocation)))
+        let invocation = call.call;
+        if super::double_mutations::framework_call(ctx, &invocation) {
+            findings.report(
+                match node.kind() {
+                    AstKind::CallExpression(c) => super::values::call_position(ctx, c),
+                    _ => call.callee.span().start as usize,
+                },
+                None,
+            );
+            continue;
+        }
+        if test_code
+            && (super::bindings::mutation(ctx, &invocation)
+                || super::double_mutations::call_writes(ctx, &invocation))
         {
             findings.report(call.span.start as usize, None);
             continue;

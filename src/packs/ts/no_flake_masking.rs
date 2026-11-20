@@ -41,13 +41,14 @@ const CONFIG_OPTIONS: &[(&[&str], &[&str])] = &[
     (&["test", "describe", "configure"], &["retries"]),
 ];
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    super::values::tracked_uses::report(ctx, RULE.id, findings);
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
             AstKind::ObjectProperty(p) if super::values::key(ctx, &p.key) == Some("test") => {
                 inspect(ctx, Some(&p.value), &["retry"], findings);
             }
-            AstKind::CallExpression(c) => {
-                let call = super::values::invoked(ctx, c);
+            kind if let Some(c) = super::values::site(ctx, kind) => {
+                let call = c.call;
                 let p = runner(ctx, &call);
                 if let Some((_, keys)) = CONFIG_OPTIONS
                     .iter()
@@ -61,7 +62,15 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     continue;
                 }
                 match p.short() {
-                    Some(["test", "slow"]) => findings.report(c.span.start as usize, None),
+                    Some(["test", "slow"]) => {
+                        let at = match kind {
+                            AstKind::CallExpression(call) => {
+                                super::values::call_position(ctx, call)
+                            }
+                            _ => c.span.start as usize,
+                        };
+                        findings.report(at, None);
+                    }
                     _ if p.test_or_suite()
                         && (super::values::call_expr(call.callee).is_some()
                             || !matches!(

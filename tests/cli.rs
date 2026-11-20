@@ -708,3 +708,241 @@ fn parse_errors_cannot_be_banked_or_objected_to() {
     .unwrap();
     check(root, &[], 2);
 }
+
+const RUNNER_CASES: &[(&str, &str, &str)] = &[
+    (
+        "case.test.ts",
+        "vi.waitFor(() => expect(calls.length)[matcher](1));",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "vi.waitFor(() => expect(calls.current)[matcher](1));",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "const value = 1; const matcher = expect(value).toBe; test('x', () => { const value = 1; matcher(value); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { assert.equal(read(), 1); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "import assert from 'node:assert/strict'; test('x', () => { assert.equal(read(), 1); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "import {equal as verify} from 'assert'; test('x', () => { verify(read(), 1); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "import * as verify from 'node:assert'; test('x', () => { verify.equal(read(), 1); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "const verify = require('node:assert/strict'); test('x', () => { verify.equal(read(), 1); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "import {equal as verify} from 'unrelated'; test('x', () => { verify(read(), 1); });",
+        "ts/no-assertionless-tests",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { const x = read(); expect(x).toBe(x); });",
+        "ts/no-assertionless-tests",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { const x = read(); expect((0, x)).toBe(x); });",
+        "ts/no-assertionless-tests",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { const x = read(); const alias = x; expect(x).toBe(alias); });",
+        "ts/no-assertionless-tests",
+    ),
+    (
+        "case.test.ts",
+        "const value = read(); const matcher = expect(value).toBe; test('x', () => { const value = other(); matcher(value); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "vi.waitFor(() => expect(calls).toHaveLength(1));",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "vi.waitFor(() => (0, expect(calls)).toHaveLength(1));",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "const check = expect.bind(undefined); vi.waitFor(() => check(calls).toHaveLength(1));",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "vi.waitFor(() => expect(calls).toHaveLength.call(undefined, 1));",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "const size = calls.length; expect.poll(() => size).toBe(1);",
+        "ts/no-unsignaled-poll",
+    ),
+    (
+        "case.test.ts",
+        "const size = calls.current; expect.poll(() => size).toBe(1);",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { pending(); assert(read()); });",
+        "ts/no-skipped-tests",
+    ),
+    (
+        "case.test.ts",
+        "test('x', () => { const pending = save; pending(); assert(read()); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "function pending() {} test('x', () => { pending(); assert(read()); });",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "test('x', async () => { await new Promise(r => setTimeout(() => r(), 10)); assert(read()); });",
+        "ts/no-fixed-sleep",
+    ),
+    (
+        "case.test.ts",
+        "test('x', async () => { await new Promise(r => setTimeout(() => { r(); }, 10)); assert(read()); });",
+        "ts/no-fixed-sleep",
+    ),
+    (
+        "case.test.ts",
+        "test('x', async () => { await new Promise(r => setTimeout(function () { r(); }, 10)); assert(read()); });",
+        "ts/no-fixed-sleep",
+    ),
+    ("runtime.ts", "void typeof expect;", "ts/no-test-aware-code"),
+    (
+        "runtime.ts",
+        "void typeof (0, expect);",
+        "ts/no-test-aware-code",
+    ),
+    (
+        "runtime.ts",
+        "const check = expect; void typeof check;",
+        "ts/no-test-aware-code",
+    ),
+    (
+        "vitest.config.ts",
+        "export default {outboundService: () => new Response('ok')};",
+        "ts/no-test-doubles",
+    ),
+    (
+        "vitest.config.ts",
+        "export default {outboundService: () => new globalThis.Response('ok')};",
+        "ts/no-test-doubles",
+    ),
+    (
+        "vitest.config.ts",
+        "const {Response: Reply} = globalThis; export default {outboundService: () => new Reply('ok')};",
+        "ts/no-test-doubles",
+    ),
+    (
+        "case.test.ts",
+        "import {test} from 'node:test'; test('x', {skip: 'feature missing'}, () => assert(read()));",
+        "ts/no-skipped-tests",
+    ),
+    (
+        "case.test.ts",
+        "import {test} from 'node:test'; test({skip: true}, () => assert(read()));",
+        "ts/no-skipped-tests",
+    ),
+    (
+        "case.test.ts",
+        "import {test} from 'node:test'; test('x', {todo: true}, () => {});",
+        "ts/no-skipped-tests",
+    ),
+    (
+        "case.test.ts",
+        "import {test} from 'node:test'; test('x', {skip: ''}, () => assert(read()));",
+        "",
+    ),
+    (
+        "case.test.ts",
+        "import {test} from 'node:test'; test('x', {[key]: true}, () => assert(read()));",
+        "ts/no-flake-masking ts/no-skipped-tests",
+    ),
+];
+
+#[test]
+fn runner_parity() {
+    let dir = repo();
+    let mut mismatches = Vec::new();
+    for &(file, source, rule) in RUNNER_CASES {
+        fs::write(dir.path().join(file), source).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(dir.path())
+            .args(["check", file])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let status = i32::from(!rule.is_empty());
+        let actual: Vec<_> = stdout
+            .lines()
+            .filter(|line| line.starts_with(file))
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .collect();
+        let matches = actual.into_iter().eq(rule.split_whitespace());
+        if !matches || out.status.code() != Some(status) || !out.stderr.is_empty() {
+            mismatches.push(format!(
+                "{file}: {source}\nexpected [{rule}], got {}: {stdout}{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[test]
+fn reflected_runner_findings_point_at_the_target() {
+    let dir = repo();
+    let file = "position.test.ts";
+    fs::write(
+        dir.path().join(file),
+        concat!(
+            "import * as t from 'vitest';\n",
+            "Reflect.apply(t.test, null, ['x', () => {}]);\n",
+            "Reflect.apply(test.slow, test, []);\n",
+            "Reflect.apply(vi.fn, vi, [() => 1]);\n",
+        ),
+    )
+    .unwrap();
+    let out = check(dir.path(), &[file], 1);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.starts_with(file))
+            .collect::<Vec<_>>(),
+        [
+            "position.test.ts:2:17 ts/no-assertionless-tests",
+            "position.test.ts:3:20 ts/no-flake-masking",
+            "position.test.ts:4:18 ts/no-test-doubles",
+        ]
+    );
+}

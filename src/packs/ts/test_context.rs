@@ -78,6 +78,7 @@ pub(crate) struct Runner<'a> {
     prefix: [&'a str; 3],
     length: usize,
     module_root: ModuleRoot,
+    options_second: bool,
     pub(super) last: Option<&'a str>,
     pub(super) skipped: bool,
     pub(super) skip_at: Option<usize>,
@@ -155,7 +156,11 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             continue;
         }
         if let Some((origin, parts)) = origin_path(ctx, e) {
-            let mut result = Runner::default();
+            let mut result = Runner {
+                options_second: origin == Origin::Global
+                    || matches!(parts.first().copied(), Some("node:test" | "vitest")),
+                ..Runner::default()
+            };
             let names = match (origin, parts.as_slice()) {
                 (Origin::Global, names)
                 | (_, names @ ["node:timers/promises" | "timers/promises", ..]) => names,
@@ -169,6 +174,16 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
                     rest
                 }
                 (_, ["vitest" | "@jest/globals", rest @ ..]) => rest,
+                (
+                    _,
+                    [
+                        "node:assert" | "node:assert/strict" | "assert" | "assert/strict",
+                        rest @ ..,
+                    ],
+                ) => {
+                    result.push("assert");
+                    rest.strip_prefix(&["default"]).unwrap_or(rest)
+                }
                 _ => return Runner::default(),
             };
             for name in names {
@@ -206,6 +221,9 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
 impl Runner<'_> {
     pub(super) fn test(&self) -> bool {
         self.first().is_some_and(|name| is_test(name))
+    }
+    pub(super) fn accepts_options_second(&self) -> bool {
+        self.options_second && self.length == 1
     }
     pub(super) fn test_or_suite(&self) -> bool {
         self.test() || self.first().is_some_and(|name| suite(name))

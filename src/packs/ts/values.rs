@@ -1,3 +1,8 @@
+#[path = "arguments.rs"]
+mod arguments;
+use arguments::Arguments;
+#[path = "tracked_uses.rs"]
+pub(super) mod tracked_uses;
 use crate::engine::TsCtx;
 use oxc::syntax::symbol::SymbolId;
 use oxc::{
@@ -20,8 +25,10 @@ use std::{
 #[derive(Default)]
 pub(crate) struct Resolution<'a> {
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
+    array_callbacks: OnceCell<HashMap<oxc::span::Span, Vec<Rc<Invocation<'a>>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
+    escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
@@ -122,6 +129,36 @@ pub(super) fn initializer<'a>(
     match declaration(ctx, id)? {
         AstKind::VariableDeclarator(v) if matches!(v.id, BindingPattern::BindingIdentifier(_)) => {
             v.init.as_ref()
+        }
+        AstKind::FormalParameter(p)
+            if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
+        {
+            let init = p.initializer.as_ref()?;
+            let function = enclosing_functions(ctx, p.node_id.get()).next()?;
+            let AstKind::Function(f) = function.kind() else {
+                return None;
+            };
+            let sym = f.id.as_ref()?.symbol_id.get()?;
+            let index = parameter_index(&f.params, symbol(ctx, id)?)?;
+            let mut refs = ctx
+                .semantic
+                .scoping()
+                .get_resolved_references(sym)
+                .peekable();
+            refs.peek()?;
+            let nodes = ctx.semantic.nodes();
+            refs.all(|r| {
+                let AstKind::CallExpression(call) = nodes.parent_kind(r.node_id()) else {
+                    return false;
+                };
+                call.callee.span() == nodes.get_node(r.node_id()).span()
+                    && call.arguments.len() <= index
+                    && call
+                        .arguments
+                        .iter()
+                        .all(|a| !matches!(a, Argument::SpreadElement(_)))
+            })
+            .then_some(init)
         }
         _ => None,
     }
@@ -271,7 +308,7 @@ pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> 
     }
 }
 
-pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+fn binding_value<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
     loop {
@@ -305,6 +342,76 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> &'a 
         .borrow_mut()
         .extend(aliases.into_iter().map(|s| (s, expr)));
     expr
+}
+
+fn projection<'a>(
+    ctx: &TsCtx<'a>,
+    object: &'a Expression<'a>,
+    name: &str,
+) -> Option<&'a oxc::ast::ast::ObjectProperty<'a>> {
+    let Expression::ObjectExpression(obj) = binding_value(ctx, object) else {
+        return None;
+    };
+    for field in obj.properties.iter().rev() {
+        let ObjectPropertyKind::ObjectProperty(p) = field else {
+            return None;
+        };
+        if p.key.static_name()? == name {
+            return (p.kind == oxc::ast::ast::PropertyKind::Init).then_some(p);
+        }
+    }
+    None
+}
+
+fn instance_field<'a>(
+    ctx: &TsCtx<'a>,
+    object: &'a Expression<'a>,
+    name: &str,
+) -> Option<&'a Expression<'a>> {
+    let Expression::NewExpression(new) = binding_value(ctx, object) else {
+        return None;
+    };
+    let id = binding_value(ctx, &new.callee).get_identifier_reference()?;
+    let AstKind::Class(class) = declaration(ctx, id)? else {
+        return None;
+    };
+    if class.heritage.is_some() {
+        return None;
+    }
+    let mut value = None;
+    for element in &class.body.body {
+        let oxc::ast::ast::ClassElement::PropertyDefinition(field) = element else {
+            return None;
+        };
+        if !field.r#static && field.key.static_name()? == name {
+            value = field.value.as_ref();
+        }
+    }
+    value
+}
+
+pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    let mut value = binding_value(ctx, expr);
+    let mut seen = HashSet::new();
+    while let Some(member) = value.get_member_expr() {
+        let Some(key) = member
+            .static_property_name()
+            .and_then(oxc::str::JSStr::as_str)
+        else {
+            break;
+        };
+        let Some(next) = projection(ctx, member.object(), key)
+            .map(|p| &p.value)
+            .or_else(|| instance_field(ctx, member.object(), key))
+        else {
+            break;
+        };
+        if !seen.insert(next.span()) {
+            break;
+        }
+        value = binding_value(ctx, next);
+    }
+    value
 }
 
 pub(super) fn alternatives<'a>(
@@ -512,7 +619,35 @@ pub(super) fn enclosing_call<'a>(
     id: oxc::syntax::node::NodeId,
 ) -> Option<Rc<Invocation<'a>>> {
     match outer(ctx, id)? {
-        AstKind::CallExpression(c) => Some(invoked(ctx, c)),
+        kind @ (AstKind::CallExpression(_)
+        | AstKind::NewExpression(_)
+        | AstKind::TaggedTemplateExpression(_)) => site(ctx, kind).map(|s| s.call),
+        AstKind::ArrayExpression(_) => {
+            let callbacks = ctx.resolution.array_callbacks.get_or_init(|| {
+                let mut callbacks = HashMap::<_, Vec<_>>::new();
+                for node in ctx.semantic.nodes().iter() {
+                    let Some(site) = site(ctx, node.kind()) else {
+                        continue;
+                    };
+                    for arg in site.call.args.iter().flatten() {
+                        let value = unwrapped(arg);
+                        if value.is_function() {
+                            callbacks
+                                .entry(value.span())
+                                .or_default()
+                                .push(Rc::clone(&site.call));
+                        }
+                    }
+                }
+                callbacks
+            });
+            let calls = callbacks.get(&ctx.semantic.nodes().get_node(id).span())?;
+            calls
+                .iter()
+                .find(|c| super::test_context::runner(ctx, c).test_or_suite())
+                .or_else(|| calls.first())
+                .cloned()
+        }
         _ => None,
     }
 }
@@ -574,6 +709,9 @@ pub(super) struct Invocation<'a> {
     pub(super) callee: &'a Expression<'a>,
     pub(super) path: Option<Vec<&'a str>>,
 
+    pub(super) unreadable_args: bool,
+    pub(super) template_arg: bool,
+    pub(super) intrinsic_targets: Vec<oxc::span::Span>,
     pub(super) args: Vec<Option<&'a Expression<'a>>>,
 }
 impl<'a> Invocation<'a> {
@@ -581,22 +719,73 @@ impl<'a> Invocation<'a> {
         self.args.get(i).copied().flatten()
     }
 }
-fn array_args<'a>(
-    ctx: &TsCtx<'a>,
-    arg: Option<&'a Expression<'a>>,
-) -> Vec<Option<&'a Expression<'a>>> {
-    if let Some(Expression::ArrayExpression(a)) = arg.map(|a| resolve(ctx, a)) {
-        a.elements.iter().map(|e| e.as_expression()).collect()
-    } else {
-        Vec::new()
+pub(super) fn call_position<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> usize {
+    if origin_path(ctx, &call.callee)
+        .is_some_and(|(origin, path)| origin == Origin::Global && path == ["Reflect", "apply"])
+        && let Some(target) = call
+            .arguments
+            .first()
+            .and_then(Argument::as_expression)
+            .map(unwrapped)
+    {
+        return target
+            .get_member_expr()
+            .map_or_else(|| target.span(), |member| member_span(ctx, member))
+            .start as usize;
     }
+    call.span.start as usize
 }
 pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<Invocation<'a>> {
-    if let Some(hit) = ctx.resolution.calls.borrow().get(&call.span) {
+    invocation(ctx, call.span, &call.callee, false, || {
+        let mut args = Arguments::default();
+        args.prepend(&call.arguments);
+        args
+    })
+}
+
+pub(super) struct Site<'a> {
+    pub(super) span: oxc::span::Span,
+    pub(super) callee: &'a Expression<'a>,
+    pub(super) call: Rc<Invocation<'a>>,
+}
+
+pub(super) fn site<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> Option<Site<'a>> {
+    let (span, callee, call) = match node {
+        AstKind::CallExpression(c) => (c.span, &c.callee, invoked(ctx, c)),
+        AstKind::NewExpression(n) => (
+            n.span,
+            &n.callee,
+            invocation(ctx, n.span, &n.callee, false, || {
+                let mut args = Arguments::default();
+                args.prepend(&n.arguments);
+                args
+            }),
+        ),
+        AstKind::TaggedTemplateExpression(t) => (
+            t.span,
+            &t.tag,
+            invocation(ctx, t.span, &t.tag, true, || {
+                Arguments::tagged(&t.quasi.expressions)
+            }),
+        ),
+        _ => return None,
+    };
+    Some(Site { span, callee, call })
+}
+
+fn invocation<'a>(
+    ctx: &TsCtx<'a>,
+    span: oxc::span::Span,
+    target: &'a Expression<'a>,
+    template_arg: bool,
+    args: impl FnOnce() -> Arguments<'a>,
+) -> Rc<Invocation<'a>> {
+    if let Some(hit) = ctx.resolution.calls.borrow().get(&span) {
         return Rc::clone(hit);
     }
-    let mut callee = resolve(ctx, &call.callee);
-    let mut args: Vec<_> = call.arguments.iter().map(Argument::as_expression).collect();
+    let mut callee = resolve(ctx, target);
+    let mut args = args();
+    let mut intrinsic_targets = Vec::new();
     let mut seen = HashSet::new();
     let path = loop {
         let parts = path(ctx, callee);
@@ -604,18 +793,40 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<I
         if !seen.insert(callee.span()) {
             break parts;
         }
+        if parts.as_deref() == Some(&["Function", "prototype", "call", "call"])
+            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
+            && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
+        {
+            intrinsic_targets.push(target.span());
+            callee = resolve(ctx, target);
+            args.next(ctx, false);
+            continue;
+        }
         if let Some(c) = call_expr(callee)
             && let Some(m) = resolve(ctx, &c.callee).get_member_expr()
             && MemberKeys(ctx).read(m) == Some("bind")
         {
-            args.splice(..0, c.arguments.iter().skip(1).map(Argument::as_expression));
-            callee = resolve(ctx, m.object());
+            args.prepend(&c.arguments);
+            let bound_this = args.next(ctx, false).and_then(|slot| slot.0);
+            if origin_path(ctx, m.object()).is_some_and(|(origin, path)| {
+                origin == Origin::Global && path == ["Function", "prototype", "call"]
+            }) && let Some(target) = bound_this
+            {
+                intrinsic_targets.push(target.span());
+                callee = resolve(ctx, target);
+                args.next(ctx, false);
+            } else {
+                callee = resolve(ctx, m.object());
+            }
             continue;
         }
         if parts.as_deref() == Some(&["Reflect", "apply"])
-            && let Some(target) = args.first().copied().flatten()
+            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
+            && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
         {
-            args = array_args(ctx, args.get(2).copied().flatten());
+            args.next(ctx, false);
+            args = Arguments::array(args.next(ctx, false).and_then(|slot| slot.0));
+            intrinsic_targets.push(target.span());
             callee = resolve(ctx, target);
             continue;
         }
@@ -624,18 +835,29 @@ pub(super) fn invoked<'a>(ctx: &TsCtx<'a>, call: &'a CallExpression<'a>) -> Rc<I
         };
         match MemberKeys(ctx).read(m) {
             Some("call") => {
-                args.drain(..args.len().min(1));
+                args.next(ctx, false);
             }
-            Some("apply") => args = array_args(ctx, args.get(1).copied().flatten()),
+            Some("apply") => {
+                args.next(ctx, false);
+                args = Arguments::array(args.next(ctx, false).and_then(|slot| slot.0));
+            }
             _ => break parts,
         }
         callee = resolve(ctx, m.object());
     };
-    let result = Rc::new(Invocation { callee, path, args });
+    let (args, unreadable_args) = args.finish(ctx);
+    let result = Rc::new(Invocation {
+        callee,
+        path,
+        unreadable_args,
+        template_arg,
+        intrinsic_targets,
+        args,
+    });
     ctx.resolution
         .calls
         .borrow_mut()
-        .insert(call.span, Rc::clone(&result));
+        .insert(span, Rc::clone(&result));
     result
 }
 

@@ -80,7 +80,7 @@ pub(super) fn call_writes<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
 }
 
 fn observation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
-    if call.args.len() != 2 {
+    if call.unreadable_args || call.args.len() != 2 {
         return false;
     }
     let Some(opts) = call.arg(1).and_then(|e| super::values::properties(ctx, e)) else {
@@ -93,24 +93,40 @@ fn observation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
         })
 }
 
+pub(super) fn banned_mock_method(method: &str) -> bool {
+    matches!(
+        method,
+        "stubGlobal"
+            | "unstable_mockModule"
+            | "importMock"
+            | "createMockFromModule"
+            | "genMockFromModule"
+            | "setMock"
+            | "replaceProperty"
+            | "enableAutomock"
+    )
+}
+
+pub(super) fn replacement_method(method: &str) -> bool {
+    matches!(
+        method,
+        "mockImplementation"
+            | "mockImplementationOnce"
+            | "mockReturnValue"
+            | "mockReturnValueOnce"
+            | "mockResolvedValue"
+            | "mockResolvedValueOnce"
+            | "mockRejectedValue"
+            | "mockRejectedValueOnce"
+            | "mockReturnThis"
+            | "withImplementation"
+            | "mockStepResult"
+            | "mockStepError"
+    )
+}
+
 pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
-    if super::values::receiver(ctx, call.callee).is_some_and(|(_, s)| {
-        matches!(
-            s,
-            "mockImplementation"
-                | "mockImplementationOnce"
-                | "mockReturnValue"
-                | "mockReturnValueOnce"
-                | "mockResolvedValue"
-                | "mockResolvedValueOnce"
-                | "mockRejectedValue"
-                | "mockRejectedValueOnce"
-                | "mockReturnThis"
-                | "withImplementation"
-                | "mockStepResult"
-                | "mockStepError"
-        )
-    }) {
+    if super::values::receiver(ctx, call.callee).is_some_and(|(_, s)| replacement_method(s)) {
         return true;
     }
     if let Some(parts) = &call.path {
@@ -147,19 +163,15 @@ fn framework_path<'a>(
             if matches!(*owner, "vi" | "vitest" | "jest") =>
         {
             match *m {
-                "fn" => call
-                    .arg(0)
-                    .is_some_and(|e| !super::values::resolves_to_global(ctx, e, "undefined")),
+                "fn" => {
+                    call.template_arg
+                        || call.unreadable_args
+                        || call.arg(0).is_some_and(|e| {
+                            !super::values::resolves_to_global(ctx, e, "undefined")
+                        })
+                }
                 "mockObject" | "mock" | "doMock" => *owner == "jest" || !observation(ctx, call),
-                "stubGlobal"
-                | "unstable_mockModule"
-                | "importMock"
-                | "createMockFromModule"
-                | "genMockFromModule"
-                | "setMock"
-                | "replaceProperty"
-                | "enableAutomock" => true,
-                _ => false,
+                m => banned_mock_method(m),
             }
         }
         _ => false,

@@ -94,7 +94,7 @@ fn test_member<'a>(ctx: &TsCtx<'a>, object: &'a Expression<'a>, name: &str) -> b
             && super::values::path(ctx, object).is_some_and(|p| p.is_empty()))
 }
 fn runner_global<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
-    let Expression::Identifier(id) = expr.get_inner_expression() else {
+    let Expression::Identifier(id) = super::values::resolve(ctx, expr) else {
         return false;
     };
     marker(id.name.as_str(), Marker::Runner) && ctx.semantic.is_reference_to_global_variable(id)

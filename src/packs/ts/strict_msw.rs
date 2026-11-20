@@ -14,8 +14,20 @@ enum Factory {
     Worker,
 }
 fn factory<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<Factory> {
-    let call = super::values::call_expr(super::values::resolve(ctx, e))?;
-    let inv = super::values::invoked(ctx, call);
+    let value = super::values::resolve(ctx, e);
+    let inv = if let Some(c) = super::values::call_expr(value) {
+        super::values::invoked(ctx, c)
+    } else {
+        super::values::site(
+            ctx,
+            match value {
+                Expression::TaggedTemplateExpression(t) => AstKind::TaggedTemplateExpression(t),
+                Expression::NewExpression(n) => AstKind::NewExpression(n),
+                _ => return None,
+            },
+        )?
+        .call
+    };
     let [source, name] = inv.path.as_deref()? else {
         return None;
     };
@@ -28,6 +40,18 @@ fn factory<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<Factory> {
         _ => None,
     }
 }
+pub(super) fn tracked<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
+    let value = super::values::resolve(ctx, expr);
+    if factory(ctx, value).is_some() {
+        return true;
+    }
+    super::values::receiver(ctx, value).is_some_and(|(owner, key)| {
+        matches!(
+            (factory(ctx, owner), key),
+            (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
+        )
+    })
+}
 fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     let Some(p) = opts
         .and_then(|e| super::values::properties(ctx, e))
@@ -35,15 +59,17 @@ fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     else {
         return false;
     };
-    super::values::literal(ctx, &p.value) == Some("error")
-        || super::values::resolve(ctx, &p.value).is_function()
+    p.kind == oxc::ast::ast::PropertyKind::Init
+        && (super::values::literal(ctx, &p.value) == Some("error")
+            || super::values::resolve(ctx, &p.value).is_function())
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    super::values::tracked_uses::report(ctx, RULE.id, findings);
     for node in ctx.semantic.nodes().iter() {
-        let AstKind::CallExpression(c) = node.kind() else {
+        let Some(c) = super::values::site(ctx, node.kind()) else {
             continue;
         };
-        let inv = super::values::invoked(ctx, c);
+        let inv = c.call;
         let Some((object, key)) = super::values::receiver(ctx, inv.callee) else {
             continue;
         };

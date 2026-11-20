@@ -48,11 +48,11 @@ fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
         return false;
     };
     let callee = match arg {
-        Expression::ArrowFunctionExpression(f) => f
-            .body
-            .as_expression()
-            .and_then(call_expr)
-            .map(|c| invoked(ctx, c).callee),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+            single_effect(arg)
+                .and_then(|e| call_expr(resolve(ctx, e)))
+                .map(|c| invoked(ctx, c).callee)
+        }
         e => Some(e),
     };
     callee
@@ -61,6 +61,9 @@ fn promise<'a>(ctx: &TsCtx<'a>, n: &'a NewExpression<'a>) -> bool {
         == Some(resolver)
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    if super::test_context::test_file(ctx.path) {
+        super::values::tracked_uses::report(ctx, RULE.id, findings);
+    }
     let nodes = ctx.semantic.nodes();
     let mut sleeps = Vec::new();
     for (id, n) in nodes.iter_enumerated() {
