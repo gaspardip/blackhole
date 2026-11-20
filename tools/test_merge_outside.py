@@ -18,6 +18,9 @@ target="${GH_TARGET:-main}"
 case "$*" in
   'pr view 7 --json baseRefName --jq .baseRefName')
     if [ -f "${HOME}/base-seen" ]; then
+      if [ -n "${GH_ADVANCED_BASE:-}" ]; then
+        git -C "${GH_ORIGIN}" update-ref refs/heads/main "${GH_ADVANCED_BASE}"
+      fi
       echo "${target}"
     else
       touch "${HOME}/base-seen"
@@ -27,6 +30,7 @@ case "$*" in
   'pr view 7 --json title --jq .title') echo 'chore: review' ;;
   'pr view 7 --json body --jq .body') ;;
   'pr merge 7 --squash --match-head-commit '*)
+    touch "${HOME}/merge-called"
     if [ "${GH_ENQUEUE:-0}" = 1 ]; then
       echo "queued for ${target}"
     else
@@ -93,7 +97,7 @@ class LandedMerge(Repo):
         self.assertIn(f"commit {landed[:9]}:", done.stderr)
         self.assertIn("banned name #1", done.stderr)
 
-    def test_a_hit_in_the_combined_squash_blocks_the_merge(self) -> None:
+    def split_squash_inputs(self) -> tuple[str, str, str]:
         self.write("example.txt", "first\n\nlast\n")
         ancestor = self.commit("chore: start")
         git(self.dir, "checkout", "-q", "-b", "pull")
@@ -102,10 +106,9 @@ class LandedMerge(Repo):
         git(self.dir, "checkout", "-q", "main")
         self.write("example.txt", "quo\n\nlast\n")
         base = self.commit("chore: change first line")
-        for tip in (base, head):
-            clean = run(["range", ancestor, tip], self.dir)
-            self.assertEqual(clean.returncode, 0, clean.stderr)
+        return ancestor, base, head
 
+    def prepare_split_squash(self, base: str, head: str) -> tuple[Path, str]:
         tree = self.loose_tree("example.txt", "quo\n\nkka\n")
         landed = git(self.dir, "commit-tree", tree, "-p", base, "-m", "chore: review (#7)")
         git(self.dir, "update-ref", "refs/heads/fixture", landed)
@@ -113,12 +116,34 @@ class LandedMerge(Repo):
         git(self.dir, "clone", "--bare", "-q", ".", str(origin))
         git(origin, "update-ref", "refs/pull/7/head", head)
         git(self.dir, "remote", "add", "origin", str(origin))
+        return origin, landed
 
+    def test_a_hit_in_the_combined_squash_blocks_the_merge(self) -> None:
+        ancestor, base, head = self.split_squash_inputs()
+        for tip in (base, head):
+            clean = run(["range", ancestor, tip], self.dir)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+
+        origin, landed = self.prepare_split_squash(base, head)
         done = self.squash(origin, landed)
 
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn("example.txt:1 banned name #1", done.stderr)
         self.assertEqual(git(origin, "rev-parse", "refs/heads/main"), base)
+
+    def test_a_base_replacement_cannot_hide_a_squash_hit(self) -> None:
+        ancestor, base, head = self.split_squash_inputs()
+        origin, landed = self.prepare_split_squash(base, head)
+        replacement = git(
+            self.dir, "commit-tree", f"{ancestor}^{{tree}}", "-p", ancestor, "-m", "chore: replace base",
+        )
+        git(self.dir, "replace", base, replacement)
+
+        done = self.squash(origin, landed)
+
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("example.txt:1 banned name #1", done.stderr)
+        self.assertFalse((self.dir / "merge-called").exists())
 
     def clean_pull(self) -> tuple[Path, str, str]:
         base = self.commit("chore: start")
@@ -139,6 +164,19 @@ class LandedMerge(Repo):
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertEqual(done.stderr, "merge-outside: pull request 7 does not target main\n")
         self.assertEqual(git(origin, "rev-parse", "refs/heads/release"), base)
+
+    def test_an_advanced_base_is_refused_before_merge(self) -> None:
+        origin, base, _ = self.clean_pull()
+        tree = f"{base}^{{tree}}"
+        advanced = git(origin, "commit-tree", tree, "-p", base, "-m", "chore: advance main")
+        landed = git(origin, "commit-tree", tree, "-p", advanced, "-m", "chore: review (#7)")
+
+        done = self.squash(origin, landed, GH_ADVANCED_BASE=advanced)
+
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(done.stderr, "merge-outside: could not confirm preview base for pull request 7\n")
+        self.assertFalse((self.dir / "merge-called").exists())
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/main"), advanced)
 
     def test_an_enqueued_pull_request_is_not_reported_as_merged(self) -> None:
         origin, base, landed = self.clean_pull()

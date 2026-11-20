@@ -1,6 +1,7 @@
 #!/bin/sh
 # Merges a pull request the CI name guard skipped: scans it here, then merges exactly what was scanned.
 set -eu
+export GIT_NO_REPLACE_OBJECTS=1
 number="$1"
 cd "$(dirname "$0")/.."
 require_main() {
@@ -35,7 +36,13 @@ preview_commit="$(git -c user.name=blackhole -c user.email=blackhole@localhost c
 python3 -I tools/name_guard.py range "${base}" "${preview_commit}"
 # The subject and body are passed back so an edit made after the scan cannot reach main.
 require_main
-# shortcut: a retarget after this check can land unscanned on another branch until the daily scan.
+if ! git fetch -q origin "${main_refspec}" >/dev/null 2>&1 ||
+  ! current_base="$(git rev-parse --verify "${main_ref}" 2>/dev/null)" ||
+  [ "${current_base}" != "${base}" ]; then
+  echo "merge-outside: could not confirm preview base for pull request ${number}" >&2
+  exit 1
+fi
+# shortcut: the daily scan covers a late retarget, and only the post-merge scan covers a late base move.
 gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}" \
   >/dev/null 2>&1 || merge_unconfirmed
 merge_status="$(gh pr view "${number}" --json state,baseRefName,mergeCommit \
@@ -47,7 +54,6 @@ esac
 git fetch -q origin "${main_refspec}" >/dev/null 2>&1 || merge_unconfirmed
 resolved="$(git rev-parse --verify --end-of-options "${landed}^{commit}" 2>/dev/null)" || merge_unconfirmed
 [ "${landed}" = "${resolved}" ] || merge_unconfirmed
-GIT_NO_REPLACE_OBJECTS=1 git merge-base --is-ancestor "${landed}" "${main_ref}" \
-  >/dev/null 2>&1 || merge_unconfirmed
+git merge-base --is-ancestor "${landed}" "${main_ref}" >/dev/null 2>&1 || merge_unconfirmed
 # GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
 python3 -I tools/name_guard.py range "${base}" "${landed}"
