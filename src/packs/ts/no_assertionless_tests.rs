@@ -9,7 +9,7 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 fn literal(e: &Expression<'_>) -> bool {
-    let e = e.get_inner_expression();
+    let e = super::values::unwrapped(e);
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
 fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
@@ -70,13 +70,17 @@ fn tautology<'a>(
         })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let mut assertions = BTreeMap::<u32, bool>::new();
+    let mut assertions = BTreeMap::<u32, Option<usize>>::new();
     let mut tests = Vec::new();
     for n in ctx.semantic.nodes().iter() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
         let inv = c.call;
+        let position = || match n.kind() {
+            oxc::ast::AstKind::CallExpression(call) => super::values::call_position(ctx, call),
+            _ => c.span.start as usize,
+        };
         let parts = super::test_context::runner(ctx, &inv);
         if parts.is_empty()
             && let Some(id) = c.callee.get_identifier_reference()
@@ -111,12 +115,16 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 continue;
             }
             let bare_literal = parts == ["expect"]
-                && inv.arg(0).is_some_and(literal)
+                && inv
+                    .arg(0)
+                    .is_some_and(|value| literal(super::values::resolve(ctx, value)))
                 && super::values::outer(ctx, n.id())
                     .and_then(|kind| kind.as_member_expression_kind())
                     .is_none();
-            let found = bare_literal || tautology(ctx, &inv, parts);
-            *assertions.entry(c.span.start).or_default() |= found;
+            let finding = assertions.entry(c.span.start).or_default();
+            if bare_literal || tautology(ctx, &inv, parts) {
+                *finding = Some(position());
+            }
         }
         if !parts.test()
             || parts.todo
@@ -132,11 +140,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         }
         // shortcut: callbacks passed by reference need interprocedural analysis before their assertions can be judged.
         if let Some(body) = inv.inline_test_body() {
-            let at = match n.kind() {
-                oxc::ast::AstKind::CallExpression(call) => super::values::call_position(ctx, call),
-                _ => c.span.start as usize,
-            };
-            tests.push((at, body));
+            tests.push((position(), body));
         }
     }
     let mut at = BTreeSet::new();
@@ -145,7 +149,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if scope.peek().is_none() {
             at.insert(start);
         } else {
-            at.extend(scope.filter_map(|(&pos, &bad)| bad.then_some(pos as usize)));
+            at.extend(scope.filter_map(|(_, &finding)| finding));
         }
     }
     for pos in at {

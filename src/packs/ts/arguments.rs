@@ -1,5 +1,6 @@
 use super::{TsCtx, resolve};
 use oxc::ast::ast::{Argument, ArrayExpressionElement, Expression};
+use oxc::span::{GetSpan, Span};
 use std::collections::HashSet;
 
 enum Part<'a> {
@@ -16,7 +17,7 @@ pub(super) struct Arguments<'a> {
     active: HashSet<u32>,
     done: HashSet<u32>,
     emitted: usize,
-    pub(super) unreadable: bool,
+    unreadable: Option<Span>,
 }
 impl<'a> Arguments<'a> {
     pub(super) fn prepend(&mut self, args: &'a [Argument<'a>]) {
@@ -55,7 +56,7 @@ impl<'a> Arguments<'a> {
                 }
                 Part::Spread(e) => {
                     let Expression::ArrayExpression(array) = resolve(ctx, e) else {
-                        self.unreadable = true;
+                        self.unreadable = Some(e.span());
                         self.pending.clear();
                         return None;
                     };
@@ -64,7 +65,7 @@ impl<'a> Arguments<'a> {
                         continue;
                     }
                     if !self.active.insert(id) {
-                        self.unreadable = true;
+                        self.unreadable = Some(e.span());
                         self.pending.clear();
                         return None;
                     }
@@ -80,7 +81,10 @@ impl<'a> Arguments<'a> {
         None
     }
 
-    pub(super) fn finish(mut self, ctx: &TsCtx<'a>) -> (Vec<Option<&'a Expression<'a>>>, bool) {
+    pub(super) fn finish(
+        mut self,
+        ctx: &TsCtx<'a>,
+    ) -> (Vec<Option<&'a Expression<'a>>>, Option<Span>) {
         let mut result = Vec::new();
         // Rules index the first three arguments and search the remaining values.
         while let Some(value) = self.next(ctx, result.len() >= 3) {

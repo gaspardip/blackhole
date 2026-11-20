@@ -1,7 +1,9 @@
 use super::test_context::single_value;
-use super::values::{MemberKeys, call_expr, invoked, receiver, resolve, unwrapped};
+use super::values::{MemberKeys, call_expr, invoked, member_object, receiver, resolve, unwrapped};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::ast::Expression;
+use oxc::span::GetSpan;
+use std::collections::HashSet;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unsignaled-poll",
     family: Family::Tests,
@@ -10,17 +12,18 @@ pub(crate) const RULE: Rule = Rule {
     run: Run::Ts(check),
 };
 fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
-    e = unwrapped(e);
-    let resolved = resolve(ctx, e);
-    if resolved.get_member_expr().is_some() {
-        e = resolved;
-    }
     let mut first = true;
     let mut reads = false;
+    let mut seen = HashSet::new();
     loop {
+        e = unwrapped(e);
+        let resolved = resolve(ctx, e);
+        if resolved.get_member_expr().is_some() {
+            e = resolved;
+        }
         if let Some(m) = e.get_member_expr() {
             let name = MemberKeys(ctx).read(m);
-            if name == Some("current") {
+            if name == Some("current") || !seen.insert(m.span()) {
                 return None;
             }
             reads |= name == Some("mock") || first && matches!(name, Some("length" | "size"));
@@ -89,7 +92,13 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
-    for (id, n) in nodes.iter_enumerated() {
+    let length_subjects: HashSet<_> = nodes
+        .iter()
+        .filter_map(|n| n.kind().as_member_expression_kind())
+        .filter(|&m| MemberKeys(ctx).read_kind(m) == Some("toHaveLength"))
+        .filter_map(|m| call_expr(resolve(ctx, member_object(m))).map(|call| call.span))
+        .collect();
+    for n in nodes.iter() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
@@ -108,12 +117,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         let reads = recorder(ctx, value);
         if reads == Some(true)
-            || poll
-                && reads.is_some()
-                && super::values::outer(ctx, id)
-                    .and_then(|n| n.as_member_expression_kind())
-                    .and_then(|m| MemberKeys(ctx).read_kind(m))
-                    == Some("toHaveLength")
+            || poll && reads.is_some() && length_subjects.contains(&c.span)
             || !poll && assertion(ctx, value)
         {
             findings.report(c.span.start as usize, None);

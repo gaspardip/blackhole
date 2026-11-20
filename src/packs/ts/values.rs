@@ -10,7 +10,7 @@ use oxc::{
         AstKind,
         ast::{
             Argument, BindingPattern, CallExpression, Expression, IdentifierReference,
-            MemberExpression, ObjectPropertyKind, PropertyKey,
+            MemberExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
         },
     },
     span::GetSpan,
@@ -32,6 +32,7 @@ pub(crate) struct Resolution<'a> {
     written: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
+    pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
@@ -709,7 +710,7 @@ pub(super) struct Invocation<'a> {
     pub(super) callee: &'a Expression<'a>,
     pub(super) path: Option<Vec<&'a str>>,
 
-    pub(super) unreadable_args: bool,
+    pub(super) unreadable_args: Option<oxc::span::Span>,
     pub(super) template_arg: bool,
     pub(super) intrinsic_targets: Vec<oxc::span::Span>,
     pub(super) args: Vec<Option<&'a Expression<'a>>>,
@@ -874,17 +875,29 @@ pub(super) fn call_expr<'a>(e: &'a Expression<'a>) -> Option<&'a CallExpression<
 
 #[derive(Clone, Default)]
 pub(super) struct Properties<'a> {
-    pub(super) named: std::collections::BTreeMap<&'a str, &'a oxc::ast::ast::ObjectProperty<'a>>,
+    pub(super) named: std::collections::BTreeMap<&'a str, &'a ObjectProperty<'a>>,
     pub(super) unknown: bool,
 }
-impl Properties<'_> {
-    fn invalidate(&mut self) {
+pub(super) trait ObjectSummary<'a>: Clone + Default {
+    fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>);
+    fn unreadable(&mut self);
+    fn overlay(&mut self, other: &Self);
+}
+impl<'a> ObjectSummary<'a> for Properties<'a> {
+    fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>) {
+        if let Some(name) = key(ctx, &property.key) {
+            self.named.insert(name, property);
+        } else {
+            self.unreadable();
+        }
+    }
+    fn unreadable(&mut self) {
         self.unknown = true;
         self.named.clear();
     }
     fn overlay(&mut self, other: &Self) {
         if other.unknown {
-            self.invalidate();
+            self.unreadable();
         }
         self.named.extend(
             other
@@ -898,17 +911,24 @@ pub(super) fn properties<'a>(
     ctx: &TsCtx<'a>,
     initial: &'a Expression<'a>,
 ) -> Option<Properties<'a>> {
+    object_summary(ctx, initial, &ctx.resolution.objects)
+}
+pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
+    ctx: &TsCtx<'a>,
+    initial: &'a Expression<'a>,
+    cache: &RefCell<HashMap<u32, S>>,
+) -> Option<S> {
     use oxc::ast::ast::ObjectExpression;
-    struct Frame<'a> {
+    struct Frame<'a, S> {
         object: &'a ObjectExpression<'a>,
         index: usize,
-        summary: Properties<'a>,
+        summary: S,
         cyclic: bool,
     }
     let Expression::ObjectExpression(root) = resolve(ctx, initial) else {
         return None;
     };
-    let mut cache = ctx.resolution.objects.borrow_mut();
+    let mut cache = cache.borrow_mut();
     if let Some(hit) = cache.get(&root.span.start) {
         return Some(hit.clone());
     }
@@ -916,7 +936,7 @@ pub(super) fn properties<'a>(
     let mut stack = vec![Frame {
         object: root,
         index: 0,
-        summary: Properties::default(),
+        summary: S::default(),
         cyclic: false,
     }];
     loop {
@@ -937,16 +957,10 @@ pub(super) fn properties<'a>(
         };
         frame.index += 1;
         match property {
-            ObjectPropertyKind::ObjectProperty(p) => {
-                if let Some(name) = key(ctx, &p.key) {
-                    frame.summary.named.insert(name, p);
-                } else {
-                    frame.summary.invalidate();
-                }
-            }
+            ObjectPropertyKind::ObjectProperty(p) => frame.summary.field(ctx, p),
             ObjectPropertyKind::SpreadProperty(s) => {
                 let Expression::ObjectExpression(child) = resolve(ctx, &s.argument) else {
-                    frame.summary.invalidate();
+                    frame.summary.unreadable();
                     continue;
                 };
                 if let Some(hit) = cache.get(&child.span.start) {
@@ -955,12 +969,12 @@ pub(super) fn properties<'a>(
                     stack.push(Frame {
                         object: child,
                         index: 0,
-                        summary: Properties::default(),
+                        summary: S::default(),
                         cyclic: false,
                     });
                 } else {
                     frame.cyclic = true;
-                    frame.summary.invalidate();
+                    frame.summary.unreadable();
                 }
             }
         }

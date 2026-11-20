@@ -1,13 +1,16 @@
 use super::values::global_object;
 use super::{
     config_responses::transport_response,
-    values::{declaration, initializer, key, path, resolve},
+    values::{ObjectSummary, declaration, initializer, key, object_summary, path, resolve},
 };
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{Expression, ObjectPropertyKind, Statement, TSType, TSTypeName, TSTypeQueryExprName},
+        ast::{
+            Expression, ObjectProperty, ObjectPropertyKind, Statement, TSType, TSTypeName,
+            TSTypeQueryExprName,
+        },
     },
     span::{GetSpan, Span},
 };
@@ -55,44 +58,36 @@ fn fetch<'a>(ctx: &TsCtx<'a>, mut ty: &'a TSType<'a>) -> bool {
     false
 }
 
-fn option<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-    enum Item<'a> {
-        Object(&'a Expression<'a>),
-        Field(&'a oxc::ast::ast::ObjectProperty<'a>),
-        Leave(Span),
-    }
-    let mut pending = vec![Item::Object(initial)];
-    let mut ancestors = HashSet::new();
-    while let Some(item) = pending.pop() {
-        match item {
-            Item::Object(e) => {
-                let Expression::ObjectExpression(o) = resolve(ctx, e) else {
-                    return None;
-                };
-                if !ancestors.insert(o.span) {
-                    return None;
-                }
-                pending.push(Item::Leave(o.span));
-                for p in &o.properties {
-                    pending.push(match p {
-                        ObjectPropertyKind::SpreadProperty(s) => Item::Object(&s.argument),
-                        ObjectPropertyKind::ObjectProperty(p) => Item::Field(p),
-                    });
-                }
-            }
-            Item::Field(f) => {
-                if key(ctx, &f.key)
-                    .map_or_else(|| transport_response(ctx, &f.value), |name| name == "fetch")
-                {
-                    return Some(&f.value);
-                }
-            }
-            Item::Leave(s) => {
-                ancestors.remove(&s);
-            }
+#[derive(Clone, Copy, Default)]
+pub(super) enum TransportOption<'a> {
+    #[default]
+    Absent,
+    Unknown,
+    Fetch(&'a Expression<'a>),
+}
+impl<'a> ObjectSummary<'a> for TransportOption<'a> {
+    fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>) {
+        if key(ctx, &property.key).map_or_else(
+            || transport_response(ctx, &property.value),
+            |name| name == "fetch",
+        ) {
+            *self = Self::Fetch(&property.value);
         }
     }
-    None
+    fn unreadable(&mut self) {
+        *self = Self::Unknown;
+    }
+    fn overlay(&mut self, other: &Self) {
+        if !matches!(other, Self::Absent) {
+            *self = *other;
+        }
+    }
+}
+fn option<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    match object_summary(ctx, initial, &ctx.resolution.transport_options)? {
+        TransportOption::Fetch(value) => Some(value),
+        TransportOption::Absent | TransportOption::Unknown => None,
+    }
 }
 
 fn arguments<'a>(

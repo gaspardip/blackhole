@@ -1,7 +1,13 @@
 use super::values::MemberKeys;
-use super::values::{Invocation, Origin, call_expr, invoked, origin_path, resolve};
+use super::values::{
+    Invocation, Origin, Properties, call_expr, declaration, invoked, origin_path, properties,
+    resolve, resolves_to_global,
+};
 use crate::engine::TsCtx;
-use oxc::ast::ast::{ArrowFunctionBody, Expression, FunctionBody, Statement};
+use oxc::ast::{
+    AstKind,
+    ast::{ArrowFunctionBody, Expression, FunctionBody, Statement, TSType},
+};
 use oxc::span::GetSpan;
 
 pub(super) fn test_file(path: &str) -> bool {
@@ -73,12 +79,21 @@ enum ModuleRoot {
     CallableTest,
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+enum OptionSyntax {
+    #[default]
+    Named,
+    Flexible,
+    Node,
+    Playwright,
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Runner<'a> {
     prefix: [&'a str; 3],
     length: usize,
     module_root: ModuleRoot,
-    options_second: bool,
+    option_syntax: OptionSyntax,
     pub(super) last: Option<&'a str>,
     pub(super) skipped: bool,
     pub(super) skip_at: Option<usize>,
@@ -157,8 +172,12 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
         }
         if let Some((origin, parts)) = origin_path(ctx, e) {
             let mut result = Runner {
-                options_second: origin == Origin::Global
-                    || matches!(parts.first().copied(), Some("node:test" | "vitest")),
+                option_syntax: match (origin, parts.first().copied()) {
+                    (Origin::Global, _) | (_, Some("vitest")) => OptionSyntax::Flexible,
+                    (_, Some("node:test")) => OptionSyntax::Node,
+                    (_, Some("@playwright/test")) => OptionSyntax::Playwright,
+                    _ => OptionSyntax::Named,
+                },
                 ..Runner::default()
             };
             let names = match (origin, parts.as_slice()) {
@@ -222,18 +241,135 @@ impl Runner<'_> {
     pub(super) fn test(&self) -> bool {
         self.first().is_some_and(|name| is_test(name))
     }
-    pub(super) fn accepts_options_second(&self) -> bool {
-        self.options_second && self.length == 1
-    }
     pub(super) fn test_or_suite(&self) -> bool {
         self.test() || self.first().is_some_and(|name| suite(name))
     }
 }
 
-impl<'a> Invocation<'a> {
-    pub(super) fn test_options(&self) -> [Option<&'a Expression<'a>>; 2] {
-        [self.arg(1), self.arg(2)]
+pub(super) enum TestOption<'a> {
+    Object(&'a Expression<'a>, Properties<'a>),
+    Opaque { at: usize, before_callback: bool },
+    Timeout(usize),
+}
+
+fn declared_callback(ctx: &TsCtx<'_>, expr: &Expression<'_>) -> bool {
+    let Some(decl) = expr
+        .get_identifier_reference()
+        .and_then(|id| declaration(ctx, id))
+    else {
+        return false;
+    };
+    let annotation = match decl {
+        AstKind::Function(_) => return true,
+        AstKind::FormalParameter(p) => p.type_annotation.as_deref(),
+        AstKind::VariableDeclarator(v) => v.type_annotation.as_deref(),
+        _ => None,
+    };
+    annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSFunctionType(_)))
+}
+
+fn callback<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let value = resolve(ctx, expr);
+        if value.is_function() || declared_callback(ctx, value) || declared_callback(ctx, expr) {
+            return true;
+        }
+        let Some(member) = call_expr(value)
+            .and_then(|call| resolve(ctx, &call.callee).get_member_expr())
+            .filter(|m| MemberKeys(ctx).read(m) == Some("bind"))
+        else {
+            return false;
+        };
+        if !seen.insert(value.span()) {
+            return false;
+        }
+        expr = member.object();
     }
+}
+
+fn opaque_option<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
+    let value = resolve(ctx, arg);
+    !value.is_literal()
+        && !matches!(value, Expression::TemplateLiteral(_))
+        && !resolves_to_global(ctx, value, "undefined")
+        && !callback(ctx, arg)
+}
+
+impl<'a> Runner<'a> {
+    pub(super) fn test_options(
+        self,
+        ctx: &TsCtx<'a>,
+        call: &Invocation<'a>,
+    ) -> [Option<TestOption<'a>>; 2] {
+        let object = |arg| properties(ctx, arg).map(|props| TestOption::Object(arg, props));
+        let [first, second, third] = [call.arg(0), call.arg(1), call.arg(2)];
+        if (self.option_syntax == OptionSyntax::Node
+            || self.option_syntax == OptionSyntax::Flexible && self.length == 1)
+            && let Some(first) = first
+        {
+            if let Some(options) = object(first) {
+                return [Some(options), None];
+            }
+            if self.option_syntax == OptionSyntax::Node
+                && third.is_none()
+                && second.is_some_and(|arg| callback(ctx, arg))
+                && opaque_option(ctx, first)
+            {
+                return [
+                    Some(TestOption::Opaque {
+                        at: first.span().start as usize,
+                        before_callback: true,
+                    }),
+                    None,
+                ];
+            }
+        }
+        let mut options = second.and_then(object);
+        if options.is_none()
+            && matches!(
+                self.option_syntax,
+                OptionSyntax::Node | OptionSyntax::Flexible
+            )
+        {
+            let before_callback = third.is_some_and(|arg| callback(ctx, arg));
+            if let Some(arg) = second
+                && (self.length == 1 || before_callback)
+                && opaque_option(ctx, arg)
+            {
+                options = Some(TestOption::Opaque {
+                    at: arg.span().start as usize,
+                    before_callback,
+                });
+            } else if self.length == 1
+                && call.args.len() <= 1
+                && let Some(spread) = call.unreadable_args
+            {
+                options = Some(TestOption::Opaque {
+                    at: spread.start as usize,
+                    before_callback: false,
+                });
+            }
+        }
+        let timeout = third.and_then(|arg| {
+            if matches!(
+                self.option_syntax,
+                OptionSyntax::Node | OptionSyntax::Playwright
+            ) {
+                return None;
+            }
+            object(arg).or_else(|| {
+                (second.is_some()
+                    && !matches!(options, Some(TestOption::Object(..)))
+                    && !callback(ctx, arg))
+                .then_some(TestOption::Timeout(arg.span().start as usize))
+            })
+        });
+        [options, timeout]
+    }
+}
+
+impl Invocation<'_> {
     pub(super) fn inline_test_body(&self) -> Option<oxc::span::Span> {
         self.args
             .iter()

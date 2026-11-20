@@ -1,12 +1,6 @@
-use super::test_context::{Runner, enclosing_runners, test_file};
+use super::test_context::{Runner, TestOption, enclosing_runners, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::{
-    ast::{
-        AstKind,
-        ast::{Expression, TSType},
-    },
-    span::GetSpan,
-};
+use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::BTreeSet;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-skipped-tests",
@@ -59,45 +53,16 @@ fn truthy<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<bool> {
         _ => None,
     }
 }
-fn readable_non_options<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
-    let value = super::values::resolve(ctx, arg);
-    if value.is_function()
-        || value.is_literal()
-        || super::values::resolves_to_global(ctx, value, "undefined")
-    {
-        return true;
-    }
-    [value, arg].into_iter().any(|expr| {
-        let Some(declaration) = expr
-            .get_identifier_reference()
-            .and_then(|id| super::values::declaration(ctx, id))
-        else {
-            return false;
-        };
-        let annotation = match declaration {
-            AstKind::Function(_) => return true,
-            AstKind::FormalParameter(p) => p.type_annotation.as_deref(),
-            AstKind::VariableDeclarator(v) => v.type_annotation.as_deref(),
-            _ => None,
-        };
-        annotation.is_some_and(|a| matches!(a.type_annotation, TSType::TSFunctionType(_)))
-    })
-}
-
 pub(super) fn skip_option<'a>(
     ctx: &TsCtx<'a>,
     call: &super::values::Invocation<'a>,
     runner: Runner<'a>,
 ) -> Option<(usize, bool)> {
-    for index in 0..2 {
-        let Some(arg) = call.arg(index) else {
-            continue;
-        };
-        let Some(options) = super::values::properties(ctx, arg) else {
-            if index == 1 && runner.accepts_options_second() && !readable_non_options(ctx, arg) {
-                return Some((arg.span().start as usize, false));
-            }
-            continue;
+    for slot in runner.test_options(ctx, call).into_iter().flatten() {
+        let (arg, options) = match slot {
+            TestOption::Object(arg, options) => (arg, options),
+            TestOption::Opaque { at, .. } => return Some((at, false)),
+            TestOption::Timeout(_) => continue,
         };
         for key in ["todo", "skip"] {
             if let Some(property) = options.named.get(key) {

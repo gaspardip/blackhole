@@ -2,6 +2,7 @@ use super::{MemberKeys, Origin, origin_path, resolve, unwrapped};
 use crate::engine::{Findings, TsCtx};
 use oxc::ast::{AstKind, ast::Expression};
 use oxc::span::GetSpan;
+use std::collections::HashSet;
 
 fn normalized_prefix<'a>(ctx: &TsCtx<'a>, callee: &'a Expression<'a>) -> usize {
     let callee = resolve(ctx, callee);
@@ -105,10 +106,17 @@ fn owner<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<&'static str>
     }
 }
 
-fn escapes<'a>(ctx: &TsCtx<'a>) -> Vec<Escape> {
-    let mut escapes = Vec::new();
-    let mut inspect = |value: &'a Expression<'a>| {
+fn inspect_value<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, escapes: &mut Vec<Escape>) {
+    let mut pending = vec![value];
+    let mut seen = HashSet::new();
+    while let Some(value) = pending.pop() {
         let value = unwrapped(value);
+        if let Expression::ConditionalExpression(branch) = resolve(ctx, value) {
+            if seen.insert(branch.span) {
+                pending.extend([&branch.alternate, &branch.consequent]);
+            }
+            continue;
+        }
         if let Some(rule) = owner(ctx, value) {
             let span = value
                 .get_member_expr()
@@ -120,10 +128,22 @@ fn escapes<'a>(ctx: &TsCtx<'a>) -> Vec<Escape> {
                 message: format!("cannot read how `{name}` is used here; call it by name"),
             });
         }
-    };
+    }
+}
+
+fn escapes(ctx: &TsCtx<'_>) -> Vec<Escape> {
+    let nodes = ctx.semantic.nodes();
+    let mut targets = HashSet::new();
+    for node in nodes.iter() {
+        if let Some(site) = super::site(ctx, node.kind()) {
+            targets.extend(site.call.intrinsic_targets.iter().copied());
+        }
+    }
+    let mut escapes = Vec::new();
+    let mut inspect = |value| inspect_value(ctx, value, &mut escapes);
     let mut fields = Vec::new();
-    let mut projections = std::collections::HashSet::new();
-    for node in ctx.semantic.nodes().iter() {
+    let mut projections = HashSet::new();
+    for node in nodes.iter() {
         if let Some(m) = node.kind().as_member_expression_kind()
             && let Some(prop) = MemberKeys(ctx)
                 .read_kind(m)
@@ -133,14 +153,13 @@ fn escapes<'a>(ctx: &TsCtx<'a>) -> Vec<Escape> {
         }
         match node.kind() {
             AstKind::CallExpression(call) => {
-                let invocation = super::invoked(ctx, call);
                 for arg in call
                     .arguments
                     .iter()
                     .skip(normalized_prefix(ctx, &call.callee))
                     .filter_map(|a| a.as_expression())
                 {
-                    if !invocation.intrinsic_targets.contains(&arg.span()) {
+                    if !targets.contains(&arg.span()) {
                         inspect(arg);
                     }
                 }

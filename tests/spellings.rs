@@ -399,3 +399,63 @@ fn tagged_calls_without_an_offence() {
         }
     }
 }
+
+#[test]
+fn wrapped_and_aliased_constant_assertions() {
+    let source = "const input = 1;\n\
+                  test('checks', () => {\n\
+                  assert((0, true));\n\
+                  expect((0, true)).toBe(false);\n\
+                  expect(input);\n\
+                  assert((0, read()));\n\
+                  expect((0, read())).toBe(true);\n\
+                  expect(read()).toBe(input);\n\
+                  });";
+    let hits = run(registry(), [(TEST_FILE, source.as_bytes())]);
+    assert_eq!(
+        hits.iter().map(|f| (f.rule, f.line)).collect::<Vec<_>>(),
+        [
+            ("ts/no-assertionless-tests", 3),
+            ("ts/no-assertionless-tests", 4),
+            ("ts/no-assertionless-tests", 5)
+        ]
+    );
+}
+
+#[test]
+fn reflected_tautology_points_to_the_matcher() {
+    let source =
+        "test('checks', () => {\nReflect.apply(expect(true).toBe, undefined, [false]);\n});";
+    let hits = run(registry(), [(TEST_FILE, source.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|f| (f.rule, f.line, f.col))
+            .collect::<Vec<_>>(),
+        [("ts/no-assertionless-tests", 2, 28)]
+    );
+}
+
+#[test]
+fn poll_and_recorder_aliases_match_direct_expressions() {
+    let source = "expect.poll(() => calls).toHaveLength(1);\n\
+                  const pending = expect.poll(() => calls);\n\
+                  pending.toHaveLength(1);\n\
+                  expect.poll(() => calls.current.length).toBe(1);\n\
+                  const currentCalls = calls.current;\n\
+                  expect.poll(() => currentCalls.length).toBe(1);\n\
+                  const polledState = expect.poll(() => read());\n\
+                  polledState.toHaveLength(1);\n\
+                  const recorder = calls;\n\
+                  expect.poll(() => recorder.length).toBe(1);";
+    let hits = run(registry(), [(TEST_FILE, source.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|f| (f.rule, f.line, f.col))
+            .collect::<Vec<_>>(),
+        [
+            ("ts/no-unsignaled-poll", 1, 1),
+            ("ts/no-unsignaled-poll", 2, 17),
+            ("ts/no-unsignaled-poll", 10, 1)
+        ]
+    );
+}

@@ -157,3 +157,132 @@ fn opaque_runner_options_are_reported() {
         );
     }
 }
+
+#[test]
+fn prebound_intrinsic_reports_only_the_skip() {
+    let source = "const run=Reflect.apply.bind(undefined,test.skip,undefined);\nrun(['sample',()=>assert(read())]);";
+    let found = run(registry(), [("case.test.ts", source.as_bytes())]);
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
+            .collect::<Vec<_>>(),
+        [("ts/no-skipped-tests", 2, 1, None)]
+    );
+}
+
+#[test]
+fn conditional_arguments_inspect_both_result_arms() {
+    let check = |source: &str| {
+        run(registry(), [("case.test.ts", source.as_bytes())])
+            .into_iter()
+            .map(|f| (f.rule, f.line, f.note))
+            .collect::<Vec<_>>()
+    };
+    let source = "consume(flag ? test.skip : ordinary);\n\
+                  consume(flag ? ordinary : test.only);\n\
+                  consume(flag ? vi.mock : ordinary);\n\
+                  consume(flag ? ordinary : vi.fn);\n\
+                  consume(test.skip ? ordinary : other);\n\
+                  { const vi = helpers; consume(flag ? vi.mock : ordinary); }";
+    assert_eq!(
+        check(source),
+        [
+            (
+                "ts/no-skipped-tests",
+                1,
+                Some("cannot read how `skip` is used here; call it by name".into())
+            ),
+            (
+                "ts/no-skipped-tests",
+                2,
+                Some("cannot read how `only` is used here; call it by name".into())
+            ),
+            (
+                "ts/no-test-doubles",
+                3,
+                Some("cannot read how `mock` is used here; call it by name".into())
+            ),
+            (
+                "ts/no-test-doubles",
+                4,
+                Some("cannot read how `fn` is used here; call it by name".into())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn runner_option_slots_follow_the_api() {
+    let skip = "ts/no-skipped-tests";
+    let flake = "ts/no-flake-masking";
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "template title",
+            "import {test} from 'node:test'; test(`sample ${name}`, () => assert(read()));",
+            &[],
+        ),
+        (
+            "global known options first",
+            "test({skip: true}, () => assert(read()));",
+            &[skip],
+        ),
+        (
+            "bound callback",
+            "import {test} from 'node:test'; function check() { assert(read()); } test('sample', check.bind(null));",
+            &[],
+        ),
+        (
+            "options first",
+            "import {test} from 'node:test'; test(readOptions(), () => assert(read()));",
+            &[flake, skip],
+        ),
+        (
+            "named spread",
+            "import {test} from 'node:test'; test('sample', ...readArgs());",
+            &[skip],
+        ),
+        (
+            "options first timeout",
+            "import {test} from 'node:test'; test({timeout: 100}, () => assert(read()));",
+            &[flake],
+        ),
+        (
+            "named timeout",
+            "import {test} from 'node:test'; test('sample', {timeout: 100}, () => assert(read()));",
+            &[flake],
+        ),
+        (
+            "options first skip disabled",
+            "import {test} from 'node:test'; test({skip: false}, () => assert(read()));",
+            &[],
+        ),
+        (
+            "Playwright factory details",
+            "import {test, type TestDetails} from '@playwright/test'; function details(): TestDetails { return {tag: '@fast'}; } const browserTest = test.extend({}); browserTest('sample', details(), () => assert(read()));",
+            &[],
+        ),
+        (
+            "global legacy timeout",
+            "function check() { assert(read()); } test('sample', check, 100);",
+            &[flake],
+        ),
+    ];
+    let actual: Vec<_> = cases
+        .iter()
+        .map(|(case, source, _)| {
+            let mut hits: Vec<_> = run(registry(), [("case.test.ts", source.as_bytes())])
+                .into_iter()
+                .map(|f| f.rule)
+                .filter(|&rule| rule == skip || rule == flake)
+                .collect();
+            hits.sort_unstable();
+            (*case, hits)
+        })
+        .collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(case, _, hits)| (*case, hits.to_vec()))
+        .collect();
+    assert_eq!(actual, expected);
+}

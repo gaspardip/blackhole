@@ -1,4 +1,5 @@
-use super::test_context::runner;
+use super::test_context::{TestOption, runner};
+use super::values::Properties;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -13,16 +14,22 @@ pub(crate) const RULE: Rule = Rule {
 };
 fn inspect<'a>(
     ctx: &TsCtx<'a>,
-    expr: Option<&'a Expression<'a>>,
+    expr: &'a Expression<'a>,
     keys: &[&str],
     findings: &mut Findings,
 ) -> bool {
-    let Some(expr) = expr else {
-        return false;
-    };
     let Some(opts) = super::values::properties(ctx, expr) else {
         return false;
     };
+    report_options(expr, opts, keys, findings);
+    true
+}
+fn report_options(
+    expr: &Expression<'_>,
+    opts: Properties<'_>,
+    keys: &[&str],
+    findings: &mut Findings,
+) {
     for (k, p) in opts.named {
         if keys.contains(&k) {
             findings.report(p.span.start as usize, None);
@@ -31,7 +38,6 @@ fn inspect<'a>(
     if opts.unknown {
         findings.report(expr.get_inner_expression().span().start as usize, None);
     }
-    true
 }
 const CONFIG_OPTIONS: &[(&[&str], &[&str])] = &[
     (
@@ -45,7 +51,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
             AstKind::ObjectProperty(p) if super::values::key(ctx, &p.key) == Some("test") => {
-                inspect(ctx, Some(&p.value), &["retry"], findings);
+                inspect(ctx, &p.value, &["retry"], findings);
             }
             kind if let Some(c) = super::values::site(ctx, kind) => {
                 let call = c.call;
@@ -55,7 +61,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     .find(|(path, _)| p.short() == Some(*path))
                 {
                     if let Some(arg) = call.arg(0)
-                        && !inspect(ctx, Some(arg), keys, findings)
+                        && !inspect(ctx, arg, keys, findings)
                     {
                         findings.report(arg.span().start as usize, None);
                     }
@@ -78,21 +84,17 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                                 Some("each" | "for" | "extend" | "scoped" | "override")
                             )) =>
                     {
-                        let [second, third] = call.test_options();
-                        let second_object = inspect(ctx, second, &["retry", "timeout"], findings);
-                        let third_object = inspect(ctx, third, &["retry", "timeout"], findings);
-                        if let Some(arg) = third
-                            && second.is_some()
-                            && !second_object
-                        {
-                            let third = super::values::resolve(ctx, arg);
-                            if !third_object && !third.is_function() {
-                                findings.report(arg.span().start as usize, None);
-                            } else if third.is_function()
-                                && let Some(e) = second
-                                && !super::values::resolve(ctx, e).is_function()
-                            {
-                                findings.report(e.span().start as usize, None);
+                        for slot in p.test_options(ctx, &call).into_iter().flatten() {
+                            match slot {
+                                TestOption::Object(arg, props) => {
+                                    report_options(arg, props, &["retry", "timeout"], findings);
+                                }
+                                TestOption::Opaque {
+                                    at,
+                                    before_callback: true,
+                                }
+                                | TestOption::Timeout(at) => findings.report(at, None),
+                                TestOption::Opaque { .. } => (),
                             }
                         }
                     }

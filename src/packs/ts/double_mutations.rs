@@ -80,7 +80,7 @@ pub(super) fn call_writes<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
 }
 
 fn observation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
-    if call.unreadable_args || call.args.len() != 2 {
+    if call.unreadable_args.is_some() || call.args.len() != 2 {
         return false;
     }
     let Some(opts) = call.arg(1).and_then(|e| super::values::properties(ctx, e)) else {
@@ -165,7 +165,7 @@ fn framework_path<'a>(
             match *m {
                 "fn" => {
                     call.template_arg
-                        || call.unreadable_args
+                        || call.unreadable_args.is_some()
                         || call.arg(0).is_some_and(|e| {
                             !super::values::resolves_to_global(ctx, e, "undefined")
                         })
