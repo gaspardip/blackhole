@@ -110,7 +110,8 @@ The verdict excludes review data. The workflow omits `--approvals`, so a
 protected change stays red and requires a maintainer merge.
 
 If a head branch name that looks like a commit SHA prevents `pull_request_target`
-from running, rename the branch to unblock the required check.
+from running, push the commits to a branch with another name and open a new PR
+from it. Renaming the head branch of an open PR closes that PR.
 
 A separate job runs the publisher from the same base commit. It verifies the
 current PR head and target branch through the GitHub API and uses an App
@@ -123,20 +124,24 @@ Configure GitHub in this order before enabling the workflow.
    `main`. The rule matches the default branch (`main`) because
    `pull_request_target` runs on it. Referencing a missing environment makes
    GitHub create it without protection rules, so create it first.
-2. Add `JUDGE_APP_ID` and `JUDGE_APP_PRIVATE_KEY` as secrets in `judge`.
-3. Delete the two repository-level secrets. Eligible workflows on other branches
-   can read repository-level secrets.
+2. Generate a new private key for the App. Add it as `JUDGE_APP_PRIVATE_KEY`,
+   and the App ID as `JUDGE_APP_ID`, as secrets in `judge`.
+3. Delete the two repository-level secrets and revoke the App's old private key.
+   Eligible workflows on other branches can read repository-level secrets, so
+   an old key may have been copied.
 4. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
-5. Require the `blackhole judge` check from the App's numeric ID and require PR
-   branches to be up to date before merging into `main`.
+5. Protect `main`: require a pull request before merging, require the
+   `blackhole judge` check from the App's numeric ID, and require PR branches
+   to be up to date before merging. Without the pull request rule, a writer can
+   push a judged commit straight to `main`, and a PR whose head already contains
+   it keeps its old check.
 
 The publisher checks the base SHA and the judge's UTC date before issuing green.
 If the date is missing or from another day, it posts failure. Re-run the whole
 judge for a verdict on the current day. GitHub stores the check on the head SHA,
-so PRs with the same head share it. A passing check can outlive a main update
-already contained in the head or the expiry of a tracked objection. An expired
-objection on `main` turns later PRs red under `findings` if the underlying
-violation remains.
+so PRs with the same head share it. A passing check judged on an objection's
+last day can still be merged the next day. An expired objection on `main` turns
+later PRs red under `findings` while the underlying violation remains.
 
 ## License
 
