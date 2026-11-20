@@ -64,10 +64,12 @@ fn tautology<'a>(
         return false;
     };
     let expect = invoked(ctx, expect);
-    super::test_context::runner(ctx, &expect) == ["expect"]
-        && expect.arg(0).is_some_and(|subject| {
-            literal(subject) || first.is_some_and(|arg| same(ctx, subject, arg))
-        })
+    matches!(
+        super::test_context::runner(ctx, &expect).short(),
+        Some(["expect"] | ["expect", "soft"])
+    ) && expect.arg(0).is_some_and(|subject| {
+        literal(resolve(ctx, subject)) || first.is_some_and(|arg| same(ctx, subject, arg))
+    })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, Option<usize>>::new();

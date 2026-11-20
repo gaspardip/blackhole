@@ -1,5 +1,8 @@
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::ast::{AstKind, ast::Expression};
+use oxc::ast::{
+    AstKind,
+    ast::{ArrowFunctionBody, Expression, FormalParameters, Statement},
+};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/strict-msw",
@@ -53,6 +56,58 @@ fn starts(factory: Option<Factory>, key: &str) -> bool {
         (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
     )
 }
+
+fn warning_call<'a>(
+    ctx: &TsCtx<'a>,
+    params: &FormalParameters<'_>,
+    expr: &'a Expression<'a>,
+) -> bool {
+    use super::values::{Origin, call_expr, invoked, origin_path, receiver, resolve, symbol};
+    let Some(call) = call_expr(resolve(ctx, expr)) else {
+        return false;
+    };
+    let callee = invoked(ctx, call).callee;
+    if origin_path(ctx, callee).is_some_and(|(origin, path)| {
+        origin == Origin::Global && matches!(path.as_slice(), ["console", "warn" | "log" | "info"])
+    }) {
+        return true;
+    }
+    let Some((owner, "warning")) = receiver(ctx, callee) else {
+        return false;
+    };
+    let print = params
+        .items
+        .get(1)
+        .and_then(|param| param.pattern.get_binding_identifier())
+        .and_then(|id| id.symbol_id.get());
+    print.is_some_and(|print| {
+        resolve(ctx, owner)
+            .get_identifier_reference()
+            .and_then(|id| symbol(ctx, id))
+            == Some(print)
+    })
+}
+
+fn empty_or_warning_only<'a>(ctx: &TsCtx<'a>, callback: &'a Expression<'a>) -> bool {
+    let (params, body) = match callback {
+        Expression::FunctionExpression(f) => (&f.params, f.body.as_deref()),
+        Expression::ArrowFunctionExpression(f) => match &f.body {
+            ArrowFunctionBody::FunctionBody(body) => (&f.params, Some(&**body)),
+            body => {
+                return body
+                    .as_expression()
+                    .is_some_and(|expr| warning_call(ctx, &f.params, expr));
+            }
+        },
+        _ => return false,
+    };
+    body.is_some_and(|body| {
+        body.statements.iter().all(|statement| {
+            matches!(statement, Statement::ExpressionStatement(s) if warning_call(ctx, params, &s.expression))
+        })
+    })
+}
+
 fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     let Some(p) = opts
         .and_then(|e| super::values::properties(ctx, e))
@@ -60,9 +115,10 @@ fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     else {
         return false;
     };
+    let value = super::values::resolve(ctx, &p.value);
     p.kind == oxc::ast::ast::PropertyKind::Init
-        && (super::values::literal(ctx, &p.value) == Some("error")
-            || super::values::resolve(ctx, &p.value).is_function())
+        && (super::values::literal(ctx, value) == Some("error")
+            || value.is_function() && !empty_or_warning_only(ctx, value))
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);

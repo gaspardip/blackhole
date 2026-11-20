@@ -813,8 +813,13 @@ const RUNNER_CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "case.test.ts",
-        "const value = 1; const matcher = expect(value).toBe; test('x', () => { const value = 1; matcher(value); });",
+        "const value = read(); const matcher = expect(value).toBe; test('x', () => { const value = 1; matcher(value); });",
         "",
+    ),
+    (
+        "case.test.ts",
+        "const value = 1; const matcher = expect(value).toBe; test('x', () => { const value = 1; matcher(value); });",
+        "ts/no-assertionless-tests",
     ),
     (
         "case.test.ts",

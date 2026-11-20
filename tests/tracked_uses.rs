@@ -527,6 +527,15 @@ fn review_r01_bare_expect_without_matcher() {
 }
 
 #[test]
+fn review_r02_constant_expect_subjects() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"test("aliases", () => { const actual = 1; expect(actual).toBe(1); }); test("soft", () => { expect.soft(1).toBe(1); });"#,
+        &["ts/no-assertionless-tests", "ts/no-assertionless-tests"],
+    );
+}
+
+#[test]
 fn review_r03_node_context_skip_and_todo() {
     assert_review_rules(
         "case.test.ts",
@@ -551,6 +560,58 @@ fn review_r05_fake_timers_do_not_leak_between_tests() {
         r#"test("timer control", () => { vi.useFakeTimers(); vi.useRealTimers(); assert(read()); }); test("real sleep", async () => { await new Promise(r => setTimeout(r, 10)); assert(read()); });"#,
         &["ts/no-fixed-sleep"],
     );
+}
+
+#[test]
+fn review_r06_unhandled_request_handlers_must_fail() {
+    let cases = [
+        ("onUnhandledRequest() {}", true),
+        (
+            "onUnhandledRequest(request, print) { print.warning(); }",
+            true,
+        ),
+        ("onUnhandledRequest() { console.warn('unhandled'); }", true),
+        ("onUnhandledRequest: () => console.log('unhandled')", true),
+        (
+            "onUnhandledRequest() { console.info('unhandled'); console.warn('unhandled'); }",
+            true,
+        ),
+        (r#"onUnhandledRequest: "error""#, false),
+        (
+            "onUnhandledRequest(request, print) { print.error(); }",
+            false,
+        ),
+        (
+            "onUnhandledRequest(request) { unhandled.push(request.url); }",
+            false,
+        ),
+        (
+            "onUnhandledRequest(request, print) { print.warning(); unhandled.push(request.url); }",
+            false,
+        ),
+    ];
+    let actual: Vec<_> = cases.iter().map(|(handler, _)| {
+        let source = format!(
+            r#"import {{setupServer}} from "msw/node"; const network = setupServer(); network.listen({{ {handler} }});"#
+        );
+        let rules: Vec<_> = run(registry(), [("case.test.ts", source.as_bytes())])
+            .into_iter().map(|finding| finding.rule).collect();
+        (*handler, rules)
+    }).collect();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(handler, report)| {
+            (
+                *handler,
+                if *report {
+                    vec!["ts/strict-msw"]
+                } else {
+                    vec![]
+                },
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]
