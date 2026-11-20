@@ -26,6 +26,7 @@ jobs:
     permissions: {}
     outputs:
       conclusion: ${{ steps.verdict.outputs.conclusion }}
+      date: ${{ steps.verdict.outputs.date }}
     steps:
       - name: Build and run the base judge
         id: verdict
@@ -47,9 +48,10 @@ jobs:
           git -C "${repo}" archive "${PR_BASE_SHA}" | tar -x -C "${src}"
           (cd "${src}" && cargo build --locked --release)
 
+          judged_on="$(date -u +%F)"
           code=0
           (cd "${repo}" && "${CARGO_TARGET_DIR}/release/blackhole" ci --base "${PR_BASE_SHA}" \
-            --head "${PR_HEAD_SHA}") > "${log}" 2>&1 || code=$?
+            --head "${PR_HEAD_SHA}" --today "${judged_on}") > "${log}" 2>&1 || code=$?
           # Paths in diagnostics can resemble workflow commands.
           marker="$(cat /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "${marker}"
@@ -60,13 +62,14 @@ jobs:
             1) conclusion=failure ;;
             *) exit "${code}" ;;
           esac
-          printf 'conclusion=%s\n' "${conclusion}" >> "${GITHUB_OUTPUT}"
+          printf 'conclusion=%s\ndate=%s\n' "${conclusion}" "${judged_on}" >> "${GITHUB_OUTPUT}"
 
   publish:
     if: >-
       always() && github.repository == 'gaspardip/blackhole' &&
       (github.event.action != 'edited' || github.event.changes.base)
     needs: judge
+    environment: judge
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -86,4 +89,5 @@ jobs:
           PR_READ_TOKEN: ${{ github.token }}
           JUDGE_RESULT: ${{ needs.judge.result }}
           JUDGE_CONCLUSION: ${{ needs.judge.outputs.conclusion }}
+          JUDGE_DATE: ${{ needs.judge.outputs.date }}
         run: python3 -I "${RUNNER_TEMP}/judge_app.py"

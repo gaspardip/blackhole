@@ -109,22 +109,34 @@ the PR head into a fresh bare Git repository and judges it as commit data.
 The verdict excludes review data. The workflow omits `--approvals`, so a
 protected change stays red and requires a maintainer merge.
 
+If a head branch name that looks like a commit SHA prevents `pull_request_target`
+from running, rename the branch to unblock the required check.
+
 A separate job runs the publisher from the same base commit. It verifies the
-current PR head and target branch through the GitHub API. A failed or cancelled
-judge job yields a failure check for that head when the publisher runs. The
-publisher uses `JUDGE_APP_ID` and `JUDGE_APP_PRIVATE_KEY` to request an
-installation token with `checks: write`.
+current PR head and target branch through the GitHub API and uses an App
+installation token with `checks: write`. A failed or cancelled judge job yields
+a failure check for that head when the publisher runs.
 
-The repository's event policy must allow `pull_request_target` for `judge.yml`.
-Require the check from the App's numeric ID and require branches to be up to
-date before merging. App attribution depends on exclusive access to the signing
-key. Workflows on eligible same-repository branches can access repository-scoped
-Actions secrets.
+Configure GitHub in this order before enabling the workflow.
 
-The publisher checks that the base SHA is current before issuing green. GitHub
-stores the check on the head SHA, so PRs with the same head share it. A passing
-check can outlive a main update already contained in the head or the expiry of
-a tracked objection. Objection expiry is evaluated when `blackhole ci` runs.
+1. Create the `judge` environment with a deployment branch rule allowing only
+   `main`. The rule matches the default branch (`main`) because
+   `pull_request_target` runs on it. Referencing a missing environment makes
+   GitHub create it without protection rules, so create it first.
+2. Add `JUDGE_APP_ID` and `JUDGE_APP_PRIVATE_KEY` as secrets in `judge`.
+3. Delete the two repository-level secrets. Eligible workflows on other branches
+   can read repository-level secrets.
+4. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
+5. Require the `blackhole judge` check from the App's numeric ID and require PR
+   branches to be up to date before merging into `main`.
+
+The publisher checks the base SHA and the judge's UTC date before issuing green.
+If the date is missing or from another day, it posts failure. Re-run the whole
+judge for a verdict on the current day. GitHub stores the check on the head SHA,
+so PRs with the same head share it. A passing check can outlive a main update
+already contained in the head or the expiry of a tracked objection. An expired
+objection on `main` turns later PRs red under `findings` if the underlying
+violation remains.
 
 ## License
 

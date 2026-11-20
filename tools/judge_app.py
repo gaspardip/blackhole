@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -27,6 +28,7 @@ class Snapshot:
 class Verdict:
     job_result: str
     conclusion: str
+    judged_on: str | None
 
 
 def base64url(data: bytes) -> bytes:
@@ -73,11 +75,19 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
             or pull["head"]["sha"] != snapshot.head):
         raise ValueError("PR no longer matches the event head and target branch")
 
+    jwt = app_jwt(app_id, private_key)
+    installation = github(api_url, f"{REPO}/installation", jwt)["id"]
+    token = github(api_url, f"/app/installations/{installation}/access_tokens", jwt, {
+        "repositories": ["blackhole"], "permissions": {"checks": "write"},
+    })["token"]
+
     conclusion = "failure"
     if verdict.job_result != "success":
         summary = f"The judge job ended with {verdict.job_result}."
     elif pull["base"]["sha"] != snapshot.base:
         summary = "The tip of main changed while the judge ran. Update the branch and rerun the judge."
+    elif verdict.judged_on != datetime.now(timezone.utc).date().isoformat():
+        summary = "Judged on another day. Re-run the whole judge."
     elif verdict.conclusion == "success":
         conclusion = "success"
         summary = "blackhole ci passed."
@@ -86,11 +96,6 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
     else:
         summary = "The judge job returned an invalid verdict."
 
-    jwt = app_jwt(app_id, private_key)
-    installation = github(api_url, f"{REPO}/installation", jwt)["id"]
-    token = github(api_url, f"/app/installations/{installation}/access_tokens", jwt, {
-        "repositories": ["blackhole"], "permissions": {"checks": "write"},
-    })["token"]
     body = {
         "name": "blackhole judge", "head_sha": snapshot.head, "external_id": f"pr/{snapshot.number}",
         "status": "completed", "conclusion": conclusion,
@@ -108,7 +113,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
 def main() -> None:
     env = os.environ
     snapshot = Snapshot(int(env["PR_NUMBER"]), env["PR_HEAD_SHA"], env["PR_BASE_SHA"])
-    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"])
+    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"], env.get("JUDGE_DATE"))
     run_id = publish(snapshot, verdict, app_id=env["JUDGE_APP_ID"],
                      private_key=env["JUDGE_APP_PRIVATE_KEY"], read_token=env["PR_READ_TOKEN"])
     print(f"Published blackhole judge check run {run_id}.")

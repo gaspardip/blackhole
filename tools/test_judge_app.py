@@ -5,8 +5,10 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 import judge_app
 
@@ -73,12 +75,14 @@ class JudgeApp(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(server.shutdown)
 
-    def publish(self, result: str, conclusion: str) -> int:
-        return judge_app.publish(
-            judge_app.Snapshot(7, HEAD, BASE),
-            judge_app.Verdict(result, conclusion),
-            app_id="19", private_key=self.private_key, read_token="read-token", api_url=self.api_url,
-        )
+    def publish(self, result: str, conclusion: str, *, judged_on: str | None = "2026-11-19") -> int:
+        verdict = judge_app.Verdict(result, conclusion, judged_on)
+        with patch.object(judge_app, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 11, 19, tzinfo=timezone.utc)
+            return judge_app.publish(
+                judge_app.Snapshot(7, HEAD, BASE), verdict,
+                app_id="19", private_key=self.private_key, read_token="read-token", api_url=self.api_url,
+            )
 
     def assert_failure_check(self, summary_fragment: str) -> None:
         request = self.requests[-1]
@@ -160,3 +164,13 @@ class JudgeApp(unittest.TestCase):
         self.pull["base"]["sha"] = "c" * 40
         self.publish("success", "success")
         self.assert_failure_check("The tip of main changed while the judge ran.")
+
+    def test_publishes_failure_for_a_verdict_from_another_utc_day(self) -> None:
+        self.publish("success", "success", judged_on="2026-11-18")
+        self.assert_failure_check("Judged on another day. Re-run the whole judge.")
+
+    def test_publishes_failure_when_the_judging_date_is_missing(self) -> None:
+        for judged_on in (None, ""):
+            with self.subTest(judged_on=judged_on):
+                self.publish("success", "success", judged_on=judged_on)
+                self.assert_failure_check("Judged on another day. Re-run the whole judge.")
