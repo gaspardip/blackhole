@@ -19,6 +19,13 @@ title="$(gh pr view "${number}" --json title --jq .title)"
 body="$(gh pr view "${number}" --json body --jq .body)"
 subject="${title} (#${number})"
 GUARD_TEXT_SUBJECT="${subject}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_guard.py range "${base}" "${head}"
+if ! preview_tree="$(git merge-tree --write-tree "${base}" "${head}" 2>/dev/null)"; then
+  echo "merge-outside: cannot preview squash for pull request ${number}" >&2
+  exit 1
+fi
+preview_commit="$(git -c user.name=blackhole -c user.email=blackhole@localhost commit-tree \
+  "${preview_tree}" -p "${base}" --no-gpg-sign -m "${subject}" -m "${body}")"
+python3 -I tools/name_guard.py range "${base}" "${preview_commit}"
 # The subject and body are passed back so an edit made after the scan cannot reach main.
 gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}"
 # GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.

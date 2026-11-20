@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from shutil import copy
 
-from test_name_guard import GUARD, WORDS, Repo, git, isolated_env
+from test_name_guard import GUARD, WORDS, Repo, git, isolated_env, run
 
 SCRIPT = Path(__file__).parent.with_name("bin") / "merge-outside"
 # Stands in for the GitHub CLI: records each call and names the branch a pull request targets.
@@ -72,6 +72,33 @@ class LandedMerge(Repo):
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn(f"commit {landed[:9]}:", done.stderr)
         self.assertIn("banned name #1", done.stderr)
+
+    def test_a_hit_in_the_combined_squash_blocks_the_merge(self) -> None:
+        self.write("example.txt", "first\n\nlast\n")
+        ancestor = self.commit("chore: start")
+        git(self.dir, "checkout", "-q", "-b", "pull")
+        self.write("example.txt", "first\n\nkka\n")
+        head = self.commit("chore: change last line")
+        git(self.dir, "checkout", "-q", "main")
+        self.write("example.txt", "quo\n\nlast\n")
+        base = self.commit("chore: change first line")
+        for tip in (base, head):
+            clean = run(["range", ancestor, tip], self.dir)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+
+        tree = self.loose_tree("example.txt", "quo\n\nkka\n")
+        landed = git(self.dir, "commit-tree", tree, "-p", base, "-m", "chore: review (#7)")
+        git(self.dir, "update-ref", "refs/heads/fixture", landed)
+        origin = self.dir / "origin"
+        git(self.dir, "clone", "--bare", "-q", ".", str(origin))
+        git(origin, "update-ref", "refs/pull/7/head", head)
+        git(self.dir, "remote", "add", "origin", str(origin))
+
+        done = self.squash(origin, landed)
+
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("example.txt:1 banned name #1", done.stderr)
+        self.assertEqual(git(origin, "rev-parse", "refs/heads/main"), base)
 
 
 class MergeOutside(unittest.TestCase):
