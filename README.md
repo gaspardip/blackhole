@@ -128,7 +128,9 @@ Configure GitHub in this order before enabling the workflow.
    and the App ID as `JUDGE_APP_ID`, as secrets in `judge`.
 3. Delete the two repository-level secrets and revoke the App's old private key.
    Eligible workflows on other branches can read repository-level secrets, so
-   an old key may have been copied.
+   an old key may have been copied. If anyone else had write access while the
+   key was a repository secret, register a new App instead and require its ID:
+   a check posted with the old key stays valid after the key is revoked.
 4. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
 5. Protect `main`: require a pull request before merging, require the
    `blackhole judge` check from the App's numeric ID, and require PR branches
@@ -139,9 +141,10 @@ Configure GitHub in this order before enabling the workflow.
 The publisher checks the base SHA and the judge's UTC date before issuing green.
 If the date is missing or from another day, it posts failure. Re-run the whole
 judge for a verdict on the current day. GitHub stores the check on the head SHA,
-so PRs with the same head share it. A passing check judged on an objection's
-last day can still be merged the next day. An expired objection on `main` turns
-later PRs red under `findings` while the underlying violation remains.
+so PRs with the same head share it. A passing check stays valid while the head
+and `main` stay the same, even after an objection it relied on expires, so the
+PR can still merge days later. Once that objection is on `main` and expired,
+later PRs are red under `findings` while the underlying violation remains.
 
 ## License
 
