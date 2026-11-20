@@ -1,1 +1,1 @@
-Reflect.apply(vi.mock, vi, ["client", { spy: true }]);
+vi.mock("client", { spy: true });

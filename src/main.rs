@@ -18,6 +18,9 @@ enum Action {
         head: String,
         #[arg(long)]
         approvals: Option<PathBuf>,
+        /// Trusted external directory containing <head SHA>/<base-configured LCOV path>.
+        #[arg(long)]
+        coverage_dir: Option<PathBuf>,
         #[arg(long)]
         today: Option<blackhole_check::objections::Date>,
     },
@@ -48,7 +51,15 @@ fn main() -> ExitCode {
             head,
             approvals,
             today,
-        } => blackhole_check::ci::run(&base, &head, approvals.as_deref(), today, &mut out),
+            coverage_dir,
+        } => blackhole_check::ci::run_with_coverage(
+            &base,
+            &head,
+            approvals.as_deref(),
+            today,
+            coverage_dir.as_deref(),
+            &mut out,
+        ),
         Action::Ledger => blackhole_check::regenerate(&mut out),
     };
     match result {

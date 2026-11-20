@@ -1,25 +1,44 @@
 pub mod ci;
 mod config;
+mod coverage;
 pub mod engine;
 mod files;
 mod git;
+mod judge_files;
 pub mod ledger;
 pub mod objections;
 mod packs {
     pub(crate) mod ts {
         mod bindings;
         mod config_responses;
+        pub(crate) mod dictionary_types;
         mod double_mutations;
+        pub(crate) mod function_types;
         mod native_properties;
         pub(crate) mod no_assertionless_tests;
+        pub(crate) mod no_chained_type_assertions;
         pub(crate) mod no_comments;
+        pub(crate) mod no_explicit_any;
+        pub(crate) mod no_explicit_return_types;
         pub(crate) mod no_fixed_sleep;
         pub(crate) mod no_flake_masking;
+        pub(crate) mod no_known_value_widening;
+        pub(crate) mod no_non_null_assertion;
+        pub(crate) mod no_object_parameters;
+        pub(crate) mod no_reflect_apply;
+        pub(crate) mod no_reflect_get;
+        pub(crate) mod no_runtime_typeof;
         pub(crate) mod no_skipped_tests;
         pub(crate) mod no_test_aware_code;
         pub(crate) mod no_test_doubles;
+        pub(crate) mod no_unknown_parameters;
+        pub(crate) mod no_unknown_returns;
+        pub(crate) mod no_unknown_type_aliases;
+        pub(crate) mod no_unsafe_dictionary_type;
         pub(crate) mod no_unsignaled_poll;
+        pub(crate) mod no_widen_then_assert;
         mod playwright;
+        pub(crate) mod reflect_method;
         mod saved_methods;
         pub(crate) mod strict_msw;
         mod test_context;
@@ -135,8 +154,7 @@ struct Scan {
 fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     // The selection is resolved before the working directory moves.
     let (mut names, selection) = files::list(root, paths)?;
-    let excludes =
-        config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
+    let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     let entered = enter(root)?;
     let base = ledger::load(policy(entered, "ledger")?)?;
     let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
@@ -150,7 +168,7 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
             )));
         }
     }
-    names.retain(|name| !excludes.is_match(name));
+    names.retain(|name| !config.exclude.is_match(name));
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
     let findings = scan_files(names.iter().map(String::as_str), |name| {

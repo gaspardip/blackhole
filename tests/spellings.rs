@@ -431,7 +431,10 @@ fn reflected_tautology_points_to_the_matcher() {
         hits.iter()
             .map(|f| (f.rule, f.line, f.col))
             .collect::<Vec<_>>(),
-        [("ts/no-assertionless-tests", 2, 28)]
+        [
+            ("ts/no-reflect-apply", 2, 1),
+            ("ts/no-assertionless-tests", 2, 28)
+        ]
     );
 }
 

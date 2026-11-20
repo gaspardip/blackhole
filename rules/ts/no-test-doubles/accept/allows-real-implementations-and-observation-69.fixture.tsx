@@ -1,1 +1,1 @@
-Reflect.apply(vi.spyOn, vi, [client, "send"]);
+vi.spyOn(client, "send");

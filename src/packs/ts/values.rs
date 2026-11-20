@@ -127,10 +127,9 @@ pub(super) fn initializer<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<&'a Expression<'a>> {
-    match declaration(ctx, id)? {
-        AstKind::VariableDeclarator(v) if matches!(v.id, BindingPattern::BindingIdentifier(_)) => {
-            v.init.as_ref()
-        }
+    let decl = declaration(ctx, id)?;
+    match decl {
+        AstKind::VariableDeclarator(_) => super::function_types::direct_binding(decl)?.initializer,
         AstKind::FormalParameter(p)
             if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) =>
         {

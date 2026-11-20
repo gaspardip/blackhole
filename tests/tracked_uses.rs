@@ -1,29 +1,59 @@
 use blackhole_check::engine::{registry, run};
 
 #[test]
-fn mock_arguments() {
-    for (source, expected) in [
-        ("consume(vi.mock)", Some((12, Some("mock")))),
-        ("consume(vi)", Some((9, Some("vi")))),
-        ("consume(vi.fn)", Some((12, Some("fn")))),
-        ("consume(custom)", None),
-        ("Reflect.apply(vi.mock, vi, [\"client\"])", Some((18, None))),
+fn test_double_usage_findings() {
+    let doubles = "ts/no-test-doubles";
+    let reflect = "ts/no-reflect-apply";
+    let opaque = |col, name| {
+        (
+            doubles,
+            1,
+            col,
+            Some(format!(
+                "cannot read how `{name}` is used here; call it by name"
+            )),
+        )
+    };
+    for (file, source, expected) in [
+        ("case.test.ts", "consume(vi.mock)", vec![opaque(12, "mock")]),
+        ("case.test.ts", "consume(vi)", vec![opaque(9, "vi")]),
+        ("case.test.ts", "consume(vi.fn)", vec![opaque(12, "fn")]),
+        ("case.test.ts", "consume(custom)", vec![]),
+        (
+            "case.test.ts",
+            "Reflect.apply(vi.mock, vi, [\"client\"])",
+            vec![(reflect, 1, 1, None), (doubles, 1, 18, None)],
+        ),
+        (
+            "src/native-instrumentation.ts",
+            r#"Reflect.apply(Reflect.set, Reflect, [navigator, "gpu", gpu]);"#,
+            vec![(reflect, 1, 1, None)],
+        ),
+        (
+            "spy.fixture.tsx",
+            r#"Reflect.apply(vi.spyOn, vi, [client, "send"]);"#,
+            vec![(reflect, 1, 1, None)],
+        ),
+        (
+            "spy-only-mock.fixture.tsx",
+            r#"Reflect.apply(vi.mock, vi, ["client", { spy: true }]);"#,
+            vec![(reflect, 1, 1, None)],
+        ),
+        (
+            "recording-wrapper.fixture.tsx",
+            "const original = client.send; client.send = function (...args) { calls.push(args); return Reflect.apply(original, this, args); }; client.send = original;",
+            vec![(reflect, 1, 91, None)],
+        ),
+        (
+            "forwarding-wrapper.fixture.tsx",
+            "const original = client.send; client.send = function (...args) { return Reflect.apply(original, this, args); }; client.send = original;",
+            vec![(reflect, 1, 73, None)],
+        ),
     ] {
-        let findings = run(registry(), [("case.test.ts", source.as_bytes())]);
+        let findings = run(registry(), [(file, source.as_bytes())]);
         let actual: Vec<_> = findings
             .iter()
             .map(|f| (f.rule, f.line, f.col, f.note.clone()))
-            .collect();
-        let expected: Vec<_> = expected
-            .into_iter()
-            .map(|(col, name)| {
-                (
-                    "ts/no-test-doubles",
-                    1,
-                    col,
-                    name.map(|n| format!("cannot read how `{n}` is used here; call it by name")),
-                )
-            })
             .collect();
         assert_eq!(actual, expected, "{source}");
     }
