@@ -347,6 +347,41 @@ fn node_titles_trust_only_stable_string_signatures() {
             "import {test} from 'node:test'; function register(title: () => string, other) { title = other; test(title(), () => assert(read())); }",
             &[flake, skip],
         ),
+        (
+            "Node title from a destructured callable variable",
+            "import {test} from 'node:test'; const provider = Object.assign(() => 'sample', { toString: () => ({skip: true}) }); const {toString: title}: () => string = provider; test(title(), () => { throw new Error('callback ran'); });",
+            &[flake, skip],
+        ),
+        (
+            "Node title from a destructured callable parameter",
+            "import {test} from 'node:test'; function register({toString: title}: () => string) { test(title(), () => { throw new Error('callback ran'); }); } register(Object.assign(() => 'sample', { toString: () => ({skip: true}) }));",
+            &[flake, skip],
+        ),
+        (
+            "Node title from an annotated replaced member",
+            "import {test} from 'node:test'; const provider = { title: () => 'sample' }; const replacement = { title: () => ({skip: true}) }; const title: () => string = Object.assign(provider, replacement).title; test(title(), () => { throw new Error('callback ran'); });",
+            &[flake, skip],
+        ),
+        (
+            "Node title from an annotated alias of a member",
+            "import {test} from 'node:test'; const provider = { title: () => 'sample' }; const member = Object.assign(provider, { title: () => ({skip: true}) }).title; const title: () => string = member; test(title(), () => { throw new Error('callback ran'); });",
+            &[flake, skip],
+        ),
+        (
+            "Node title from a stable alias of an annotated factory",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; const provider: () => string = () => 'stable alias'; const alias = provider; const title = alias; test(title(), () => equal(2+2, 4));",
+            &[],
+        ),
+        (
+            "Node title from a parenthesized callable type",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; const title: (() => string) = () => 'parenthesized callable'; test(title(), () => equal(2+2, 4));",
+            &[],
+        ),
+        (
+            "Node title from a parenthesized return type",
+            "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; const title: () => (string) = () => 'parenthesized return'; test(title(), () => equal(2+2, 4));",
+            &[],
+        ),
     ];
     assert_option_slots(cases);
 }
