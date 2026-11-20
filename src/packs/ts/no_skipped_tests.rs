@@ -1,4 +1,4 @@
-use super::test_context::{Runner, TestOption, enclosing_runners, test_file};
+use super::test_context::{Runner, TestOption, enclosing_runners, modifier, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::BTreeSet;
@@ -9,12 +9,6 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Make the test pass or delete it with the behaviour it covered. A skipped test proves nothing.",
     run: Run::Ts(check),
 };
-pub(super) fn modifier(name: &str) -> bool {
-    matches!(
-        name,
-        "skip" | "only" | "todo" | "skipIf" | "runIf" | "fixme" | "fails" | "failing"
-    )
-}
 fn body_skip<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> Option<usize> {
     if let Some(member) = e.get_member_expr()
         && matches!(

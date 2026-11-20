@@ -1,5 +1,4 @@
 use super::values::Imported;
-pub(crate) use super::values::Resolution;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,

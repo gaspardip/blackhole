@@ -92,11 +92,7 @@ fn owner<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<&'static str>
         [
             "test" | "it" | "specify" | "describe" | "suite" | "context",
             rest @ ..,
-        ] if rest.is_empty()
-            || rest
-                .iter()
-                .any(|n| super::super::no_skipped_tests::modifier(n)) =>
-        {
+        ] if rest.is_empty() || rest.iter().any(|n| super::super::test_context::modifier(n)) => {
             Some("ts/no-skipped-tests")
         }
         ["xit" | "xtest" | "xdescribe" | "fit" | "fdescribe"] => Some("ts/no-skipped-tests"),

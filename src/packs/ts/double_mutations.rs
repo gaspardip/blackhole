@@ -1,5 +1,5 @@
 use super::{
-    native_properties::protected,
+    native_properties::{owner_properties, protected_global},
     values::{MemberKeys, key, literal, path, resolve},
 };
 use crate::engine::TsCtx;
@@ -8,21 +8,19 @@ use oxc::ast::{
     ast::{AssignmentTarget, Expression, MemberExpression},
 };
 
-fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<String> {
-    let parts = path(ctx, expr)?;
-    Some(parts.join("."))
+fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<fn(&str) -> bool> {
+    owner_properties(&path(ctx, expr)?)
 }
 fn protected_member<'a>(ctx: &TsCtx<'a>, m: &'a MemberExpression<'a>) -> bool {
-    native(ctx, m.object())
-        .and_then(|owner| super::native_properties::owner_properties(&owner))
-        .is_some_and(|protected| MemberKeys(ctx).read(m).is_none_or(protected))
+    native(ctx, m.object()).is_some_and(|protected| MemberKeys(ctx).read(m).is_none_or(protected))
 }
 
 pub(super) fn writes<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> bool {
     match node {
         AstKind::AssignmentExpression(a) => match &a.left {
             AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                ctx.semantic.is_reference_to_global_variable(id) && protected("", id.name.as_str())
+                ctx.semantic.is_reference_to_global_variable(id)
+                    && protected_global(id.name.as_str())
             }
             target => target
                 .as_member_expression()
@@ -46,13 +44,17 @@ pub(super) enum Mutation {
 use super::values::Invocation;
 impl Invocation<'_> {
     pub(super) fn mutation(&self) -> Option<Mutation> {
-        match self.path.as_deref()?.join(".").as_str() {
-            "Object.assign" => Some(Mutation::Assign),
-            "Object.defineProperties" => Some(Mutation::DefineMany),
-            "Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set" => {
+        match self.path.as_deref()? {
+            ["Object", "assign"] | ["Object.assign"] => Some(Mutation::Assign),
+            ["Object", "defineProperties"] | ["Object.defineProperties"] => {
+                Some(Mutation::DefineMany)
+            }
+            ["Object" | "Reflect", "defineProperty"]
+            | ["Reflect", "set"]
+            | ["Object.defineProperty" | "Reflect.defineProperty" | "Reflect.set"] => {
                 Some(Mutation::SetProperty)
             }
-            "Reflect.deleteProperty" => Some(Mutation::Delete),
+            ["Reflect", "deleteProperty"] | ["Reflect.deleteProperty"] => Some(Mutation::Delete),
             _ => None,
         }
     }
@@ -61,11 +63,7 @@ pub(super) fn call_writes<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
     let Some(kind) = call.mutation() else {
         return false;
     };
-    let Some(protected) = call
-        .arg(0)
-        .and_then(|e| native(ctx, e))
-        .and_then(|owner| super::native_properties::owner_properties(&owner))
-    else {
+    let Some(protected) = call.arg(0).and_then(|e| native(ctx, e)) else {
         return false;
     };
     let defines =

@@ -7,7 +7,7 @@ use crate::engine::{Findings, TsCtx};
 use oxc::{
     ast::{
         AstKind,
-        ast::{AssignmentExpression, Expression, Function, MemberExpression, Statement},
+        ast::{Expression, Function, MemberExpression, Statement},
     },
     span::GetSpan,
     syntax::symbol::SymbolId,
@@ -99,10 +99,6 @@ fn delegates<'a>(ctx: &TsCtx<'a>, f: &'a Function<'a>, original: SymbolId) -> bo
         && c.arguments[2].as_expression().is_some_and(arg_id)
 }
 
-fn target<'a>(a: &'a AssignmentExpression<'a>) -> Option<&'a MemberExpression<'a>> {
-    a.left.as_member_expression()
-}
-
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut saved = Vec::new();
     let mut assignments = Vec::new();
@@ -119,7 +115,7 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 }
             }
             AstKind::AssignmentExpression(a) if a.operator.is_assign() => {
-                if let Some(m) = target(a) {
+                if let Some(m) = a.left.as_member_expression() {
                     assignments.push((a, m));
                 }
             }

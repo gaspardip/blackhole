@@ -43,7 +43,7 @@ mod packs {
         pub(crate) mod strict_msw;
         mod test_context;
         mod transports;
-        mod values;
+        pub(crate) mod values;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;

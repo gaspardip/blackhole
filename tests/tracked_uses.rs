@@ -1,5 +1,8 @@
 use blackhole_check::engine::{registry, run};
 
+const SKIP: &str = "ts/no-skipped-tests";
+const FLAKE: &str = "ts/no-flake-masking";
+
 #[test]
 fn test_double_usage_findings() {
     let doubles = "ts/no-test-doubles";
@@ -120,6 +123,7 @@ fn global_jest_argument() {
 #[test]
 fn bound_intrinsic_reports_only_the_skip() {
     for source in [
+        "const run=Reflect.apply.bind(undefined,test.skip,undefined);\nrun(['sample',()=>assert(read())]);",
         "const run = Reflect.apply.bind(undefined);\nrun(test.skip, undefined, ['x', () => assert(read())]);",
         "const run = Function.prototype.call.bind(test.skip, undefined);\nrun('x', () => assert(read()));",
     ] {
@@ -129,7 +133,7 @@ fn bound_intrinsic_reports_only_the_skip() {
                 .iter()
                 .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
                 .collect::<Vec<_>>(),
-            [("ts/no-skipped-tests", 2, 1, None)],
+            [(SKIP, 2, 1, None)],
             "{source}"
         );
     }
@@ -189,19 +193,6 @@ fn opaque_runner_options_are_reported() {
 }
 
 #[test]
-fn prebound_intrinsic_reports_only_the_skip() {
-    let source = "const run=Reflect.apply.bind(undefined,test.skip,undefined);\nrun(['sample',()=>assert(read())]);";
-    let found = run(registry(), [("case.test.ts", source.as_bytes())]);
-    assert_eq!(
-        found
-            .iter()
-            .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
-            .collect::<Vec<_>>(),
-        [("ts/no-skipped-tests", 2, 1, None)]
-    );
-}
-
-#[test]
 fn conditional_arguments_inspect_both_result_arms() {
     let check = |source: &str| {
         run(registry(), [("case.test.ts", source.as_bytes())])
@@ -244,8 +235,6 @@ fn conditional_arguments_inspect_both_result_arms() {
 
 #[test]
 fn runner_option_slots_follow_the_api() {
-    let skip = "ts/no-skipped-tests";
-    let flake = "ts/no-flake-masking";
     let cases: &[(&str, &str, &[&str])] = &[
         (
             "template title",
@@ -265,12 +254,12 @@ fn runner_option_slots_follow_the_api() {
         (
             "Node title factory shadowed by an options factory",
             "import {test} from 'node:test'; function title(): string { return 'outer'; } function register(title: () => object) { test(title(), () => assert(read())); }",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "global known options first",
             "test({skip: true}, () => assert(read()));",
-            &[skip],
+            &[SKIP],
         ),
         (
             "bound callback",
@@ -285,32 +274,32 @@ fn runner_option_slots_follow_the_api() {
         (
             "shadowed bound imported callback",
             "import {test} from 'node:test'; import {equal} from 'node:assert/strict'; function register(equal) { test('sample', equal.bind(null, 2+2, 4)); }",
-            &[skip],
+            &[SKIP],
         ),
         (
             "bound opaque options from an unrelated module",
             "import {test} from 'node:test'; import {equal} from './options'; test('sample', equal.bind(null), () => assert(read()));",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "options first",
             "import {test} from 'node:test'; test(readOptions(), () => assert(read()));",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "named spread",
             "import {test} from 'node:test'; test('sample', ...readArgs());",
-            &[skip],
+            &[SKIP],
         ),
         (
             "options first timeout",
             "import {test} from 'node:test'; test({timeout: 100}, () => assert(read()));",
-            &[flake],
+            &[FLAKE],
         ),
         (
             "named timeout",
             "import {test} from 'node:test'; test('sample', {timeout: 100}, () => assert(read()));",
-            &[flake],
+            &[FLAKE],
         ),
         (
             "options first skip disabled",
@@ -325,21 +314,19 @@ fn runner_option_slots_follow_the_api() {
         (
             "global legacy timeout",
             "function check() { assert(read()); } test('sample', check, 100);",
-            &[flake],
+            &[FLAKE],
         ),
     ];
     assert_option_slots(cases);
 }
 
 fn assert_option_slots(cases: &[(&str, &str, &[&str])]) {
-    let skip = "ts/no-skipped-tests";
-    let flake = "ts/no-flake-masking";
     let actual: Vec<_> = cases
         .iter()
         .map(|(case, source, _)| {
             let mut hits: Vec<_> = run(registry(), [("case.test.ts", source.as_bytes())])
                 .into_iter()
-                .filter_map(|f| [flake, skip].contains(&f.rule).then_some(f.rule))
+                .filter_map(|f| [FLAKE, SKIP].contains(&f.rule).then_some(f.rule))
                 .collect();
             hits.sort_unstable();
             (*case, hits)
@@ -354,13 +341,11 @@ fn assert_option_slots(cases: &[(&str, &str, &[&str])]) {
 
 #[test]
 fn node_titles_trust_only_stable_string_signatures() {
-    let skip = "ts/no-skipped-tests";
-    let flake = "ts/no-flake-masking";
     let cases: &[(&str, &str, &[&str])] = &[
         (
             "Node title method replaced after its declaration",
             "import {test} from 'node:test'; const provider = { title(): string { return 'sample'; } }; Object.assign(provider, { title: () => ({skip: true}) }); test(provider.title(), () => assert(read()));",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from a parameter typed to return a string",
@@ -375,27 +360,27 @@ fn node_titles_trust_only_stable_string_signatures() {
         (
             "Node title from a reassigned parameter typed to return a string",
             "import {test} from 'node:test'; function register(title: () => string, other) { title = other; test(title(), () => assert(read())); }",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from a destructured callable variable",
             "import {test} from 'node:test'; const provider = Object.assign(() => 'sample', { toString: () => ({skip: true}) }); const {toString: title}: () => string = provider; test(title(), () => { throw new Error('callback ran'); });",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from a destructured callable parameter",
             "import {test} from 'node:test'; function register({toString: title}: () => string) { test(title(), () => { throw new Error('callback ran'); }); } register(Object.assign(() => 'sample', { toString: () => ({skip: true}) }));",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from an annotated replaced member",
             "import {test} from 'node:test'; const provider = { title: () => 'sample' }; const replacement = { title: () => ({skip: true}) }; const title: () => string = Object.assign(provider, replacement).title; test(title(), () => { throw new Error('callback ran'); });",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from an annotated alias of a member",
             "import {test} from 'node:test'; const provider = { title: () => 'sample' }; const member = Object.assign(provider, { title: () => ({skip: true}) }).title; const title: () => string = member; test(title(), () => { throw new Error('callback ran'); });",
-            &[flake, skip],
+            &[FLAKE, SKIP],
         ),
         (
             "Node title from a stable alias of an annotated factory",

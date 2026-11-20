@@ -75,6 +75,13 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
+pub(super) fn modifier(name: &str) -> bool {
+    matches!(
+        name,
+        "skip" | "only" | "todo" | "skipIf" | "runIf" | "fixme" | "fails" | "failing"
+    )
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 enum ModuleRoot {
     #[default]
@@ -133,7 +140,7 @@ impl<'a> Runner<'a> {
         if let Some(slot) = self.prefix.get_mut(self.length) {
             *slot = name;
         }
-        self.skipped |= self.length > 0 && super::no_skipped_tests::modifier(name);
+        self.skipped |= self.length > 0 && modifier(name);
         self.length += 1;
         self.last = Some(name);
     }
@@ -230,7 +237,7 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
     let mut cache = ctx.resolution.runners.borrow_mut();
     for (span, key) in steps.into_iter().rev() {
         if let Some((key, at)) = key {
-            if super::no_skipped_tests::modifier(key) {
+            if modifier(key) {
                 result.skip_at = Some(at);
             }
             result.todo |= key == "todo";
@@ -375,12 +382,14 @@ fn returns_string<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
         Expression::ArrowFunctionExpression(f) => Some(AstKind::ArrowFunctionExpression(f)),
         _ => None,
     };
-    let annotation = match function {
-        Some(AstKind::Function(f)) if !f.r#async && !f.generator => f.return_type.as_deref(),
-        Some(AstKind::ArrowFunctionExpression(f)) if !f.r#async => f.return_type.as_deref(),
-        _ => None,
-    };
-    annotation.is_some_and(string_type)
+    function
+        .filter(|kind| match kind {
+            AstKind::Function(f) => !f.r#async && !f.generator,
+            AstKind::ArrowFunctionExpression(f) => !f.r#async,
+            _ => false,
+        })
+        .and_then(super::function_types::returns)
+        .is_some_and(string_type)
 }
 
 fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {

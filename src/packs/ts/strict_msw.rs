@@ -45,12 +45,13 @@ pub(super) fn tracked<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
     if factory(ctx, value).is_some() {
         return true;
     }
-    super::values::receiver(ctx, value).is_some_and(|(owner, key)| {
-        matches!(
-            (factory(ctx, owner), key),
-            (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
-        )
-    })
+    super::values::receiver(ctx, value).is_some_and(|(owner, key)| starts(factory(ctx, owner), key))
+}
+fn starts(factory: Option<Factory>, key: &str) -> bool {
+    matches!(
+        (factory, key),
+        (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
+    )
 }
 fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
     let Some(p) = opts
@@ -73,12 +74,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let Some((object, key)) = super::values::receiver(ctx, inv.callee) else {
             continue;
         };
-        if super::values::any_value(ctx, object, |e| {
-            matches!(
-                (factory(ctx, e), key),
-                (Some(Factory::Server), "listen") | (Some(Factory::Worker), "start")
-            )
-        }) && !strict(ctx, inv.arg(0))
+        if super::values::any_value(ctx, object, |e| starts(factory(ctx, e), key))
+            && !strict(ctx, inv.arg(0))
         {
             findings.report(c.span.start as usize, None);
         }
