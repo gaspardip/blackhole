@@ -470,3 +470,49 @@ fn node_titles_trust_only_stable_string_signatures() {
     ];
     assert_option_slots(cases);
 }
+
+fn assert_review_rules(path: &str, source: &str, expected: &[&str]) {
+    let hits = run(registry(), [(path, source.as_bytes())]);
+    assert_eq!(
+        hits.iter().map(|hit| hit.rule).collect::<Vec<_>>(),
+        expected,
+        "{source}"
+    );
+}
+
+#[test]
+fn review_r10_node_string_titles() {
+    for source in [
+        r#"import {test} from "node:test"; import assert from "node:assert/strict"; function register(name: string) { test(name, () => assert.equal(read(), 1)); }"#,
+        r#"import {test} from "node:test"; import assert from "node:assert/strict"; const cb = () => assert.equal(read(), 1); function register(name: string) { test(String(name), cb); }"#,
+    ] {
+        assert_review_rules("case.test.ts", source, &[]);
+    }
+}
+
+#[test]
+fn review_r11_application_retry_property() {
+    assert_review_rules(
+        "src/build.ts",
+        r#"export const commands = { test: { retry: "manual" } }"#,
+        &[],
+    );
+}
+
+#[test]
+fn review_r13_application_implementation_method() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"class Renderer { withImplementation(mode: string) { render(mode); } } new Renderer().withImplementation("fast")"#,
+        &[],
+    );
+}
+
+#[test]
+fn review_r14_forwarded_route_response_metadata() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import type {Route} from "@playwright/test"; async function forward(route: Route) { const response = await route.fetch(); await route.fulfill({ response, contentType: "application/json" }); }"#,
+        &[],
+    );
+}

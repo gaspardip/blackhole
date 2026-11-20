@@ -55,9 +55,9 @@ fn owner<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<&'static str>
     if super::super::strict_msw::tracked(ctx, value) {
         return Some("ts/strict-msw");
     }
-    if super::receiver(ctx, value)
-        .is_some_and(|(_, key)| super::super::double_mutations::replacement_method(key))
-    {
+    if super::receiver(ctx, value).is_some_and(|(owner, key)| {
+        super::super::double_mutations::replacement_method(ctx, owner, key)
+    }) {
         return Some("ts/no-test-doubles");
     }
     if let Expression::ThisExpression(t) = super::resolve(ctx, value)

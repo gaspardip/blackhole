@@ -110,6 +110,9 @@ pub(super) fn canned<'a>(
     if !route(ctx, receiver) {
         return false;
     }
+    let forwarded = super::values::properties(ctx, arg)
+        .and_then(|options| options.named.get("response").copied())
+        .is_some_and(|p| forwarded_response(ctx, receiver, &p.value));
     let mut pending = vec![(arg, false)];
     let mut seen = HashSet::new();
     while let Some((e, field)) = pending.pop() {
@@ -136,8 +139,8 @@ pub(super) fn canned<'a>(
                         ObjectPropertyKind::ObjectProperty(p)
                             if matches!(
                                 key(ctx, &p.key),
-                                Some("body" | "json" | "status" | "contentType") | None
-                            ) =>
+                                Some("body" | "json" | "status") | None
+                            ) || !forwarded && key(ctx, &p.key) == Some("contentType") =>
                         {
                             pending.push((&p.value, true));
                         }
@@ -149,4 +152,29 @@ pub(super) fn canned<'a>(
         }
     }
     false
+}
+
+fn forwarded_response<'a>(
+    ctx: &TsCtx<'a>,
+    route: &'a Expression<'a>,
+    response: &'a Expression<'a>,
+) -> bool {
+    let Some(route) = resolve(ctx, route)
+        .get_identifier_reference()
+        .and_then(|id| super::values::symbol(ctx, id))
+    else {
+        return false;
+    };
+    let Expression::AwaitExpression(awaited) = resolve(ctx, response) else {
+        return false;
+    };
+    super::values::call_expr(resolve(ctx, &awaited.argument))
+        .and_then(|call| super::values::receiver(ctx, invoked(ctx, call).callee))
+        .is_some_and(|(owner, method)| {
+            method == "fetch"
+                && resolve(ctx, owner)
+                    .get_identifier_reference()
+                    .and_then(|id| super::values::symbol(ctx, id))
+                    == Some(route)
+        })
 }

@@ -1,5 +1,5 @@
 use super::test_context::{Runner, TestOption, runner};
-use super::values::Properties;
+use super::values::{Origin, Properties, origin_path, properties, resolve};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
@@ -53,15 +53,61 @@ pub(super) fn api(runner: &Runner<'_>) -> Option<Api> {
     }
 }
 
+fn config_retries<'a>(ctx: &TsCtx<'a>, root: &'a Expression<'a>, findings: &mut Findings) {
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(value) = pending.pop() {
+        let value = resolve(ctx, value);
+        if !seen.insert(value.span()) {
+            continue;
+        }
+        if let Expression::ArrayExpression(array) = value {
+            pending.extend(
+                array
+                    .elements
+                    .iter()
+                    .filter_map(|element| element.as_expression()),
+            );
+        } else if let Some(config) = properties(ctx, value)
+            && let Some(test) = config.named.get("test")
+            && let Some(options) = properties(ctx, &test.value)
+        {
+            if let Some(projects) = options.named.get("projects") {
+                pending.push(&projects.value);
+            }
+            report_options(&test.value, options, &["retry"], findings);
+        } else {
+            pending.extend(super::values::alternatives(value));
+        }
+    }
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     for n in ctx.semantic.nodes().iter() {
         match n.kind() {
-            AstKind::ObjectProperty(p) if super::values::key(ctx, &p.key) == Some("test") => {
-                inspect(ctx, &p.value, &["retry"], findings);
+            AstKind::ExportDefaultDeclaration(export)
+                if super::config_responses::config(ctx.path)
+                    && let Some(value) = export.declaration.as_expression() =>
+            {
+                config_retries(ctx, value, findings);
             }
             kind if let Some(c) = super::values::site(ctx, kind) => {
                 let call = c.call;
+                if let Some(arg) = call.arg(0)
+                    && origin_path(ctx, call.callee).is_some_and(|(origin, path)| {
+                        matches!(
+                            (origin, path.as_slice()),
+                            (Origin::Global, ["defineConfig"])
+                                | (
+                                    Origin::Module | Origin::Required,
+                                    ["vitest/config", "defineConfig"]
+                                )
+                        )
+                    })
+                {
+                    config_retries(ctx, arg, findings);
+                }
                 let p = runner(ctx, &call);
                 match api(&p) {
                     Some(Api::Config(keys)) => {

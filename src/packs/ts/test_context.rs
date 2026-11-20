@@ -410,6 +410,15 @@ fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
     let mut pending = vec![arg];
     let mut seen = std::collections::HashSet::new();
     while let Some(expr) = pending.pop() {
+        if let Some(id) = unwrapped(expr).get_identifier_reference()
+            && let Some(kind @ (AstKind::VariableDeclarator(_) | AstKind::FormalParameter(_))) =
+                declaration(ctx, id)
+            && super::function_types::direct_binding(kind)
+                .and_then(|binding| binding.annotation)
+                .is_some_and(string_type)
+        {
+            return true;
+        }
         let value = resolve(ctx, expr);
         if !seen.insert(value.span()) {
             continue;
@@ -418,6 +427,11 @@ fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
             Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => return true,
             Expression::BinaryExpression(b) if b.operator == BinaryOperator::Addition => {
                 pending.extend([&b.right, &b.left]);
+            }
+            _ if call_expr(value)
+                .is_some_and(|call| resolves_to_global(ctx, &call.callee, "String")) =>
+            {
+                return true;
             }
             _ if returns_string(ctx, value) => return true,
             _ => (),

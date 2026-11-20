@@ -105,7 +105,21 @@ pub(super) fn banned_mock_method(method: &str) -> bool {
     )
 }
 
-pub(super) fn replacement_method(method: &str) -> bool {
+pub(super) fn replacement_method<'a>(
+    ctx: &TsCtx<'a>,
+    receiver: &'a Expression<'a>,
+    method: &str,
+) -> bool {
+    if let Expression::NewExpression(new) = resolve(ctx, receiver)
+        && let Some(id) = super::values::binding_value(ctx, &new.callee).get_identifier_reference()
+        && let Some(AstKind::Class(class)) = super::values::declaration(ctx, id)
+        && class.body.body.iter().any(|element| {
+            matches!(element, oxc::ast::ast::ClassElement::MethodDefinition(m)
+                if !m.r#static && m.key.static_name() == Some(method.into()))
+        })
+    {
+        return false;
+    }
     matches!(
         method,
         "mockImplementation"
@@ -124,7 +138,9 @@ pub(super) fn replacement_method(method: &str) -> bool {
 }
 
 pub(super) fn framework_call<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
-    if super::values::receiver(ctx, call.callee).is_some_and(|(_, s)| replacement_method(s)) {
+    if super::values::receiver(ctx, call.callee)
+        .is_some_and(|(owner, method)| replacement_method(ctx, owner, method))
+    {
         return true;
     }
     if let Some(parts) = &call.path {
