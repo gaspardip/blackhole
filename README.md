@@ -99,11 +99,11 @@ when the judge runs without evidence.
 
 ## GitHub judge
 
-Release one publishes `blackhole judge` checks only for pull requests targeting
-`main` in `gaspardip/blackhole`. Adopters run `blackhole ci` in their own workflow.
-The dedicated App identity is specific to this repository.
+Release one publishes the `blackhole judge` check from the `blackhole-judge` App
+only for pull requests targeting `main` in `gaspardip/blackhole`. Adopters run
+`blackhole ci` in their own workflow.
 
-On open, reopen, head update or edit, `judge.yml` builds `blackhole` from the
+On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from the
 event's base commit in a job without secrets or token permissions. It fetches
 the PR head into a fresh bare Git repository and judges it as commit data.
 The verdict excludes review data. The workflow omits `--approvals`, so a
@@ -112,14 +112,14 @@ protected change stays red and requires a maintainer merge.
 A separate job runs the publisher from the same base commit. It verifies the
 current PR head and target branch through the GitHub API. A failed or cancelled
 judge job yields a failure check for that head when the publisher runs. The
-`blackhole-judge` App uses `JUDGE_APP_ID` and `JUDGE_APP_PRIVATE_KEY` to request
-an installation token scoped to this repository and `checks: write`.
+publisher uses `JUDGE_APP_ID` and `JUDGE_APP_PRIVATE_KEY` to request an
+installation token with `checks: write`.
 
 The repository's event policy must allow `pull_request_target` for `judge.yml`.
-On `main`, require the `blackhole judge` check from the dedicated App's numeric
-ID and require branches to be up to date before merging. App attribution
-depends on exclusive access to the signing key. Workflows on eligible
-same-repository branches can access repository-scoped Actions secrets.
+Require the check from the App's numeric ID and require branches to be up to
+date before merging. App attribution depends on exclusive access to the signing
+key. Workflows on eligible same-repository branches can access repository-scoped
+Actions secrets.
 
 The publisher checks that the base SHA is current before issuing green. GitHub
 stores the check on the head SHA, so PRs with the same head share it. A passing

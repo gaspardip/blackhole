@@ -11,9 +11,16 @@ from pathlib import Path
 import judge_app
 
 
-REPO = "/repos/gaspardip/blackhole"
 BASE = "a" * 40
 HEAD = "b" * 40
+
+
+def check_body(conclusion: str, title: str, summary: str) -> dict:
+    return {
+        "name": "blackhole judge", "head_sha": HEAD, "status": "completed",
+        "conclusion": conclusion, "external_id": "pr/7",
+        "output": {"title": title, "summary": summary},
+    }
 
 
 class JudgeApp(unittest.TestCase):
@@ -27,7 +34,6 @@ class JudgeApp(unittest.TestCase):
     def setUp(self) -> None:
         self.requests: list[tuple[str, str, str, dict | None]] = []
         self.pull = {
-            "number": 7,
             "state": "open",
             "head": {"sha": HEAD},
             "base": {"ref": "main", "sha": BASE},
@@ -36,7 +42,10 @@ class JudgeApp(unittest.TestCase):
 
         class GitHub(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                replies = {f"{REPO}/pulls/7": fixture.pull, f"{REPO}/installation": {"id": 42}}
+                replies = {
+                    f"{judge_app.REPO}/pulls/7": fixture.pull,
+                    f"{judge_app.REPO}/installation": {"id": 42},
+                }
                 fixture.requests.append(("GET", self.path, self.headers["Authorization"], None))
                 self.reply(200, replies[self.path])
 
@@ -46,7 +55,7 @@ class JudgeApp(unittest.TestCase):
                 if self.path == "/app/installations/42/access_tokens":
                     self.reply(201, {"token": "installation-token"})
                 else:
-                    self.reply(201, {**body, "id": 93, "app": {"id": 19}})
+                    self.reply(201, {"id": 93, "app": {"id": 19}})
 
             def reply(self, status: int, body: dict) -> None:
                 self.send_response(status)
@@ -64,30 +73,39 @@ class JudgeApp(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(server.shutdown)
 
-    def publish(self, result: str, conclusion: str, summary: str, *, head: str = HEAD,
-                base: str = BASE) -> int:
+    def publish(self, result: str, conclusion: str) -> int:
         return judge_app.publish(
             judge_app.Snapshot(7, HEAD, BASE),
-            judge_app.Verdict(result, head, base, conclusion, summary),
+            judge_app.Verdict(result, conclusion),
             app_id="19", private_key=self.private_key, read_token="read-token", api_url=self.api_url,
         )
 
+    def assert_failure_check(self, summary_fragment: str) -> None:
+        request = self.requests[-1]
+        body = request[3]
+        self.assertIsNotNone(body)
+        summary = body["output"]["summary"]
+        self.assertIn(summary_fragment, summary)
+        self.assertEqual(request, (
+            "POST", f"{judge_app.REPO}/check-runs", "Bearer installation-token",
+            check_body("failure", "blackhole ci failed", summary),
+        ))
+
     def test_publishes_success_with_a_signed_jwt_and_repository_scoped_token(self) -> None:
         before = int(time.time())
-        self.assertEqual(self.publish("success", "success", "blackhole ci passed."), 93)
+        self.assertEqual(self.publish("success", "success"), 93)
         after = int(time.time())
         pull, installation, mint, check = self.requests
-        self.assertEqual(pull, ("GET", f"{REPO}/pulls/7", "Bearer read-token", None))
-        self.assertEqual(installation[:2], ("GET", f"{REPO}/installation"))
+        self.assertEqual(pull, ("GET", f"{judge_app.REPO}/pulls/7", "Bearer read-token", None))
+        self.assertEqual(installation[:2], ("GET", f"{judge_app.REPO}/installation"))
         self.assertEqual(mint, (
             "POST", "/app/installations/42/access_tokens", installation[2],
             {"repositories": ["blackhole"], "permissions": {"checks": "write"}},
         ))
-        self.assertEqual(check, ("POST", f"{REPO}/check-runs", "Bearer installation-token", {
-            "name": "blackhole judge", "head_sha": HEAD, "status": "completed",
-            "conclusion": "success", "external_id": "pr/7",
-            "output": {"title": "blackhole ci passed", "summary": "blackhole ci passed."},
-        }))
+        self.assertEqual(check, (
+            "POST", f"{judge_app.REPO}/check-runs", "Bearer installation-token",
+            check_body("success", "blackhole ci passed", "blackhole ci passed."),
+        ))
 
         scheme, jwt = installation[2].split()
         self.assertEqual(scheme, "Bearer")
@@ -113,13 +131,8 @@ class JudgeApp(unittest.TestCase):
             )
 
     def test_publishes_blackhole_failure_as_a_completed_check(self) -> None:
-        summary = "blackhole ci: red (protected)"
-        self.publish("success", "failure", summary)
-        self.assertEqual(self.requests[-1], ("POST", f"{REPO}/check-runs", "Bearer installation-token", {
-            "name": "blackhole judge", "head_sha": HEAD, "status": "completed",
-            "conclusion": "failure", "external_id": "pr/7",
-            "output": {"title": "blackhole ci failed", "summary": summary},
-        }))
+        self.publish("success", "failure")
+        self.assert_failure_check("blackhole ci reported a policy violation. See the judge job log.")
 
     def test_posts_nothing_if_the_pr_head_or_target_changed(self) -> None:
         original = self.pull
@@ -128,35 +141,22 @@ class JudgeApp(unittest.TestCase):
                 self.requests.clear()
                 self.pull = {**original, **change}
                 with self.assertRaisesRegex(ValueError, "PR no longer matches"):
-                    self.publish("success", "success", "blackhole ci passed.")
-                self.assertEqual(self.requests, [("GET", f"{REPO}/pulls/7", "Bearer read-token", None)])
+                    self.publish("success", "success")
+                self.assertEqual(self.requests, [("GET", f"{judge_app.REPO}/pulls/7", "Bearer read-token", None)])
 
     def test_publishes_failure_when_judge_failed_or_was_cancelled(self) -> None:
         for result in ("failure", "cancelled"):
             with self.subTest(result=result):
-                self.publish(result, "", "", head="", base="")
-                body = self.requests[-1][3]
-                self.assertEqual((body["head_sha"], body["status"], body["conclusion"]),
-                                 (HEAD, "completed", "failure"))
-                self.assertIn(result, body["output"]["summary"])
+                self.publish(result, "")
+                self.assert_failure_check(f"The judge job ended with {result}.")
 
-    def test_publishes_failure_for_unbound_or_invalid_judge_outputs(self) -> None:
-        cases = (
-            ("success", "blackhole ci passed.", "c" * 40, BASE),
-            ("success", "blackhole ci passed.", HEAD, "c" * 40),
-            ("neutral", "blackhole ci passed.", HEAD, BASE),
-            ("success", "", HEAD, BASE),
-        )
-        for conclusion, summary, head, base in cases:
-            with self.subTest(conclusion=conclusion, summary=summary, head=head, base=base):
-                self.publish("success", conclusion, summary, head=head, base=base)
-                body = self.requests[-1][3]
-                self.assertEqual((body["head_sha"], body["conclusion"]), (HEAD, "failure"))
-                self.assertIn("invalid verdict", body["output"]["summary"])
+    def test_publishes_failure_for_an_invalid_judge_conclusion(self) -> None:
+        for conclusion in ("neutral", ""):
+            with self.subTest(conclusion=conclusion):
+                self.publish("success", conclusion)
+                self.assert_failure_check("The judge job returned an invalid verdict.")
 
     def test_publishes_failure_when_main_advanced_during_the_run(self) -> None:
         self.pull["base"]["sha"] = "c" * 40
-        self.publish("success", "success", "blackhole ci passed.")
-        body = self.requests[-1][3]
-        self.assertEqual((body["head_sha"], body["conclusion"]), (HEAD, "failure"))
-        self.assertIn("main changed", body["output"]["summary"])
+        self.publish("success", "success")
+        self.assert_failure_check("The tip of main changed while the judge ran.")

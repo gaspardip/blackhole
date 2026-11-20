@@ -1,4 +1,4 @@
 exclude = ["rules/**", "evasion/**"]
 
 [guard]
-paths = ["tools/judge_app.py"]
+paths = ["tools/judge_app.py", "tools/name_guard.py"]

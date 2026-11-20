@@ -5,6 +5,10 @@ on:
     branches: [main]
     types: [opened, reopened, synchronize, edited]
 
+concurrency:
+  group: judge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions: {}
 
 defaults:
@@ -18,15 +22,14 @@ env:
 
 jobs:
   judge:
-    if: github.repository == 'gaspardip/blackhole'
+    if: >-
+      github.repository == 'gaspardip/blackhole' &&
+      (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions: {}
     outputs:
-      head: ${{ steps.verdict.outputs.head }}
-      base: ${{ steps.verdict.outputs.base }}
       conclusion: ${{ steps.verdict.outputs.conclusion }}
-      summary: ${{ steps.verdict.outputs.summary }}
     steps:
       - name: Build and run the base judge
         id: verdict
@@ -57,15 +60,16 @@ jobs:
           cat "${log}"
           printf '\n::%s::\n' "${marker}"
           case "${code}" in
-            0) conclusion=success; summary="blackhole ci passed." ;;
-            1) conclusion=failure; summary="blackhole ci reported a policy violation. See the judge job log." ;;
+            0) conclusion=success ;;
+            1) conclusion=failure ;;
             *) exit "${code}" ;;
           esac
-          printf 'head=%s\nbase=%s\nconclusion=%s\nsummary=%s\n' \
-            "${PR_HEAD_SHA}" "${PR_BASE_SHA}" "${conclusion}" "${summary}" >> "${GITHUB_OUTPUT}"
+          printf 'conclusion=%s\n' "${conclusion}" >> "${GITHUB_OUTPUT}"
 
   publish:
-    if: ${{ always() && github.repository == 'gaspardip/blackhole' }}
+    if: >-
+      always() && github.repository == 'gaspardip/blackhole' &&
+      (github.event.action != 'edited' || github.event.changes.base)
     needs: judge
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -85,8 +89,5 @@ jobs:
           JUDGE_APP_PRIVATE_KEY: ${{ secrets.JUDGE_APP_PRIVATE_KEY }}
           PR_READ_TOKEN: ${{ github.token }}
           JUDGE_RESULT: ${{ needs.judge.result }}
-          JUDGE_HEAD_SHA: ${{ needs.judge.outputs.head }}
-          JUDGE_BASE_SHA: ${{ needs.judge.outputs.base }}
           JUDGE_CONCLUSION: ${{ needs.judge.outputs.conclusion }}
-          JUDGE_SUMMARY: ${{ needs.judge.outputs.summary }}
         run: python3 -I "${RUNNER_TEMP}/judge_app.py"

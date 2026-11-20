@@ -26,10 +26,7 @@ class Snapshot:
 @dataclass(frozen=True)
 class Verdict:
     job_result: str
-    head: str
-    base: str
     conclusion: str
-    summary: str
 
 
 def base64url(data: bytes) -> bytes:
@@ -72,8 +69,8 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
     if not re.fullmatch(r"[1-9][0-9]*", app_id):
         raise ValueError("expected a numeric GitHub App ID")
     pull = github(api_url, f"{REPO}/pulls/{snapshot.number}", read_token)
-    if (pull["state"] != "open" or pull["number"] != snapshot.number
-            or pull["base"]["ref"] != "main" or pull["head"]["sha"] != snapshot.head):
+    if (pull["state"] != "open" or pull["base"]["ref"] != "main"
+            or pull["head"]["sha"] != snapshot.head):
         raise ValueError("PR no longer matches the event head and target branch")
 
     conclusion = "failure"
@@ -81,12 +78,13 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
         summary = f"The judge job ended with {verdict.job_result}."
     elif pull["base"]["sha"] != snapshot.base:
         summary = "The tip of main changed while the judge ran. Update the branch and rerun the judge."
-    elif ((verdict.head, verdict.base) != (snapshot.head, snapshot.base)
-          or verdict.conclusion not in ("success", "failure") or not verdict.summary):
-        summary = "The judge job returned an invalid verdict."
+    elif verdict.conclusion == "success":
+        conclusion = "success"
+        summary = "blackhole ci passed."
+    elif verdict.conclusion == "failure":
+        summary = "blackhole ci reported a policy violation. See the judge job log."
     else:
-        conclusion = verdict.conclusion
-        summary = verdict.summary
+        summary = "The judge job returned an invalid verdict."
 
     jwt = app_jwt(app_id, private_key)
     installation = github(api_url, f"{REPO}/installation", jwt)["id"]
@@ -102,9 +100,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
         },
     }
     check = github(api_url, f"{REPO}/check-runs", token, body)
-    if check["app"]["id"] != int(app_id) or any(
-        check[key] != body[key] for key in ("name", "head_sha", "status", "conclusion")
-    ):
+    if check["app"]["id"] != int(app_id):
         raise ValueError("GitHub returned an unexpected check run")
     return check["id"]
 
@@ -112,8 +108,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
 def main() -> None:
     env = os.environ
     snapshot = Snapshot(int(env["PR_NUMBER"]), env["PR_HEAD_SHA"], env["PR_BASE_SHA"])
-    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_HEAD_SHA"], env["JUDGE_BASE_SHA"],
-                      env["JUDGE_CONCLUSION"], env["JUDGE_SUMMARY"])
+    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"])
     run_id = publish(snapshot, verdict, app_id=env["JUDGE_APP_ID"],
                      private_key=env["JUDGE_APP_PRIVATE_KEY"], read_token=env["PR_READ_TOKEN"])
     print(f"Published blackhole judge check run {run_id}.")
