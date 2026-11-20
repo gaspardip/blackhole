@@ -730,7 +730,6 @@ pub(super) fn any_property<'a>(
 }
 
 pub(super) struct Invocation<'a> {
-    pub(super) span: oxc::span::Span,
     pub(super) callee: &'a Expression<'a>,
     pub(super) path: Option<Vec<&'a str>>,
 
@@ -872,7 +871,6 @@ fn invocation<'a>(
     };
     let (args, unreadable_args) = args.finish(ctx);
     let result = Rc::new(Invocation {
-        span,
         callee,
         path,
         unreadable_args,

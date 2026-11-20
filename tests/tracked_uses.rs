@@ -705,12 +705,12 @@ fn round2_r21_fake_timers_in_hooks() {
     assert_review_rules(
         "case.test.ts",
         r#"describe("fake", () => { beforeAll(() => { vi.useFakeTimers(); }); test("fake", async () => { await scheduler.wait(10); assert(read()); }); }); describe("real", () => { test("real", async () => { await scheduler.wait(10); assert(read()); }); });"#,
-        &["ts/no-fixed-sleep"],
+        &["ts/no-fixed-sleep", "ts/no-fixed-sleep"],
     );
     assert_review_rules(
         "case.test.ts",
         r#"vi.useFakeTimers(); test("fake", async () => { await scheduler.wait(10); assert(read()); });"#,
-        &[],
+        &["ts/no-fixed-sleep"],
     );
 }
 
@@ -927,7 +927,7 @@ fn round4_r30_first_test_precedes_timer_restore() {
     assert_review_rules(
         "case.test.ts",
         r#"beforeAll(() => { vi.useFakeTimers(); }); afterEach(() => { vi.useRealTimers(); }); test("timer", async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; assert(read()); });"#,
-        &[],
+        &["ts/no-fixed-sleep"],
     );
 }
 
@@ -936,22 +936,22 @@ fn round4_r31_before_all_precedes_timer_restore() {
     assert_review_rules(
         "case.test.ts",
         r#"vi.useFakeTimers(); beforeAll(async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; }); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read()));"#,
-        &[],
+        &["ts/no-fixed-sleep"],
     );
     assert_review_rules(
         "case.test.ts",
         r#"vi.useFakeTimers(); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read())); beforeAll(async () => { const elapsed = new Promise(r => setTimeout(r, 10)); vi.advanceTimersByTime(10); await elapsed; });"#,
-        &[],
+        &["ts/no-fixed-sleep"],
     );
 }
 
 #[test]
-fn round4_timer_hooks_use_test_run_points() {
+fn round4_timer_hooks_report_with_file_timers() {
     for hook in ["beforeEach", "afterEach"] {
         let first = format!(
             r#"vi.useFakeTimers(); {hook}(async () => {{ await scheduler.wait(10); }}); afterEach(() => vi.useRealTimers()); test("first", () => assert(read()));"#
         );
-        assert_review_rules("case.test.ts", &first, &[]);
+        assert_review_rules("case.test.ts", &first, &["ts/no-fixed-sleep"]);
         let second = format!(r#"{first} test("second", () => assert(read()));"#);
         assert_review_rules("case.test.ts", &second, &["ts/no-fixed-sleep"]);
     }
@@ -960,4 +960,93 @@ fn round4_timer_hooks_use_test_run_points() {
         r#"vi.useFakeTimers(); afterAll(async () => { await scheduler.wait(10); }); afterEach(() => vi.useRealTimers()); test("timer", () => assert(read()));"#,
         &["ts/no-fixed-sleep"],
     );
+}
+
+#[test]
+fn round5_r32_after_each_sleep_after_timer_restore() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import { afterEach, expect, test, vi } from "vitest";
+
+vi.useFakeTimers();
+afterEach(async () => {
+  await new Promise(resolve => setTimeout(resolve, 10));
+});
+afterEach(() => { vi.useRealTimers(); });
+test("reads the clock", () => expect(Date.now()).toBeGreaterThan(0));
+"#,
+        &["ts/no-fixed-sleep"],
+    );
+}
+
+#[test]
+fn round5_r33_file_timers_do_not_exempt_named_or_inline_suites() {
+    let source = r#"import { afterEach, describe, expect, test, vi } from "vitest";
+
+function smokeTests() {
+  afterEach(() => { vi.useRealTimers(); });
+  test("reads the clock", () => expect(Date.now()).toBeGreaterThan(0));
+}
+
+vi.useFakeTimers();
+test("advances the clock", async () => {
+  const start = Date.now();
+  const elapsed = new Promise(resolve => setTimeout(resolve, 10));
+  vi.advanceTimersByTime(10);
+  await elapsed;
+  expect(Date.now()).toBe(start + 10);
+});
+describe("smoke tests", smokeTests);
+"#;
+    assert_review_rules("case.test.ts", source, &["ts/no-fixed-sleep"]);
+    let inline = r#"describe("smoke tests", () => {
+  afterEach(() => { vi.useRealTimers(); });
+  test("reads the clock", () => expect(Date.now()).toBeGreaterThan(0));
+});
+"#;
+    let inline = source
+        .replace(
+            r#"function smokeTests() {
+  afterEach(() => { vi.useRealTimers(); });
+  test("reads the clock", () => expect(Date.now()).toBeGreaterThan(0));
+}
+
+"#,
+            "",
+        )
+        .replace(r#"describe("smoke tests", smokeTests);"#, inline);
+    assert_review_rules("case.test.ts", &inline, &["ts/no-fixed-sleep"]);
+}
+
+#[test]
+fn round5_before_each_timer_inheritance() {
+    let source = r#"function cases() {
+  test("nested", async () => { await scheduler.wait(10); assert(read()); });
+}
+describe("outer", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  describe("inner", cases);
+});"#;
+    assert_review_rules("case.test.ts", source, &[]);
+    let with_restore = source.replace(
+        "  test(",
+        "  beforeEach(() => { vi.useRealTimers(); vi.useFakeTimers(); });\n  test(",
+    );
+    assert_review_rules("case.test.ts", &with_restore, &["ts/no-fixed-sleep"]);
+    let with_local_restore =
+        source.replace("await scheduler", "vi.useRealTimers(); await scheduler");
+    assert_review_rules("case.test.ts", &with_local_restore, &["ts/no-fixed-sleep"]);
+}
+
+#[test]
+fn round5_hooks_use_their_own_timers() {
+    for (setup, expected) in [
+        ("", &["ts/no-fixed-sleep"][..]),
+        ("jest.useFakeTimers();", &[]),
+    ] {
+        let source = format!(
+            r#"beforeEach(() => {{ vi.useFakeTimers(); }}); afterEach(async () => {{ {setup} await scheduler.wait(10); }}); test("x", () => assert(read()));"#
+        );
+        assert_review_rules("case.test.ts", &source, expected);
+    }
 }

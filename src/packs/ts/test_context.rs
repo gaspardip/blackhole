@@ -608,7 +608,6 @@ pub(super) fn enclosing_runners<'ctx, 'a>(
 #[derive(Clone, Copy)]
 pub(super) struct CallbackSite<'a> {
     pub(super) at: NodeId,
-    pub(super) start: u32,
     pub(super) runner: Runner<'a>,
 }
 
@@ -635,7 +634,6 @@ pub(super) fn callback_sites<'ctx, 'a>(
                 }))
             .then_some(CallbackSite {
                 at: function,
-                start: call.span.start,
                 runner,
             })
         });
@@ -661,11 +659,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                                 sites
                                     .entry(callback.node_id())
                                     .or_default()
-                                    .push(CallbackSite {
-                                        at,
-                                        start: site.span.start,
-                                        runner,
-                                    });
+                                    .push(CallbackSite { at, runner });
                             }
                         }
                     }
