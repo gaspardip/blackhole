@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from shutil import copy
 
-from test_name_guard import GUARD, WORDS, Repo, git
+from test_name_guard import GUARD, WORDS, Repo, git, isolated_env
 
 SCRIPT = Path(__file__).parent.with_name("bin") / "merge-outside"
 # Stands in for the GitHub CLI: records each call and names the branch a pull request targets.
@@ -26,6 +26,15 @@ esac
 """
 
 
+def fake_gh(directory: Path, script: str) -> dict[str, str]:
+    gh = directory / "gh"
+    gh.write_text(script, encoding="utf-8")
+    gh.chmod(0o755)
+    env = isolated_env(directory)
+    env["PATH"] = f"{directory}{os.pathsep}{env['PATH']}"
+    return env
+
+
 class LandedMerge(Repo):
     def squash(self, origin: Path, landed: str) -> subprocess.CompletedProcess[str]:
         script = self.dir / "bin" / SCRIPT.name
@@ -34,14 +43,7 @@ class LandedMerge(Repo):
         guard.parent.mkdir()
         copy(SCRIPT, script)
         copy(GUARD, guard)
-        gh = self.dir / "gh"
-        gh.write_text(GH_SQUASH, encoding="utf-8")
-        gh.chmod(0o755)
-        env = {
-            "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
-            "HOME": str(self.dir),
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
+        env = fake_gh(self.dir, GH_SQUASH) | {
             "BLACKHOLE_BANNED": WORDS,
             "GH_ORIGIN": str(origin),
             "GH_LANDED": landed,
@@ -75,12 +77,9 @@ class LandedMerge(Repo):
 class MergeOutside(unittest.TestCase):
     def test_a_pull_request_into_another_branch_is_refused_before_any_merge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            calls = Path(tmp) / "calls"
-            gh = Path(tmp) / "gh"
-            gh.write_text(GH, encoding="utf-8")
-            gh.chmod(0o755)
-            env = {
-                "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}",
+            directory = Path(tmp)
+            calls = directory / "calls"
+            env = fake_gh(directory, GH) | {
                 "GH_CALLS": str(calls),
                 "GH_BASE": "release",
             }

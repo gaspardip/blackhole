@@ -89,9 +89,13 @@ def known(sha: str) -> bool:
     return subprocess.run(probe, capture_output=True, check=False).returncode == 0
 
 
+def invalid_event() -> CannotRun:
+    return CannotRun("the event payload is not what GitHub documents")
+
+
 def string(value: object) -> str:
     if not isinstance(value, str):
-        raise CannotRun("the event payload is not what GitHub documents")
+        raise invalid_event()
     return value
 
 
@@ -100,15 +104,16 @@ def optional(value: object) -> str:
 
 
 def object_id(value: object) -> str:
-    if not SHA.fullmatch(string(value)):
-        raise CannotRun("the event payload is not what GitHub documents")
-    return string(value)
+    sha = string(value)
+    if not SHA.fullmatch(sha):
+        raise invalid_event()
+    return sha
 
 
 def by_writer(item: dict[str, Any]) -> bool:
     association = string(item["author_association"])
     if association not in WRITERS | STRANGERS:
-        raise CannotRun("the event payload is not what GitHub documents")
+        raise invalid_event()
     return association in WRITERS
 
 
@@ -217,8 +222,8 @@ class Guard:
         else:
             self.commits(head, base)
 
-    def target(self, ref: str, target: str) -> bool:
-        """Scans what a ref points at short of a commit, and says whether it ends at one."""
+    def target(self, ref: str, target: str) -> str | None:
+        """Scans non-commit objects and returns the commit the ref ends at, if any."""
         # A tag can point at another tag, and each one carries its own message.
         while (kind := git("cat-file", "-t", target).strip()) == b"tag":
             body = decode(git("cat-file", "tag", target))
@@ -229,7 +234,18 @@ class Guard:
                 self.entry(entry, f"{ref} ")
         elif kind == b"blob":
             self.entry(Entry("100644", target, ref))
-        return kind == b"commit"
+        return target if kind == b"commit" else None
+
+    def update_ref(
+        self, ref: str, base: str, tip: str, *, local_ref: str | None = None
+    ) -> None:
+        self.name("ref", ref)
+        if ZERO.fullmatch(tip):
+            return
+        if local_ref is not None:
+            self.name("ref", local_ref)
+        if (commit := self.target(ref, tip)) is not None:
+            self.range(base, commit)
 
     def everything(self) -> None:
         listed = decode(git("for-each-ref", "--format=%(objectname) %(refname)"))
@@ -260,14 +276,12 @@ class Guard:
         if string(payload["repository"]["owner"]["type"]) != "User":
             raise CannotRun("the trust rule only holds for a repository owned by a user")
         if name in ACTIONS and string(payload["action"]) not in ACTIONS[name]:
-            raise CannotRun("the event payload is not what GitHub documents")
+            raise invalid_event()
         match name:
             case "push":
                 ref = string(payload["ref"])
                 before, after = object_id(payload["before"]), object_id(payload["after"])
-                self.name("ref", ref)
-                if not ZERO.fullmatch(after) and self.target(ref, after):
-                    self.range(before, f"{after}^{{commit}}")
+                self.update_ref(ref, before, after)
             case "pull_request_target":
                 pull = payload["pull_request"]
                 head, source = pull["head"], pull["head"]["repo"]
@@ -277,8 +291,10 @@ class Guard:
                     payload["repository"]["full_name"]
                 )
                 if self.written(pull, "pull request", title=string, body=optional) and local:
-                    self.name("ref", string(head["ref"]))
-                    self.range(object_id(pull["base"]["sha"]), object_id(head["sha"]))
+                    tip = object_id(head["sha"])
+                    if ZERO.fullmatch(tip):
+                        raise invalid_event()
+                    self.update_ref(string(head["ref"]), object_id(pull["base"]["sha"]), tip)
             case "issues":
                 self.written(payload["issue"], "issue", title=string, body=optional)
             case "issue_comment":
@@ -290,8 +306,7 @@ class Guard:
                 self.scan("release body", optional(release["body"]))
                 self.name("ref", string(release["tag_name"]))
             case "schedule" | "workflow_dispatch":
-                # Catches what no event reported: GitHub sends no push event for a tag
-                # when more than three are pushed at once.
+                # GitHub sends no tag push events when more than three tags are pushed at once.
                 self.everything()
             case _:
                 raise CannotRun("no scan is defined for this event")
@@ -299,12 +314,7 @@ class Guard:
     def push(self, lines: str) -> None:
         for line in lines.splitlines():
             local_ref, local_sha, remote_ref, remote_sha = line.split()
-            self.name("ref", remote_ref)
-            if ZERO.fullmatch(local_sha):
-                continue
-            self.name("ref", local_ref)
-            if self.target(remote_ref, local_sha):
-                self.range(remote_sha, f"{local_sha}^{{commit}}")
+            self.update_ref(remote_ref, remote_sha, local_sha, local_ref=local_ref)
 
 
 def run(argv: list[str]) -> int:
@@ -318,16 +328,15 @@ def run(argv: list[str]) -> int:
             guard.push(sys.stdin.read())
         case ["range", base, head]:
             guard.range(base, head)
+            guard.env_text()
         case ["tree"]:
             guard.tree()
         case ["text"]:
-            pass
+            guard.env_text()
         case ["event"]:
             guard.event(*load_event())
         case _:
             raise CannotRun(USAGE)
-    if argv != ["event"]:  # the environment says nothing about who wrote its text
-        guard.env_text()
     for hit in guard.hits:
         print(hit, file=sys.stderr)
     if guard.hits:

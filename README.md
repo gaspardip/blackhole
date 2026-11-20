@@ -20,8 +20,9 @@ Without the list the guard refuses to run and the commit is blocked.
 
 CI scans only what people with write access wrote or pushed. For a pull request
 from anyone else, or from a fork, the `name-guard` check passes without scanning.
-Merge those with the script that scans the commits, title and body, then merges
-exactly what it scanned:
+Merge those with `bin/merge-outside`, which only accepts pull requests that
+target `main`. It scans the commits, title and body, then merges exactly what
+it scanned.
 
 ```sh
 bin/merge-outside <number>
@@ -36,8 +37,6 @@ either. Write the new text to a file and scan it before you save it:
 ```sh
 python3 -I tools/name_guard.py message <file>
 ```
-
-`bin/merge-outside` only merges pull requests that target `main`.
 
 The guard stops mistakes. It cannot stop someone with write access who sets out
 to publish a name: they could change the workflow on their own branch, or post

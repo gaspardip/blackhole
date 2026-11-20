@@ -15,6 +15,16 @@ GUARD = Path(__file__).with_name("name_guard.py")
 WORDS = "quokka\nzebrafish\n"
 
 
+def isolated_env(cwd: Path) -> dict[str, str]:
+    return {
+        "PATH": os.environ["PATH"],
+        "HOME": str(cwd),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "BLACKHOLE_BANNED_FILE": str(cwd / "no-such-list"),
+    }
+
+
 def run(
     args: list[str],
     cwd: Path,
@@ -22,14 +32,7 @@ def run(
     stdin: str = "",
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    full = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(cwd),
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-        "BLACKHOLE_BANNED_FILE": str(cwd / "no-such-list"),
-        **(env or {}),
-    }
+    full = isolated_env(cwd) | (env or {})
     if banned is not None:
         full["BLACKHOLE_BANNED"] = banned
     return subprocess.run(
@@ -51,12 +54,7 @@ def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
         capture_output=True,
         text=True,
         check=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "HOME": str(cwd),
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-        },
+        env=isolated_env(cwd),
     )
     return done.stdout.strip()
 
@@ -88,6 +86,13 @@ class Repo(unittest.TestCase):
         """A tree holding one empty directory, which only plumbing can build."""
         empty = git(self.dir, "mktree", stdin="")
         return git(self.dir, "mktree", stdin=f"040000 tree {empty}\t{name}\n")
+
+    def loose_tree(self, path: str, text: str) -> str:
+        self.write(path, text)
+        git(self.dir, "add", "--", path)
+        tree = git(self.dir, "write-tree")
+        git(self.dir, "reset", "-q")
+        return tree
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -328,8 +333,11 @@ class Push(Repo):
 
     def test_pushed_ref_name_is_caught(self) -> None:
         head = self.commit("chore: start")
-        line = f"refs/heads/x {head} refs/heads/quokka-fix {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+        refs = [("x", "quokka-fix"), ("quokka-fix", "x")]
+        for local, remote in refs:
+            with self.subTest(local=local, remote=remote):
+                line = f"refs/heads/{local} {head} refs/heads/{remote} {'0' * 40}\n"
+                self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_annotated_tag_message_is_caught(self) -> None:
         self.commit("chore: start")
@@ -355,10 +363,7 @@ class Push(Repo):
 
     def test_a_tagged_tree_is_caught(self) -> None:
         self.commit("chore: start")
-        self.write("a.txt", "Quokka\n")
-        git(self.dir, "add", "a.txt")
-        tree = git(self.dir, "write-tree")
-        git(self.dir, "reset", "-q")
+        tree = self.loose_tree("a.txt", "Quokka\n")
         line = f"refs/tags/t {tree} refs/tags/t {'0' * 40}\n"
         self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
@@ -492,13 +497,11 @@ class Event(Repo):
         git(self.dir, "checkout", "-q", "-")
         self.assertEqual(self.event("workflow_dispatch", {}).returncode, 1)
 
-    def test_a_scheduled_run_scans_tagged_trees_and_blobs(self) -> None:
-        self.write("a.txt", "Quokka\n")
-        git(self.dir, "add", "a.txt")
-        tree = git(self.dir, "write-tree")
-        git(self.dir, "reset", "-q")
+    def test_a_scheduled_run_scans_tagged_objects(self) -> None:
+        tree = self.loose_tree("a.txt", "Quokka\n")
         blob = git(self.dir, "hash-object", "-w", "a.txt")
-        for target in [tree, blob]:
+        empty = self.empty_directory("quokka")
+        for target in [tree, blob, empty]:
             with self.subTest(target=target):
                 git(self.dir, "tag", "-f", "odd", target)
                 self.assertEqual(self.event("schedule", {}).returncode, 1)
@@ -520,10 +523,6 @@ class Event(Repo):
         self.assertEqual(self.edit(edited, before="Could it be Quokka?"), 0)
         self.assertEqual(self.edit(edited, before="Could it be Otter?"), 0)
         self.assertEqual(self.edit("is it Quokka? (edited)", before="is it Quokka?"), 0)
-
-    def test_a_tagged_empty_directory_is_caught_by_a_scheduled_run(self) -> None:
-        git(self.dir, "tag", "odd", self.empty_directory("quokka"))
-        self.assertEqual(self.event("schedule", {}).returncode, 1)
 
     def test_an_action_the_workflow_does_not_send_fails_closed(self) -> None:
         issue = {"title": "bug", "body": None, "author_association": "NONE"}
@@ -581,6 +580,7 @@ class Event(Repo):
     def test_an_unexpected_payload_fails_closed(self) -> None:
         self.assertEqual(self.event("issues", {}).returncode, 2)
         self.assertEqual(self.event("issues", {"issue": "Quokka"}).returncode, 2)
+        self.assertEqual(self.pull_request(head="0" * 40).returncode, 2)
         self.assertEqual(run(["event"], self.dir).returncode, 2)
 
 

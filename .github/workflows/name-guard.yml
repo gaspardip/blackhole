@@ -10,7 +10,7 @@ on:
     types: [created, edited]
   release:
     types: [created, edited, published]
-  # Rescans every ref: GitHub sends no push event for a tag pushed with more than two others.
+  # See the schedule case in tools/name_guard.py.
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
