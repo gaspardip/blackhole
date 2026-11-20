@@ -5,7 +5,10 @@ use super::{
 use crate::engine::TsCtx;
 use oxc::ast::{
     AstKind,
-    ast::{AssignmentTarget, Expression, MemberExpression},
+    ast::{
+        AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, Expression,
+        MemberExpression,
+    },
 };
 
 fn native<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<fn(&str) -> bool> {
@@ -15,17 +18,57 @@ fn protected_member<'a>(ctx: &TsCtx<'a>, m: &'a MemberExpression<'a>) -> bool {
     native(ctx, m.object()).is_some_and(|protected| MemberKeys(ctx).read(m).is_none_or(protected))
 }
 
+fn assignment_writes<'a>(ctx: &TsCtx<'a>, root: &'a AssignmentTarget<'a>) -> bool {
+    let target = |candidate: &'a AssignmentTargetMaybeDefault<'a>| match candidate {
+        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) => {
+            Some(&default.binding)
+        }
+        other => other.as_assignment_target(),
+    };
+    let mut pending = vec![root];
+    while let Some(next) = pending.pop() {
+        match next {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                if ctx.semantic.is_reference_to_global_variable(id)
+                    && protected_global(id.name.as_str())
+                {
+                    return true;
+                }
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                pending.extend(array.elements.iter().flatten().filter_map(target));
+                pending.extend(array.rest.iter().map(|rest| &rest.target));
+            }
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                pending.extend(object.rest.iter().map(|rest| &rest.target));
+                pending.extend(
+                    object
+                        .properties
+                        .iter()
+                        .filter_map(|property| match property {
+                            AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                                target(&p.binding)
+                            }
+                            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(_) => None,
+                        }),
+                );
+            }
+            target => {
+                if target
+                    .as_member_expression()
+                    .is_some_and(|m| protected_member(ctx, m))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(super) fn writes<'a>(ctx: &TsCtx<'a>, node: AstKind<'a>) -> bool {
     match node {
-        AstKind::AssignmentExpression(a) => match &a.left {
-            AssignmentTarget::AssignmentTargetIdentifier(id) => {
-                ctx.semantic.is_reference_to_global_variable(id)
-                    && protected_global(id.name.as_str())
-            }
-            target => target
-                .as_member_expression()
-                .is_some_and(|m| protected_member(ctx, m)),
-        },
+        AstKind::AssignmentExpression(a) => assignment_writes(ctx, &a.left),
         AstKind::UnaryExpression(u) if u.operator.is_delete() => u
             .argument
             .get_member_expr()

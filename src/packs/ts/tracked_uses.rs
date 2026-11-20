@@ -103,13 +103,27 @@ fn inspect_value<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, escapes: &mut V
     let mut seen = HashSet::new();
     while let Some(value) = pending.pop() {
         let value = unwrapped(value);
-        if let Expression::ConditionalExpression(branch) = resolve(ctx, value) {
+        let resolved = resolve(ctx, value);
+        if let Expression::ConditionalExpression(branch) = resolved {
             if seen.insert(branch.span) {
                 pending.extend([&branch.alternate, &branch.consequent]);
             }
             continue;
         }
+        let mut rules = Vec::new();
         if let Some(rule) = owner(ctx, value) {
+            rules.push(rule);
+        } else if let Expression::Identifier(_) = resolved {
+            super::any_value(ctx, value, |candidate| {
+                if let Some(rule) = owner(ctx, candidate)
+                    && !rules.contains(&rule)
+                {
+                    rules.push(rule);
+                }
+                false
+            });
+        }
+        for rule in rules {
             let span = value
                 .get_member_expr()
                 .map_or_else(|| value.span(), |m| super::member_span(ctx, m));

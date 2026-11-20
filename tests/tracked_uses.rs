@@ -570,3 +570,66 @@ fn review_r08_playwright_page_fixture_route() {
         &["ts/no-test-doubles"],
     );
 }
+
+#[test]
+fn review_r09_default_process_import() {
+    assert_review_rules(
+        "src/runtime.ts",
+        r#"import process from "process"; read(process.env.VITEST);"#,
+        &["ts/no-test-aware-code"],
+    );
+}
+
+#[test]
+fn review_r12_negated_poll_length() {
+    assert_review_rules(
+        "case.test.ts",
+        "expect.poll(() => requests).not.toHaveLength(0)",
+        &["ts/no-unsignaled-poll"],
+    );
+}
+
+#[test]
+fn review_r15_playwright_test_timeout() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {test} from "@playwright/test"; test("x", () => { test.setTimeout(60_000); assert(read()); });"#,
+        &["ts/no-flake-masking"],
+    );
+}
+
+#[test]
+fn review_r16_reassigned_runner_escape() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import test from "@playwright/test"; let run = registered; if (omitCase) run = test.skip; handoff(run)"#,
+        &["ts/no-skipped-tests"],
+    );
+}
+
+#[test]
+fn review_r17_node_before_after_sleep() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import {before, after} from "node:test"; before(async () => { await new Promise(r => setTimeout(r, 10)); }); after(async () => { await new Promise(r => setTimeout(r, 10)); });"#,
+        &["ts/no-fixed-sleep", "ts/no-fixed-sleep"],
+    );
+}
+
+#[test]
+fn review_r18_destructured_native_write() {
+    assert_review_rules(
+        "case.test.ts",
+        "[globalThis.fetch] = [fakeFetch]",
+        &["ts/no-test-doubles"],
+    );
+}
+
+#[test]
+fn review_r19_named_assertionless_callback() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"function exerciseOnly() { run(); } test("x", exerciseOnly)"#,
+        &["ts/no-assertionless-tests"],
+    );
+}

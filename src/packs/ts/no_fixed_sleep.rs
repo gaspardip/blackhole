@@ -102,6 +102,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     owner.first().copied(),
                     Some("beforeEach" | "beforeAll" | "afterEach" | "afterAll")
                 )
+                || owner.is_node() && matches!(owner.first().copied(), Some("before" | "after"))
             {
                 sleeps.insert(id, (function.id(), a.span.start as usize));
             }

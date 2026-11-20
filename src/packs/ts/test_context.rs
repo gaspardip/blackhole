@@ -530,14 +530,18 @@ impl<'a> Runner<'a> {
     }
 }
 
-impl Invocation<'_> {
-    pub(super) fn inline_test_body(&self) -> Option<oxc::span::Span> {
+impl<'a> Invocation<'a> {
+    pub(super) fn test_body(&self, ctx: &TsCtx<'a>) -> Option<oxc::span::Span> {
         self.args
             .iter()
             .flatten()
-            .find_map(|arg| match super::values::unwrapped(arg) {
+            .find_map(|arg| match binding_value(ctx, arg) {
                 Expression::ArrowFunctionExpression(f) => Some(f.body.span()),
                 Expression::FunctionExpression(f) => Some(f.body.as_ref()?.span),
+                Expression::Identifier(id) => match declaration(ctx, id)? {
+                    AstKind::Function(f) => Some(f.body.as_ref()?.span),
+                    _ => None,
+                },
                 _ => None,
             })
     }

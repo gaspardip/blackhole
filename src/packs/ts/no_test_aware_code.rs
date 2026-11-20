@@ -48,7 +48,7 @@ fn marker(key: &str, kind: Marker) -> bool {
 fn process_env<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, suffix: &[&str]) -> bool {
     super::values::path(ctx, e).is_some_and(|p| match p.as_slice() {
         ["process" | "node:process", "env", rest @ ..]
-        | ["node:process", "default", "env", rest @ ..] => rest == suffix,
+        | ["process" | "node:process", "default", "env", rest @ ..] => rest == suffix,
         _ => false,
     })
 }

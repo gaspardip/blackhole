@@ -39,6 +39,13 @@ fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
         }
     }
 }
+fn matcher_subject<'a>(ctx: &TsCtx<'a>, object: &'a Expression<'a>) -> &'a Expression<'a> {
+    let object = resolve(ctx, object);
+    receiver(ctx, object)
+        .filter(|&(_, key)| key == "not")
+        .map_or(object, |(object, _)| resolve(ctx, object))
+}
+
 fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
     let Some(call) = call_expr(resolve(ctx, e)) else {
         return false;
@@ -51,11 +58,7 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
     } else {
         return false;
     };
-    let object = resolve(ctx, object);
-    let subject = receiver(ctx, object)
-        .filter(|&(_, key)| key == "not")
-        .map_or(object, |(object, _)| resolve(ctx, object));
-    let Some(call) = call_expr(subject) else {
+    let Some(call) = call_expr(matcher_subject(ctx, object)) else {
         return false;
     };
     let expect = invoked(ctx, call);
@@ -96,7 +99,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .iter()
         .filter_map(|n| n.kind().as_member_expression_kind())
         .filter(|&m| MemberKeys(ctx).read_kind(m) == Some("toHaveLength"))
-        .filter_map(|m| call_expr(resolve(ctx, member_object(m))).map(|call| call.span))
+        .filter_map(|m| call_expr(matcher_subject(ctx, member_object(m))).map(|call| call.span))
         .collect();
     for n in nodes.iter() {
         let Some(c) = super::values::site(ctx, n.kind()) else {

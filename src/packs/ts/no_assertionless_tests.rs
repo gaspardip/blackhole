@@ -147,8 +147,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
-        // shortcut: callbacks passed by reference need interprocedural analysis before their assertions can be judged.
-        if let Some(body) = inv.inline_test_body() {
+        if let Some(body) = inv.test_body(ctx) {
             tests.push((position(), body));
         }
     }

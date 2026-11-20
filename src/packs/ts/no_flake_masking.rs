@@ -1,4 +1,4 @@
-use super::test_context::{Runner, TestOption, runner};
+use super::test_context::{Runner, TestOption, enclosing_runners, runner};
 use super::values::{Origin, Properties, origin_path, properties, resolve};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
@@ -127,6 +127,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                             _ => c.span.start as usize,
                         };
                         findings.report(at, None);
+                    }
+                    None if p.is_playwright()
+                        && p == ["test", "setTimeout"]
+                        && enclosing_runners(ctx, n.id())
+                            .next()
+                            .is_some_and(|owner| owner.is_playwright() && owner.test()) =>
+                    {
+                        findings.report(c.span.start as usize, None);
                     }
                     None if p.test_or_suite()
                         && (super::values::call_expr(call.callee).is_some()
