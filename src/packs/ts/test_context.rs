@@ -75,7 +75,7 @@ pub(super) fn suite(name: &str) -> bool {
     matches!(name, "describe" | "suite" | "context")
 }
 
-pub(super) fn modifier(name: &str) -> bool {
+fn modifier(name: &str) -> bool {
     matches!(
         name,
         "skip" | "only" | "todo" | "skipIf" | "runIf" | "fixme" | "fails" | "failing"
@@ -111,6 +111,47 @@ pub(crate) struct Runner<'a> {
     pub(super) todo: bool,
 }
 impl<'a> Runner<'a> {
+    pub(super) fn from_path(origin: Origin, parts: &[&'a str]) -> Option<Self> {
+        let mut result = Self {
+            option_syntax: match (origin, parts.first().copied()) {
+                (Origin::Global, _) | (_, Some("vitest")) => OptionSyntax::Flexible,
+                (_, Some("node:test")) => OptionSyntax::Node,
+                (_, Some("@playwright/test")) => OptionSyntax::Playwright,
+                _ => OptionSyntax::Named,
+            },
+            ..Self::default()
+        };
+        let names = match (origin, parts) {
+            (Origin::Global, names)
+            | (_, names @ ["node:timers/promises" | "timers/promises", ..]) => names,
+            (Origin::Required, ["node:test", rest @ ..]) => {
+                result.push("test");
+                result.module_root = ModuleRoot::CallableTest;
+                rest
+            }
+            (_, ["node:test" | "@playwright/test", rest @ ..]) => {
+                result.module_root = ModuleRoot::DefaultTest;
+                rest
+            }
+            (_, ["vitest" | "@jest/globals", rest @ ..]) => rest,
+            (
+                _,
+                [
+                    "node:assert" | "node:assert/strict" | "assert" | "assert/strict",
+                    rest @ ..,
+                ],
+            ) => {
+                result.push("assert");
+                rest.strip_prefix(&["default"]).unwrap_or(rest)
+            }
+            _ => return None,
+        };
+        for name in names {
+            result.push(name);
+        }
+        Some(result)
+    }
+
     fn push(&mut self, name: &'a str) {
         let root = std::mem::take(&mut self.module_root);
         if root == ModuleRoot::CallableTest
@@ -182,43 +223,9 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             continue;
         }
         if let Some((origin, parts)) = origin_path(ctx, e) {
-            let mut result = Runner {
-                option_syntax: match (origin, parts.first().copied()) {
-                    (Origin::Global, _) | (_, Some("vitest")) => OptionSyntax::Flexible,
-                    (_, Some("node:test")) => OptionSyntax::Node,
-                    (_, Some("@playwright/test")) => OptionSyntax::Playwright,
-                    _ => OptionSyntax::Named,
-                },
-                ..Runner::default()
+            let Some(result) = Runner::from_path(origin, &parts) else {
+                return Runner::default();
             };
-            let names = match (origin, parts.as_slice()) {
-                (Origin::Global, names)
-                | (_, names @ ["node:timers/promises" | "timers/promises", ..]) => names,
-                (Origin::Required, ["node:test", rest @ ..]) => {
-                    result.push("test");
-                    result.module_root = ModuleRoot::CallableTest;
-                    rest
-                }
-                (_, ["node:test" | "@playwright/test", rest @ ..]) => {
-                    result.module_root = ModuleRoot::DefaultTest;
-                    rest
-                }
-                (_, ["vitest" | "@jest/globals", rest @ ..]) => rest,
-                (
-                    _,
-                    [
-                        "node:assert" | "node:assert/strict" | "assert" | "assert/strict",
-                        rest @ ..,
-                    ],
-                ) => {
-                    result.push("assert");
-                    rest.strip_prefix(&["default"]).unwrap_or(rest)
-                }
-                _ => return Runner::default(),
-            };
-            for name in names {
-                result.push(name);
-            }
             ctx.resolution.runners.borrow_mut().insert(span, result);
             break result;
         }
@@ -254,6 +261,13 @@ impl Runner<'_> {
     }
     pub(super) fn test_or_suite(&self) -> bool {
         self.test() || self.first().is_some_and(|name| suite(name))
+    }
+
+    pub(super) fn legacy_skip(&self) -> bool {
+        matches!(
+            self.first().copied(),
+            Some("xit" | "xtest" | "xdescribe" | "fit" | "fdescribe")
+        )
     }
 }
 

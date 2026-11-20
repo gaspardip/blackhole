@@ -1,5 +1,6 @@
 use super::{MemberKeys, Origin, origin_path, resolve, unwrapped};
 use crate::engine::{Findings, TsCtx};
+use crate::packs::ts::{no_flake_masking, test_context::Runner};
 use oxc::ast::{AstKind, ast::Expression};
 use oxc::span::GetSpan;
 use std::collections::HashSet;
@@ -70,33 +71,28 @@ fn owner<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<&'static str>
     if mock_value(origin, &path) {
         return Some("ts/no-test-doubles");
     }
-    let names = match (origin, path.as_slice()) {
+    if matches!(
+        (origin, path.as_slice()),
         (
             Origin::Module | Origin::Required,
-            ["vitest" | "node:test" | "@playwright/test" | "@jest/globals"],
-        ) => return Some("ts/no-skipped-tests"),
-        (Origin::Global, names)
-        | (
-            _,
-            [
-                "vitest" | "node:test" | "@playwright/test" | "@jest/globals",
-                names @ ..,
-            ],
-        ) => names,
-        (_, ["node:timers/promises" | "timers/promises", "setTimeout"]) => {
-            return Some("ts/no-fixed-sleep");
-        }
-        _ => return None,
-    };
-    match names {
-        [
-            "test" | "it" | "specify" | "describe" | "suite" | "context",
-            rest @ ..,
-        ] if rest.is_empty() || rest.iter().any(|n| super::super::test_context::modifier(n)) => {
-            Some("ts/no-skipped-tests")
-        }
-        ["xit" | "xtest" | "xdescribe" | "fit" | "fdescribe"] => Some("ts/no-skipped-tests"),
-        ["test", "slow"] => Some("ts/no-flake-masking"),
+            ["node:timers/promises" | "timers/promises", "setTimeout"]
+        )
+    ) {
+        return Some("ts/no-fixed-sleep");
+    }
+    let runner = Runner::from_path(origin, &path)?;
+    let names = runner.short();
+    let single_name = matches!(names, Some([_]));
+    if (origin != Origin::Global && runner.is_empty())
+        || (runner.test_or_suite() && (runner.skipped || single_name))
+        || (single_name && runner.legacy_skip())
+    {
+        return Some("ts/no-skipped-tests");
+    }
+    if no_flake_masking::api(&runner).is_some() {
+        return Some(no_flake_masking::RULE.id);
+    }
+    match names? {
         ["Bun", "sleep"] | ["scheduler", "wait"] | ["setTimeout"] => Some("ts/no-fixed-sleep"),
         _ => None,
     }

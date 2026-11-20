@@ -1,4 +1,4 @@
-use super::test_context::{TestOption, runner};
+use super::test_context::{Runner, TestOption, runner};
 use super::values::Properties;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{
@@ -39,13 +39,20 @@ fn report_options(
         findings.report(expr.get_inner_expression().span().start as usize, None);
     }
 }
-const CONFIG_OPTIONS: &[(&[&str], &[&str])] = &[
-    (
-        &["vi", "setConfig"],
-        &["retry", "testTimeout", "hookTimeout"],
-    ),
-    (&["test", "describe", "configure"], &["retries"]),
-];
+pub(super) enum Api {
+    Slow,
+    Config(&'static [&'static str]),
+}
+
+pub(super) fn api(runner: &Runner<'_>) -> Option<Api> {
+    match runner.short()? {
+        ["test", "slow"] => Some(Api::Slow),
+        ["vi", "setConfig"] => Some(Api::Config(&["retry", "testTimeout", "hookTimeout"])),
+        ["test", "describe", "configure"] => Some(Api::Config(&["retries"])),
+        _ => None,
+    }
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     for n in ctx.semantic.nodes().iter() {
@@ -56,19 +63,15 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             kind if let Some(c) = super::values::site(ctx, kind) => {
                 let call = c.call;
                 let p = runner(ctx, &call);
-                if let Some((_, keys)) = CONFIG_OPTIONS
-                    .iter()
-                    .find(|(path, _)| p.short() == Some(*path))
-                {
-                    if let Some(arg) = call.arg(0)
-                        && !inspect(ctx, arg, keys, findings)
-                    {
-                        findings.report(arg.span().start as usize, None);
+                match api(&p) {
+                    Some(Api::Config(keys)) => {
+                        if let Some(arg) = call.arg(0)
+                            && !inspect(ctx, arg, keys, findings)
+                        {
+                            findings.report(arg.span().start as usize, None);
+                        }
                     }
-                    continue;
-                }
-                match p.short() {
-                    Some(["test", "slow"]) => {
+                    Some(Api::Slow) => {
                         let at = match kind {
                             AstKind::CallExpression(call) => {
                                 super::values::call_position(ctx, call)
@@ -77,7 +80,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         };
                         findings.report(at, None);
                     }
-                    _ if p.test_or_suite()
+                    None if p.test_or_suite()
                         && (super::values::call_expr(call.callee).is_some()
                             || !matches!(
                                 p.last,
@@ -98,7 +101,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                             }
                         }
                     }
-                    _ => (),
+                    None => (),
                 }
             }
             _ => (),

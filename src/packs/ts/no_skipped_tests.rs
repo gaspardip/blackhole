@@ -1,4 +1,4 @@
-use super::test_context::{Runner, TestOption, enclosing_runners, modifier, test_file};
+use super::test_context::{Runner, TestOption, enclosing_runners, test_file};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::BTreeSet;
@@ -86,7 +86,6 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         };
         let call = c.call;
         let path = super::test_context::runner(ctx, &call);
-        let base = path.first().copied().unwrap_or("");
         let position = if path.test_or_suite() {
             if path.skipped {
                 let usage = c.callee.get_inner_expression();
@@ -98,24 +97,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             } else {
                 skip_option(ctx, &call, path).map(|(at, _)| at)
             }
-        } else if matches!(base, "xit" | "xtest" | "xdescribe" | "fit" | "fdescribe")
+        } else if path.legacy_skip()
             || path.is_empty()
                 && super::values::any_assigned_path(ctx, call.callee, |origin, parts| {
-                    let ((super::values::Origin::Global, names)
-                    | (
-                        _,
-                        [
-                            "vitest" | "node:test" | "@jest/globals" | "@playwright/test",
-                            names @ ..,
-                        ],
-                    )) = (origin, parts)
-                    else {
-                        return false;
-                    };
-                    names.split_first().is_some_and(|(root, rest)| {
-                        (super::test_context::is_test(root) || super::test_context::suite(root))
-                            && rest.iter().any(|key| modifier(key))
-                    })
+                    Runner::from_path(origin, parts).is_some_and(|r| r.test_or_suite() && r.skipped)
                 })
         {
             Some(call.callee.span().start as usize)

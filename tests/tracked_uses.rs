@@ -234,6 +234,76 @@ fn conditional_arguments_inspect_both_result_arms() {
 }
 
 #[test]
+fn default_runner_api_escapes_and_reassigned_skips() {
+    let source = "import nodeTest from 'node:test';\n\
+                  import playwrightTest from '@playwright/test';\n\
+                  consume(nodeTest.skip);\n\
+                  [playwrightTest.slow];\n\
+                  let selected = fallback;\n\
+                  if (flag) selected = nodeTest.skip;\n\
+                  selected('example', () => assert(read()));\n\
+                  nodeTest.skip('control', () => assert(read()));\n\
+                  playwrightTest.slow();";
+    let found = run(registry(), [("case.test.ts", source.as_bytes())]);
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                SKIP,
+                3,
+                18,
+                Some("cannot read how `skip` is used here; call it by name")
+            ),
+            (
+                FLAKE,
+                4,
+                17,
+                Some("cannot read how `slow` is used here; call it by name")
+            ),
+            (SKIP, 7, 1, None),
+            (SKIP, 8, 10, None),
+            (FLAKE, 9, 1, None),
+        ]
+    );
+}
+
+#[test]
+fn flake_masking_config_api_escapes() {
+    let source = "import {test} from '@playwright/test';\n\
+                  consume(vi.setConfig);\n\
+                  [test.describe.configure];\n\
+                  vi.setConfig({retry: 2});\n\
+                  test.describe.configure({retries: 2});\n\
+                  { const vi = custom; consume(vi.setConfig); }";
+    let found = run(registry(), [("case.test.ts", source.as_bytes())]);
+    assert_eq!(
+        found
+            .iter()
+            .map(|f| (f.rule, f.line, f.col, f.note.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                FLAKE,
+                2,
+                12,
+                Some("cannot read how `setConfig` is used here; call it by name")
+            ),
+            (
+                FLAKE,
+                3,
+                16,
+                Some("cannot read how `configure` is used here; call it by name")
+            ),
+            (FLAKE, 4, 15, None),
+            (FLAKE, 5, 26, None),
+        ]
+    );
+}
+
+#[test]
 fn runner_option_slots_follow_the_api() {
     let cases: &[(&str, &str, &[&str])] = &[
         (
