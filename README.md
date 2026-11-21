@@ -167,9 +167,10 @@ Configure GitHub in this order. Steps 1 to 5 come before the workflow runs.
    branches to be up to date before merging. Without the pull request rule, a
    writer can push a judged commit straight to `main`, and a PR whose head
    already contains it keeps its old check.
-7. Open a pull request so the App posts its first `blackhole judge` check. GitHub
-   offers an App as the check's source only after it has posted one. Then require
-   the `blackhole judge` check from the App's numeric ID.
+7. Open an up-to-date pull request with a change outside the protected paths and
+   wait for the App's `blackhole judge` check to succeed. GitHub offers an App as
+   a check's source only after a successful run in the repository within the past
+   seven days. Then require the `blackhole judge` check from the App's numeric ID.
 
 The publisher checks the tip of `main` and the judge's UTC date before issuing green.
 If the date is missing or from another day, it posts failure. Re-run the whole
