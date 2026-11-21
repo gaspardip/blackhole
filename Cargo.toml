@@ -28,3 +28,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 serde_json = "1"
 oxc = { version = "0.158.0", default-features = false, features = ["regular_expression", "semantic"] }
+
+# The tests bound resolution time; unoptimized code runs close to those bounds on hosted runners.
+[profile.test]
+opt-level = 1

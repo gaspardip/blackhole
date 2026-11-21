@@ -59,7 +59,7 @@ enum Evidence<'a> {
 
 fn evidence<'a>(
     resolver: &Resolution,
-    ctx: &'a TsCtx<'a>,
+    ctx: &TsCtx<'a>,
     expr: &'a Expression<'a>,
     owner: Option<NodeId>,
     bindings: &mut ConstBindings<Judged<Evidence<'a>>>,

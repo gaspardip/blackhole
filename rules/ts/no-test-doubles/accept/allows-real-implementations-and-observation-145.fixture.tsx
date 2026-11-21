@@ -1,0 +1,1 @@
+vi.mocked(client);

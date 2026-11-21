@@ -1,0 +1,1 @@
+Document.prototype.querySelector = find;

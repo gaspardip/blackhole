@@ -1,0 +1,1 @@
+send.mockReturnValueOnce(42);

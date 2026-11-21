@@ -1,0 +1,1 @@
+import {getResponse, http} from "msw"; const handlers = [http.all("*", () => new Response("network"))]; export default {outboundService: request => getResponse(handlers, request), serviceBindings: {API: "actual-worker", STORAGE: {name: "storage"}}};

@@ -1,0 +1,1 @@
+import {chromium as engine} from "@playwright/test"; const browser = await engine.launch(); const context = await browser.newContext(); const page = await context.newPage(); await page.route("**/*", async route => {const response = {status: 503, body: "offline"}; await route.fulfill(response);});

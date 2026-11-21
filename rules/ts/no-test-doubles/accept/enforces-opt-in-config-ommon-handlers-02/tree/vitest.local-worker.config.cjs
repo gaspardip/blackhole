@@ -1,0 +1,1 @@
+const {getResponse, http} = require("msw"); const handlers = [http.all("*", () => new Response("network"))]; module.exports = {outboundService: request => getResponse(handlers, request), serviceBindings: {API: "actual-worker"}};

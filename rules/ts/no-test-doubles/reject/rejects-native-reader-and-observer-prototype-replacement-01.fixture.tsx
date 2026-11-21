@@ -1,0 +1,1 @@
+FileReader.prototype.readAsText = replacement;

@@ -1,0 +1,1 @@
+globalThis[`custom${suffix}`] = value;

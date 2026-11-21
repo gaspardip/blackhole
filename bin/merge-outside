@@ -1,0 +1,59 @@
+#!/bin/sh
+# Merges a pull request the CI name guard skipped: scans it here, then merges exactly what was scanned.
+set -eu
+export GIT_NO_REPLACE_OBJECTS=1
+number="$1"
+cd "$(dirname "$0")/.."
+require_main() {
+  if ! target="$(gh pr view "${number}" --json baseRefName --jq .baseRefName 2>/dev/null)" ||
+    [ "${target}" != main ]; then
+    echo "merge-outside: pull request ${number} does not target main" >&2
+    exit 1
+  fi
+}
+merge_unconfirmed() {
+  echo "merge-outside: could not confirm merge of pull request ${number}" >&2
+  exit 1
+}
+require_main
+# A tag named main can shadow the branch when Git resolves a fetch source.
+main_ref=refs/remotes/origin/main
+main_refspec="+refs/heads/main:${main_ref}"
+git fetch -q origin "${main_refspec}"
+base="$(git rev-parse "${main_ref}")"
+git fetch -q origin "refs/pull/${number}/head"
+head="$(git rev-parse FETCH_HEAD)"
+title="$(gh pr view "${number}" --json title --jq .title)"
+body="$(gh pr view "${number}" --json body --jq .body)"
+subject="${title} (#${number})"
+GUARD_TEXT_SUBJECT="${subject}" GUARD_TEXT_BODY="${body}" python3 -I tools/name_guard.py range "${base}" "${head}"
+if ! preview_tree="$(git merge-tree --write-tree "${base}" "${head}" 2>/dev/null)"; then
+  echo "merge-outside: cannot preview squash for pull request ${number}" >&2
+  exit 1
+fi
+preview_commit="$(git -c user.name=blackhole -c user.email=blackhole@localhost commit-tree \
+  "${preview_tree}" -p "${base}" --no-gpg-sign -m "${subject}" -m "${body}")"
+python3 -I tools/name_guard.py range "${base}" "${preview_commit}"
+# The subject and body are passed back so an edit made after the scan cannot reach main.
+require_main
+if ! git fetch -q origin "${main_refspec}" >/dev/null 2>&1 ||
+  ! current_base="$(git rev-parse --verify "${main_ref}" 2>/dev/null)" ||
+  [ "${current_base}" != "${base}" ]; then
+  echo "merge-outside: could not confirm preview base for pull request ${number}" >&2
+  exit 1
+fi
+# shortcut: the daily scan covers a late retarget, and only the post-merge scan covers a late base move.
+gh pr merge "${number}" --squash --match-head-commit "${head}" --subject "${subject}" --body "${body}" \
+  >/dev/null 2>&1 || merge_unconfirmed
+merge_status="$(gh pr view "${number}" --json state,baseRefName,mergeCommit \
+  --jq '[.state, .baseRefName, .mergeCommit.oid] | join(" ")' 2>/dev/null)" || merge_unconfirmed
+case "${merge_status}" in
+  "MERGED main "*) landed="${merge_status#MERGED main }" ;;
+  *) merge_unconfirmed ;;
+esac
+git fetch -q origin "${main_refspec}" >/dev/null 2>&1 || merge_unconfirmed
+resolved="$(git rev-parse --verify --end-of-options "${landed}^{commit}" 2>/dev/null)" || merge_unconfirmed
+[ "${landed}" = "${resolved}" ] || merge_unconfirmed
+git merge-base --is-ancestor "${landed}" "${main_ref}" >/dev/null 2>&1 || merge_unconfirmed
+# GitHub writes the author and trailers of the squash commit, so what landed is scanned as well.
+python3 -I tools/name_guard.py range "${base}" "${landed}"
