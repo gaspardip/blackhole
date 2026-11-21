@@ -13,7 +13,7 @@ from textwrap import dedent
 import name_guard
 
 GUARD = Path(__file__).with_name("name_guard.py")
-EVENT_WORKFLOW = GUARD.parent / "fixtures" / "name-guard-event-workflow.yml"
+EVENT_WORKFLOW = GUARD.parents[1] / ".github" / "workflows" / "name-guard.yml"
 WORDS = "quokka\nzebrafish\n"
 
 
