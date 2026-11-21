@@ -946,6 +946,24 @@ describe("smoke tests", smokeTests);
     assert_review_rules("case.test.ts", source, &["ts/no-fixed-sleep"]);
 }
 
+#[test]
+fn round8_r42_sleep_in_before_all_and_after_all() {
+    assert_review_rules(
+        "case.test.ts",
+        r#"import { afterAll, beforeAll, expect, test } from "vitest";
+
+beforeAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 10));
+});
+afterAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 10));
+});
+test("reads the clock", () => expect(Date.now()).toBeGreaterThan(0));
+"#,
+        &["ts/no-fixed-sleep", "ts/no-fixed-sleep"],
+    );
+}
+
 fn assert_fixed_sleep_at(source: &str, line: usize, col: usize) {
     let hits = run(registry(), [("case.test.ts", source.as_bytes())]);
     assert_eq!(
