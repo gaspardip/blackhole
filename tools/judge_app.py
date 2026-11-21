@@ -74,6 +74,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
     if (pull["state"] != "open" or pull["base"]["ref"] != "main"
             or pull["head"]["sha"] != snapshot.head):
         raise ValueError("PR no longer matches the event head and target branch")
+    tip = github(api_url, f"{REPO}/git/ref/heads/main", read_token)["object"]["sha"]
 
     jwt = app_jwt(app_id, private_key)
     installation = github(api_url, f"{REPO}/installation", jwt)["id"]
@@ -84,7 +85,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
     conclusion = "failure"
     if verdict.job_result != "success":
         summary = f"The judge job ended with {verdict.job_result}."
-    elif pull["base"]["sha"] != snapshot.base:
+    elif tip != snapshot.base:
         summary = "The tip of main changed while the judge ran. Update the branch and rerun the judge."
     elif verdict.judged_on != datetime.now(timezone.utc).date().isoformat():
         summary = "Judged on another day. Re-run the whole judge."
@@ -112,7 +113,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
 
 def main() -> None:
     env = os.environ
-    snapshot = Snapshot(int(env["PR_NUMBER"]), env["PR_HEAD_SHA"], env["PR_BASE_SHA"])
+    snapshot = Snapshot(int(env["PR_NUMBER"]), env["PR_HEAD_SHA"], env["MAIN_SHA"])
     verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"], env.get("JUDGE_DATE"))
     run_id = publish(snapshot, verdict, app_id=env["JUDGE_APP_ID"],
                      private_key=env["JUDGE_APP_PRIVATE_KEY"], read_token=env["PR_READ_TOKEN"])

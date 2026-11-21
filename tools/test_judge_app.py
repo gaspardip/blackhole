@@ -40,6 +40,7 @@ class JudgeApp(unittest.TestCase):
             "head": {"sha": HEAD},
             "base": {"ref": "main", "sha": BASE},
         }
+        self.main = BASE
         fixture = self
 
         class GitHub(BaseHTTPRequestHandler):
@@ -47,6 +48,7 @@ class JudgeApp(unittest.TestCase):
                 replies = {
                     f"{judge_app.REPO}/pulls/7": fixture.pull,
                     f"{judge_app.REPO}/installation": {"id": 42},
+                    f"{judge_app.REPO}/git/ref/heads/main": {"object": {"sha": fixture.main}},
                 }
                 fixture.requests.append(("GET", self.path, self.headers["Authorization"], None))
                 self.reply(200, replies[self.path])
@@ -99,8 +101,9 @@ class JudgeApp(unittest.TestCase):
         before = int(time.time())
         self.assertEqual(self.publish("success", "success"), 93)
         after = int(time.time())
-        pull, installation, mint, check = self.requests
+        pull, main, installation, mint, check = self.requests
         self.assertEqual(pull, ("GET", f"{judge_app.REPO}/pulls/7", "Bearer read-token", None))
+        self.assertEqual(main, ("GET", f"{judge_app.REPO}/git/ref/heads/main", "Bearer read-token", None))
         self.assertEqual(installation[:2], ("GET", f"{judge_app.REPO}/installation"))
         self.assertEqual(mint, (
             "POST", "/app/installations/42/access_tokens", installation[2],
@@ -161,7 +164,15 @@ class JudgeApp(unittest.TestCase):
                 self.assert_failure_check("The judge job returned an invalid verdict.")
 
     def test_publishes_failure_when_main_advanced_during_the_run(self) -> None:
-        self.pull["base"]["sha"] = "c" * 40
+        self.main = "c" * 40
+        self.publish("success", "success")
+        self.assert_failure_check("The tip of main changed while the judge ran.")
+
+    def test_judges_against_live_main_when_the_pr_base_is_stale(self) -> None:
+        self.pull["base"]["sha"] = "d" * 40
+        self.publish("success", "success")
+        self.assertEqual(self.requests[-1][3]["conclusion"], "success")
+        self.main = "c" * 40
         self.publish("success", "success")
         self.assert_failure_check("The tip of main changed while the judge ran.")
 

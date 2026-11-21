@@ -14,7 +14,8 @@ defaults:
 env:
   PR_NUMBER: ${{ github.event.pull_request.number }}
   PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  # The payload's base SHA can lag behind main; this is main's tip when the event fired.
+  MAIN_SHA: ${{ github.sha }}
 
 jobs:
   judge:
@@ -39,18 +40,18 @@ jobs:
           url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git init -q --bare "${repo}"
           git -C "${repo}" fetch -q --no-tags "${url}" \
-            "${PR_BASE_SHA}:refs/heads/main" "refs/pull/${PR_NUMBER}/head:refs/judge/head"
+            "${MAIN_SHA}:refs/heads/main" "refs/pull/${PR_NUMBER}/head:refs/judge/head"
           if [[ "$(git -C "${repo}" rev-parse refs/judge/head)" != "${PR_HEAD_SHA}" ]]; then
             echo "The pull request head changed before fetch." >&2
             exit 1
           fi
           mkdir "${src}"
-          git -C "${repo}" archive "${PR_BASE_SHA}" | tar -x -C "${src}"
+          git -C "${repo}" archive "${MAIN_SHA}" | tar -x -C "${src}"
           (cd "${src}" && cargo build --locked --release)
 
           judged_on="$(date -u +%F)"
           code=0
-          (cd "${repo}" && "${CARGO_TARGET_DIR}/release/blackhole" ci --base "${PR_BASE_SHA}" \
+          (cd "${repo}" && "${CARGO_TARGET_DIR}/release/blackhole" ci --base "${MAIN_SHA}" \
             --head "${PR_HEAD_SHA}" --today "${judged_on}") > "${log}" 2>&1 || code=$?
           # Paths in diagnostics can resemble workflow commands.
           marker="$(cat /proc/sys/kernel/random/uuid)"
@@ -73,6 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      contents: read
       pull-requests: read
     steps:
       - name: Fetch the base publisher
@@ -80,8 +82,8 @@ jobs:
           repo="${RUNNER_TEMP}/publisher.git"
           git init -q --bare "${repo}"
           git -C "${repo}" fetch -q --depth 1 --no-tags \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "${PR_BASE_SHA}"
-          git -C "${repo}" show "${PR_BASE_SHA}:tools/judge_app.py" > "${RUNNER_TEMP}/judge_app.py"
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "${MAIN_SHA}"
+          git -C "${repo}" show "${MAIN_SHA}:tools/judge_app.py" > "${RUNNER_TEMP}/judge_app.py"
       - name: Publish the App check run
         env:
           JUDGE_APP_ID: ${{ secrets.JUDGE_APP_ID }}

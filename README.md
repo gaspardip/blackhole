@@ -133,7 +133,7 @@ only for pull requests targeting `main` in `gaspardip/blackhole`. Adopters run
 `blackhole ci` in their own workflow.
 
 On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from the
-event's base commit in a job without secrets or token permissions. It fetches
+tip of `main` when the event fired, in a job without secrets or token permissions. It fetches
 the PR head into a fresh bare Git repository and judges it as commit data.
 The verdict excludes review data. The workflow omits `--approvals`, so a
 protected change stays red and requires a maintainer merge.
@@ -142,12 +142,12 @@ If a head branch name that looks like a commit SHA prevents `pull_request_target
 from running, push the commits to a branch with another name and open a new PR
 from it. Renaming the head branch of an open PR closes that PR.
 
-A separate job runs the publisher from the same base commit. It verifies the
-current PR head and target branch through the GitHub API and uses an App
+A separate job runs the publisher from the same commit. It verifies the current
+PR head, target branch and tip of `main` through the GitHub API and uses an App
 installation token with `checks: write`. A failed or cancelled judge job yields
 a failure check for that head when the publisher runs.
 
-Configure GitHub in this order before enabling the workflow.
+Configure GitHub in this order. Steps 1 to 5 come before the workflow runs.
 
 1. Create the `judge` environment with a deployment branch rule allowing only
    `main`. The rule matches the default branch (`main`) because
@@ -163,13 +163,15 @@ Configure GitHub in this order before enabling the workflow.
 4. Install the App on `gaspardip/blackhole` only. Without an installation the
    publisher gets no token and posts nothing.
 5. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
-6. Protect `main`: require a pull request before merging, require the
-   `blackhole judge` check from the App's numeric ID, and require PR branches
-   to be up to date before merging. Without the pull request rule, a writer can
-   push a judged commit straight to `main`, and a PR whose head already contains
-   it keeps its old check.
+6. Protect `main`: require a pull request before merging and require PR
+   branches to be up to date before merging. Without the pull request rule, a
+   writer can push a judged commit straight to `main`, and a PR whose head
+   already contains it keeps its old check.
+7. Open a pull request so the App posts its first `blackhole judge` check. GitHub
+   offers an App as the check's source only after it has posted one. Then require
+   the `blackhole judge` check from the App's numeric ID.
 
-The publisher checks the base SHA and the judge's UTC date before issuing green.
+The publisher checks the tip of `main` and the judge's UTC date before issuing green.
 If the date is missing or from another day, it posts failure. Re-run the whole
 judge for a verdict on the current day. GitHub stores the check on the head SHA,
 so PRs with the same head share it. A passing check stays valid while the head
