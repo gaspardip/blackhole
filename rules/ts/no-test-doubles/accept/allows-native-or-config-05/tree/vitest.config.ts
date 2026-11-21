@@ -1,0 +1,1 @@
+import { http, getResponse } from "msw"; function upstream(name) { const handlers = [http.all("*", () => new Response(name))]; return async (request) => { const response = await getResponse(handlers, request); if (!response) throw new Error(name); return response; }; } export default { serviceBindings: { API: upstream("api") } };

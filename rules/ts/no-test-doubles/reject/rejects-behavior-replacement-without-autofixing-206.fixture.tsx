@@ -1,0 +1,1 @@
+vi.fn(async () => undefined);

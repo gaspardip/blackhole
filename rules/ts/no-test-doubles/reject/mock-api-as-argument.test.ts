@@ -1,0 +1,1 @@
+consume(vi.mock, vi);

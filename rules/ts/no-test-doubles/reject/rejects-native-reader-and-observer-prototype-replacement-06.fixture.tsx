@@ -1,0 +1,1 @@
+IntersectionObserver.prototype.observe = replacement;

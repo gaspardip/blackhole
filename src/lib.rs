@@ -9,24 +9,41 @@ pub mod ledger;
 pub mod objections;
 mod packs {
     pub(crate) mod ts {
+        mod bindings;
+        mod config_responses;
         pub(crate) mod dictionary_types;
+        mod double_mutations;
         pub(crate) mod function_types;
+        mod native_properties;
+        pub(crate) mod no_assertionless_tests;
         pub(crate) mod no_chained_type_assertions;
         pub(crate) mod no_comments;
         pub(crate) mod no_explicit_any;
         pub(crate) mod no_explicit_return_types;
+        pub(crate) mod no_fixed_sleep;
+        pub(crate) mod no_flake_masking;
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;
         pub(crate) mod no_reflect_apply;
         pub(crate) mod no_reflect_get;
         pub(crate) mod no_runtime_typeof;
+        pub(crate) mod no_skipped_tests;
+        pub(crate) mod no_test_aware_code;
+        pub(crate) mod no_test_doubles;
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
         pub(crate) mod no_unknown_type_aliases;
         pub(crate) mod no_unsafe_dictionary_type;
+        pub(crate) mod no_unsignaled_poll;
         pub(crate) mod no_widen_then_assert;
+        mod playwright;
         pub(crate) mod reflect_method;
+        mod saved_methods;
+        pub(crate) mod strict_msw;
+        mod test_context;
+        mod transports;
+        pub(crate) mod values;
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;

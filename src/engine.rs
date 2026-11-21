@@ -39,6 +39,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
     pub text: &'a str,
     pub program: &'a Program<'a>,
@@ -74,21 +75,29 @@ pub fn registry() -> &'static [Rule] {
             fix: "Make the file parse. The judge must be able to read it.",
             run: Run::ParseError,
         },
+        crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
         crate::packs::ts::no_explicit_any::RULE,
         crate::packs::ts::no_explicit_return_types::RULE,
+        crate::packs::ts::no_fixed_sleep::RULE,
+        crate::packs::ts::no_flake_masking::RULE,
         crate::packs::ts::no_known_value_widening::RULE,
         crate::packs::ts::no_non_null_assertion::RULE,
         crate::packs::ts::no_object_parameters::RULE,
         crate::packs::ts::no_reflect_apply::RULE,
         crate::packs::ts::no_reflect_get::RULE,
         crate::packs::ts::no_runtime_typeof::RULE,
+        crate::packs::ts::no_skipped_tests::RULE,
+        crate::packs::ts::no_test_aware_code::RULE,
+        crate::packs::ts::no_test_doubles::RULE,
         crate::packs::ts::no_unknown_parameters::RULE,
         crate::packs::ts::no_unknown_returns::RULE,
         crate::packs::ts::no_unknown_type_aliases::RULE,
         crate::packs::ts::no_unsafe_dictionary_type::RULE,
+        crate::packs::ts::no_unsignaled_poll::RULE,
         crate::packs::ts::no_widen_then_assert::RULE,
+        crate::packs::ts::strict_msw::RULE,
     ]
 }
 
@@ -185,6 +194,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        resolution: crate::packs::ts::values::Resolution::default(),
         path,
         text,
         program,

@@ -1,3 +1,4 @@
+pub(in crate::packs::ts) use super::super::values::symbol;
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
@@ -11,12 +12,6 @@ use oxc::{
 };
 use std::{collections::HashMap, ops::ControlFlow};
 
-pub(crate) fn symbol(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<SymbolId> {
-    ctx.semantic
-        .scoping()
-        .get_reference(ident.reference_id.get()?)
-        .symbol_id()
-}
 pub(crate) fn declaration(ctx: &TsCtx<'_>, ident: &IdentifierReference<'_>) -> Option<NodeId> {
     value_declarations(ctx, symbol(ctx, ident)?).next()
 }

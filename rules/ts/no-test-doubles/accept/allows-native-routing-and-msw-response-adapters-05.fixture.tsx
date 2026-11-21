@@ -1,0 +1,1 @@
+import {chromium} from "playwright"; const browser = await chromium.launch(); const page = await browser.newPage(); await page.route("**/*", async route => {function nested(route) { return route.fulfill({body: "unrelated"}); }});

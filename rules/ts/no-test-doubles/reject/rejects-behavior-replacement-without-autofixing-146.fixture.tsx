@@ -1,0 +1,1 @@
+navigator.userAgentData = hints;

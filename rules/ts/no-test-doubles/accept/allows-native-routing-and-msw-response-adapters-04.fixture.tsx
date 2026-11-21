@@ -1,0 +1,1 @@
+import {chromium} from "playwright"; const browser = await chromium.launch(); const page = await browser.newPage(); await page.route("**/*", async route => {const response = await getResponse(handlers, request); await route.fulfill({status: response.status, headers: Object.fromEntries(response.headers), body: Buffer.from(await response.arrayBuffer())});});

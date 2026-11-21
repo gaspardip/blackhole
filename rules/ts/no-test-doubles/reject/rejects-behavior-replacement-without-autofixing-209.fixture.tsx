@@ -1,0 +1,1 @@
+send.mockRejectedValueOnce(new Error());
