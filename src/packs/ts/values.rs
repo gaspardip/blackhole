@@ -734,6 +734,7 @@ pub(super) struct Invocation<'a> {
     pub(super) path: Option<Vec<&'a str>>,
 
     pub(super) unreadable_args: Option<oxc::span::Span>,
+    pub(super) spread_args: bool,
     pub(super) template_arg: bool,
     pub(super) intrinsic_targets: Vec<oxc::span::Span>,
     pub(super) args: Vec<Option<&'a Expression<'a>>>,
@@ -869,11 +870,12 @@ fn invocation<'a>(
         }
         callee = resolve(ctx, m.object());
     };
-    let (args, unreadable_args) = args.finish(ctx);
+    let (args, unreadable_args, spread_args) = args.finish(ctx);
     let result = Rc::new(Invocation {
         callee,
         path,
         unreadable_args,
+        spread_args,
         template_arg,
         intrinsic_targets,
         args,

@@ -673,6 +673,60 @@ pub(super) fn callback_sites<'ctx, 'a>(
         .chain(named.into_iter().flatten().copied())
 }
 
+pub(super) fn registration_sites(ctx: &TsCtx<'_>, function: NodeId) -> Option<Vec<NodeId>> {
+    let mut sites = Vec::new();
+    for site in callback_sites(ctx, function) {
+        if site.runner.hook().is_some() {
+            return None;
+        }
+        sites.push(site.at);
+    }
+
+    let nodes = ctx.semantic.nodes();
+    let named = match nodes.kind(function) {
+        AstKind::Function(f) => f.id.as_ref(),
+        _ => None,
+    };
+    let bound = match super::values::outer(ctx, function) {
+        Some(AstKind::VariableDeclarator(v)) => v.id.get_binding_identifier(),
+        _ => None,
+    };
+    if named.is_none() && bound.is_none() && sites.is_empty() {
+        sites.push(function);
+    }
+    let registered = sites.len();
+    let scoping = ctx.semantic.scoping();
+    for binding in [named, bound].into_iter().flatten() {
+        let symbol = binding.symbol_id.get()?;
+        let declaration = ctx.semantic.symbol_declaration(symbol);
+        if !scoping.symbol_redeclarations(symbol).is_empty()
+            || nodes.ancestors(declaration.id()).take(2).any(|node| {
+                matches!(
+                    node.kind(),
+                    AstKind::ExportNamedDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
+                )
+            })
+        {
+            return None;
+        }
+        for reference in scoping
+            .get_resolved_references(symbol)
+            .filter(|r| r.is_value())
+        {
+            let at = reference.node_id();
+            let Some(AstKind::CallExpression(call)) = super::values::outer(ctx, at) else {
+                return None;
+            };
+            if unwrapped(&call.callee).node_id() == at {
+                sites.push(call.node_id());
+            } else if !sites[..registered].contains(&call.node_id()) {
+                return None;
+            }
+        }
+    }
+    (!sites.is_empty()).then_some(sites)
+}
+
 pub(super) fn callback_parameter<'a>(
     ctx: &TsCtx<'a>,
     symbol: oxc::syntax::symbol::SymbolId,

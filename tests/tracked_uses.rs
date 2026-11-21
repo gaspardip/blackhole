@@ -1050,3 +1050,106 @@ fn round5_hooks_use_their_own_timers() {
         assert_review_rules("case.test.ts", &source, expected);
     }
 }
+
+fn assert_fixed_sleep_at(source: &str, line: usize, col: usize) {
+    let hits = run(registry(), [("case.test.ts", source.as_bytes())]);
+    assert_eq!(
+        hits.iter()
+            .map(|hit| (hit.rule, hit.line, hit.col))
+            .collect::<Vec<_>>(),
+        [("ts/no-fixed-sleep", line, col)],
+        "{source}"
+    );
+}
+
+#[test]
+fn round6_r34_fake_timer_options_must_cover_timeouts() {
+    assert_fixed_sleep_at(
+        r#"import { afterEach, beforeEach, expect, jest, test } from "@jest/globals";
+
+beforeEach(() => {
+  jest.useFakeTimers({ now: 0, doNotFake: ["setTimeout"] });
+});
+afterEach(() => { jest.useRealTimers(); });
+
+test("keeps the date fixed during a real delay", async () => {
+  const start = Date.now();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  expect(Date.now()).toBe(start);
+});
+"#,
+        10,
+        3,
+    );
+    assert_review_rules(
+        "case.test.ts",
+        r#"beforeEach(() => { vi.useFakeTimers({ now: 0 }); }); test("clock", async () => { await new Promise(resolve => setTimeout(resolve, 10)); assert(read()); });"#,
+        &[],
+    );
+    for setup in [
+        "const config = { now: 0 }; vi.useFakeTimers(config);",
+        "vi.useFakeTimers(...[]);",
+        "const install = vi.useFakeTimers.bind(vi, ...[]); install();",
+        "jest.useFakeTimers('legacy');",
+        "vi.useFakeTimers({ ...{} });",
+        "vi.useFakeTimers({ toFake: ['Date'] });",
+    ] {
+        let source = format!(
+            r#"beforeEach(() => {{ {setup} }}); test("clock", async () => {{ await scheduler.wait(10); assert(read()); }});"#
+        );
+        assert_review_rules("case.test.ts", &source, &["ts/no-fixed-sleep"]);
+    }
+}
+
+#[test]
+fn round6_r35_shared_cases_require_fake_timers_at_every_call() {
+    let source = r#"import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+
+function clockCases() {
+  test("fires a timeout", async () => {
+    const elapsed = new Promise(resolve => setTimeout(() => resolve("done"), 10));
+    if (vi.isFakeTimers()) vi.advanceTimersByTime(10);
+    const result = await elapsed;
+    expect(result).toBe("done");
+  });
+}
+
+describe("real clock", () => { clockCases(); });
+describe("fake clock", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  describe("shared cases", clockCases);
+});
+"#;
+    assert_fixed_sleep_at(source, 7, 20);
+    let fake_clock = source.replace(
+        "clockCases();",
+        "beforeEach(() => { vi.useFakeTimers(); }); clockCases();",
+    );
+    assert_review_rules("case.test.ts", &fake_clock, &[]);
+    let opaque = source.replace("clockCases();", "handoff(clockCases);");
+    assert_fixed_sleep_at(&opaque, 7, 20);
+}
+
+#[test]
+fn round6_r36_fake_timers_must_precede_scheduling() {
+    let source = r#"import { expect, jest, test } from "@jest/globals";
+
+test("keeps the date fixed while a pending delay completes", async () => {
+  const elapsed = new Promise(resolve => setTimeout(resolve, 10));
+  jest.useFakeTimers({ now: 0 });
+  try {
+    await elapsed;
+    expect(Date.now()).toBe(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+"#;
+    assert_fixed_sleep_at(source, 7, 5);
+    let helper = source.replace(
+        "new Promise(resolve => setTimeout(resolve, 10))",
+        "scheduler.wait(10)",
+    );
+    assert_fixed_sleep_at(&helper, 7, 5);
+}
