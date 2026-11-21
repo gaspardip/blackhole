@@ -160,8 +160,10 @@ Configure GitHub in this order before enabling the workflow.
    an old key may have been copied. If anyone else had write access while the
    key was a repository secret, register a new App instead and require its ID:
    a check posted with the old key stays valid after the key is revoked.
-4. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
-5. Protect `main`: require a pull request before merging, require the
+4. Install the App on `gaspardip/blackhole` only. Without an installation the
+   publisher gets no token and posts nothing.
+5. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
+6. Protect `main`: require a pull request before merging, require the
    `blackhole judge` check from the App's numeric ID, and require PR branches
    to be up to date before merging. Without the pull request rule, a writer can
    push a judged commit straight to `main`, and a PR whose head already contains
