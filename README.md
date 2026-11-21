@@ -126,6 +126,60 @@ by a PR job can claim arbitrary hits or omit executable lines. Until that
 integration exists, enabling coverage leaves changed source red on GitHub
 when the judge runs without evidence.
 
+## GitHub judge
+
+Release one publishes the `blackhole judge` check from the `blackhole-judge` App
+only for pull requests targeting `main` in `gaspardip/blackhole`. Adopters run
+`blackhole ci` in their own workflow.
+
+On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from the
+tip of `main` when the event fired, in a job without secrets or token permissions. It fetches
+the PR head into a fresh bare Git repository and judges it as commit data.
+The verdict excludes review data. The workflow omits `--approvals`, so a
+protected change stays red and requires a maintainer merge.
+
+If a head branch name that looks like a commit SHA prevents `pull_request_target`
+from running, push the commits to a branch with another name and open a new PR
+from it. Renaming the head branch of an open PR closes that PR.
+
+A separate job runs the publisher from the same commit. It verifies the current
+PR head, target branch and tip of `main` through the GitHub API and uses an App
+installation token with `checks: write`. A failed or cancelled judge job yields
+a failure check for that head when the publisher runs.
+
+Configure GitHub in this order. Steps 1 to 5 come before the workflow runs.
+
+1. Create the `judge` environment with a deployment branch rule allowing only
+   `main`. The rule matches the default branch (`main`) because
+   `pull_request_target` runs on it. Referencing a missing environment makes
+   GitHub create it without protection rules, so create it first.
+2. Generate a new private key for the App. Add it as `JUDGE_APP_PRIVATE_KEY`,
+   and the App ID as `JUDGE_APP_ID`, as secrets in `judge`.
+3. Delete the two repository-level secrets and revoke the App's old private key.
+   Eligible workflows on other branches can read repository-level secrets, so
+   an old key may have been copied. If anyone else had write access while the
+   key was a repository secret, register a new App instead and require its ID:
+   a check posted with the old key stays valid after the key is revoked.
+4. Install the App on `gaspardip/blackhole` only. Without an installation the
+   publisher gets no token and posts nothing.
+5. Allow `pull_request_target` for `judge.yml` in the repository's event policy.
+6. Protect `main`: require a pull request before merging and require PR
+   branches to be up to date before merging. Without the pull request rule, a
+   writer can push a judged commit straight to `main`, and a PR whose head
+   already contains it keeps its old check.
+7. Open an up-to-date pull request with a change outside the protected paths and
+   wait for the App's `blackhole judge` check to succeed. GitHub offers an App as
+   a check's source only after a successful run in the repository within the past
+   seven days. Then require the `blackhole judge` check from the App's numeric ID.
+
+The publisher checks the tip of `main` and the judge's UTC date before issuing green.
+If the date is missing or from another day, it posts failure. Re-run the whole
+judge for a verdict on the current day. GitHub stores the check on the head SHA,
+so PRs with the same head share it. A passing check stays valid while the head
+and `main` stay the same, even after an objection it relied on expires, so the
+PR can still merge days later. Once that objection is on `main` and expired,
+later PRs are red under `findings` while the underlying violation remains.
+
 ## License
 
 MIT
