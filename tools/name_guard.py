@@ -8,18 +8,42 @@ Exit status: 0 clean, 1 a name was found, 2 the guard could not run.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+import traceback
 import unicodedata
 from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
+from collections.abc import Callable
+from typing import Any
 
 DEFAULT_LIST = Path.home() / ".config" / "blackhole-dev" / "banned-names"
 MIN_LENGTH = 4
-ZERO = re.compile(r"^0+$")
-USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text"
+ZERO = re.compile(r"0+")
+SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+GITLINK = "160000"
+TREE = "040000"
+# `-t` lists directories as well, because an empty one has no file to carry its name.
+RAW = ("--raw", "-z", "-t", "--no-renames", "--no-abbrev", "--ignore-submodules=none")
+LIST = ("ls-tree", "-r", "-t", "-z")
+# The `types` of the workflow. Any other action means the two files disagree.
+ACTIONS = {
+    "pull_request_target": {"opened", "edited", "reopened", "synchronize"},
+    "pull_request_review_comment": {"created", "edited"},
+    "pull_request_review": {"submitted", "edited"},
+    "issues": {"opened", "edited"},
+    "issue_comment": {"created", "edited"},
+    "release": {"created", "edited", "published"},
+}
+WRITERS = frozenset({"OWNER", "COLLABORATOR"})
+STRANGERS = frozenset(
+    {"CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "MEMBER", "NONE"}
+)
+USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event"
 
 
 class CannotRun(Exception):
@@ -53,7 +77,8 @@ def load_patterns() -> list[re.Pattern[str]]:
 def git(*args: str) -> bytes:
     done = subprocess.run(["git", *args], capture_output=True, check=False)
     if done.returncode != 0:
-        raise CannotRun(f"git {args[0]} failed: {done.stderr.decode('utf-8', 'replace').strip()}")
+        # git's own message would repeat the arguments, which can hold a rejected name.
+        raise CannotRun(f"git {args[0]} failed with status {done.returncode}")
     return done.stdout
 
 
@@ -67,14 +92,74 @@ def known(sha: str) -> bool:
     return subprocess.run(probe, capture_output=True, check=False).returncode == 0
 
 
-def names(data: bytes) -> list[str]:
-    return [decode(name) for name in data.split(b"\x00") if name]
+def invalid_event() -> CannotRun:
+    return CannotRun("the event payload is not what GitHub documents")
+
+
+def string(value: object) -> str:
+    if not isinstance(value, str):
+        raise invalid_event()
+    return value
+
+
+def optional(value: object) -> str:
+    return "" if value is None else string(value)
+
+
+def object_id(value: object) -> str:
+    sha = string(value)
+    if not SHA.fullmatch(sha):
+        raise invalid_event()
+    return sha
+
+
+def by_writer(item: dict[str, Any]) -> bool:
+    association = string(item["author_association"])
+    if association not in WRITERS | STRANGERS:
+        raise invalid_event()
+    return association in WRITERS
+
+
+def load_event() -> tuple[str, dict[str, Any]]:
+    name = os.environ.get("GITHUB_EVENT_NAME")
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not name or not path:
+        raise CannotRun("no event: GITHUB_EVENT_NAME and GITHUB_EVENT_PATH are not set")
+    return name, json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+@dataclass(frozen=True)
+class Entry:
+    mode: str
+    blob: str
+    path: str
+
+
+def diff_entries(raw: bytes) -> list[Entry]:
+    """Parses RAW output: `:old new oldid newid status NUL path NUL`."""
+    fields = raw.split(b"\x00")[:-1]
+    entries = []
+    for meta, path in zip(fields[0::2], fields[1::2], strict=True):
+        _, mode, _, blob, _ = meta.decode().lstrip(":").split()
+        entries.append(Entry(mode, blob, decode(path)))
+    return entries
+
+
+def tree_entries(raw: bytes) -> list[Entry]:
+    """Parses LIST output: `mode type id TAB path NUL`."""
+    entries = []
+    for line in filter(None, raw.split(b"\x00")):
+        meta, path = line.split(b"\t", 1)
+        mode, _, blob = meta.decode().split()
+        entries.append(Entry(mode, blob, decode(path)))
+    return entries
 
 
 @dataclass
 class Guard:
     patterns: list[re.Pattern[str]]
     hits: list[str] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
 
     def redact(self, label: str) -> str:
         shown = normalize(label)
@@ -92,10 +177,16 @@ class Guard:
     def name(self, kind: str, value: str) -> None:
         self.scan(f"{kind} {value}", value)
 
-    def blob(self, spec: str, label: str) -> None:
-        done = subprocess.run(["git", "cat-file", "blob", spec], capture_output=True, check=False)
-        if done.returncode == 0:  # a deleted path or a submodule has no blob to read
-            self.scan(label, decode(done.stdout))
+    def entry(self, entry: Entry, origin: str = "") -> None:
+        if ZERO.fullmatch(entry.blob):  # a deletion adds nothing
+            return
+        self.name(f"{origin}file name", entry.path)
+        if entry.mode in (GITLINK, TREE) or entry.blob in self.seen:
+            return
+        self.seen.add(entry.blob)
+        # Blobs are read by id, so a path git prints differently than we decode it cannot hide one.
+        # shortcut: one git process per blob; switch to `cat-file --batch` when the hook gets slow.
+        self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
 
     def env_text(self) -> None:
         for key in sorted(os.environ):
@@ -105,10 +196,9 @@ class Guard:
     def commit(self, sha: str) -> None:
         short = sha[:9]
         self.scan(f"commit {short}", decode(git("cat-file", "commit", sha)))
-        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", "--name-only", "-z", sha)
-        for path in sorted(set(names(changed))):
-            self.name(f"file name in {short}:", path)
-            self.blob(f"{sha}:{path}", f"{short} {path}")
+        changed = git("diff-tree", "--root", "-r", "-m", "--no-commit-id", *RAW, sha)
+        for entry in diff_entries(changed):
+            self.entry(entry, f"{short} ")
 
     def commits(self, head: str, *exclude: str) -> None:
         listed = git("rev-list", head, "--not", *exclude).decode().split()
@@ -120,36 +210,121 @@ class Guard:
             ["git", "symbolic-ref", "--short", "-q", "HEAD"], capture_output=True, check=False
         )
         self.name("branch", decode(branch.stdout).strip())
-        staged = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT")
-        for path in names(staged):
-            self.name("file name", path)
-            self.blob(f":{path}", path)
+        for entry in diff_entries(git("diff", "--cached", *RAW)):
+            self.entry(entry)
 
     def tree(self) -> None:
-        for path in names(git("ls-tree", "-r", "-z", "--name-only", "HEAD")):
-            self.name("file name", path)
-            self.blob(f"HEAD:{path}", path)
+        for entry in tree_entries(git(*LIST, "HEAD")):
+            self.entry(entry)
 
     def range(self, base: str, head: str) -> None:
         # An all-zero or unknown base (new ref, force push) means every commit is new.
-        if ZERO.match(base) or not known(base):
+        # A local tracking ref is no proof the destination has a commit, so nothing is excluded.
+        if ZERO.fullmatch(base) or not known(base):
             self.commits(head)
         else:
             self.commits(head, base)
 
-    def push(self, lines: str) -> None:
-        for line in lines.splitlines():
-            local_ref, local_sha, remote_ref, remote_sha = line.split()
-            self.name("ref", remote_ref)
-            if ZERO.match(local_sha):
-                continue
+    def target(self, ref: str, target: str) -> str | None:
+        """Scans non-commit objects and returns the commit the ref ends at, if any."""
+        # A tag can point at another tag, and each one carries its own message.
+        while (kind := git("cat-file", "-t", target).strip()) == b"tag":
+            body = decode(git("cat-file", "tag", target))
+            self.scan(f"tag {ref}", body)
+            target = body.split("\n", 1)[0].removeprefix("object ")
+        if kind == b"tree":
+            for entry in tree_entries(git(*LIST, target)):
+                self.entry(entry, f"{ref} ")
+        elif kind == b"blob":
+            self.entry(Entry("100644", target, ref))
+        return target if kind == b"commit" else None
+
+    def update_ref(
+        self, ref: str, base: str, tip: str, *, local_ref: str | None = None
+    ) -> None:
+        self.name("ref", ref)
+        if ZERO.fullmatch(tip):
+            return
+        if local_ref is not None:
             self.name("ref", local_ref)
-            if git("cat-file", "-t", local_sha).strip() == b"tag":
-                self.scan(f"tag {remote_ref}", decode(git("cat-file", "tag", local_sha)))
-            if ZERO.match(remote_sha) or not known(remote_sha):
-                self.commits(f"{local_sha}^{{commit}}", "--remotes")
-            else:
-                self.commits(f"{local_sha}^{{commit}}", remote_sha)
+        if (commit := self.target(ref, tip)) is not None:
+            self.range(base, commit)
+
+    def everything(self) -> None:
+        listed = decode(git("for-each-ref", "--format=%(objectname) %(refname)"))
+        for line in StringIO(listed, newline="\n"):
+            target, ref = line.removesuffix("\n").split(" ", 1)
+            self.name("ref", ref)
+            self.target(ref, target)
+        self.commits("--all")
+
+    def written(
+        self, item: dict[str, Any], kind: str, **fields: Callable[[object], str]
+    ) -> bool:
+        """Scans an item's text if its author can write here, and says whether they can."""
+        # A writer's edit of a stranger's text is left alone too: whatever the scan compared,
+        # its public result would depend on what the stranger had written.
+        if not by_writer(item):
+            return False
+        for key, read in fields.items():
+            self.scan(f"{kind} {key}", read(item[key]))
+        return True
+
+    def event(self, name: str, payload: dict[str, Any]) -> None:
+        """Scans a GitHub event, and only what someone with write access wrote or pushed.
+
+        A public pass or fail on a stranger's text would tell them whether a guessed name is banned.
+        """
+        # Organization roles do not give the same guarantees about who can write or edit.
+        if string(payload["repository"]["owner"]["type"]) != "User":
+            raise CannotRun("the trust rule only holds for a repository owned by a user")
+        if name in ACTIONS and string(payload["action"]) not in ACTIONS[name]:
+            raise invalid_event()
+        match name:
+            case "push":
+                ref = string(payload["ref"])
+                before, after = object_id(payload["before"]), object_id(payload["after"])
+                if not ref.startswith(("refs/heads/", "refs/tags/")) or (
+                    ZERO.fullmatch(before) and ZERO.fullmatch(after)
+                ):
+                    raise invalid_event()
+                git("check-ref-format", ref)
+                self.update_ref(ref, before, after)
+            case "pull_request_target":
+                pull = payload["pull_request"]
+                head, source = pull["head"], pull["head"]["repo"]
+                # A head in another repository can be pushed to by people who cannot write here.
+                # GitHub sends no repository at all once a fork is deleted.
+                local = source is not None and string(source["full_name"]) == string(
+                    payload["repository"]["full_name"]
+                )
+                if self.written(pull, "pull request", title=string, body=optional) and local:
+                    tip = object_id(head["sha"])
+                    if ZERO.fullmatch(tip):
+                        raise invalid_event()
+                    self.update_ref(string(head["ref"]), object_id(pull["base"]["sha"]), tip)
+            case "issues":
+                self.written(payload["issue"], "issue", title=string, body=optional)
+            case "issue_comment" | "pull_request_review_comment":
+                # The issue or pull request under a comment can be a stranger's.
+                self.written(payload["comment"], "comment", body=string)
+            case "pull_request_review":
+                self.written(payload["review"], "review", body=optional)
+            case "release":
+                release = payload["release"]
+                self.scan("release name", optional(release["name"]))
+                self.scan("release body", optional(release["body"]))
+                self.name("ref", string(release["tag_name"]))
+            case "schedule" | "workflow_dispatch":
+                # GitHub sends no tag push events when more than three tags are pushed at once.
+                self.everything()
+            case _:
+                raise CannotRun("no scan is defined for this event")
+
+    def push(self, lines: str) -> None:
+        for line in StringIO(lines, newline="\n"):
+            local_ref, local_sha, remote_ref, remote_sha = line.removesuffix("\n").split(" ")
+            self.update_ref(remote_ref, remote_sha, local_sha, local_ref=local_ref)
 
 
 def run(argv: list[str]) -> int:
@@ -163,13 +338,15 @@ def run(argv: list[str]) -> int:
             guard.push(sys.stdin.read())
         case ["range", base, head]:
             guard.range(base, head)
+            guard.env_text()
         case ["tree"]:
             guard.tree()
         case ["text"]:
-            pass
+            guard.env_text()
+        case ["event"]:
+            guard.event(*load_event())
         case _:
             raise CannotRun(USAGE)
-    guard.env_text()
     for hit in guard.hits:
         print(hit, file=sys.stderr)
     if guard.hits:
@@ -179,11 +356,17 @@ def run(argv: list[str]) -> int:
 
 
 def main() -> int:
+    # A local replacement ref would show the guard a different object than the one git sends.
+    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
         return run(sys.argv[1:])
     except CannotRun as error:
         print(f"name guard cannot run: {error}", file=sys.stderr)
-        return 2
+    except Exception as error:
+        # Status 1 means a name was found, and the error's own message can repeat its input.
+        line = traceback.extract_tb(error.__traceback__)[-1].lineno
+        print(f"name guard cannot run: {type(error).__name__} at line {line}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

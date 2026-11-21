@@ -18,6 +18,29 @@ The hooks run `tools/name_guard.py`, which needs a list of names kept outside
 the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`).
 Without the list the guard refuses to run and the commit is blocked.
 
+CI scans pull request titles, bodies and commit ranges, including for pull
+requests from forks. To scan a pull request locally before merging it into
+`main`, use `bin/merge-outside`. The script scans the commits, title and body
+before merging and checks the landed squash.
+
+```sh
+bin/merge-outside <number>
+```
+
+A squash merge copies the title and body into `main`. Text typed into the merge
+dialog is scanned only after it lands, so merge without editing the message.
+
+To scan text locally before posting or editing it, write it to a file and run
+this command.
+
+```sh
+python3 -I tools/name_guard.py message <file>
+```
+
+The guard stops mistakes. It cannot stop someone with write access who sets out
+to publish a name: they could change the workflow on their own branch, or post
+the name anywhere else.
+
 ## Packaging the CLI
 
 `blackhole-check` installs the `blackhole` binary from Rust source. Run

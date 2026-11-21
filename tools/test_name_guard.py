@@ -1,14 +1,30 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from textwrap import dedent
+
+import name_guard
 
 GUARD = Path(__file__).with_name("name_guard.py")
+EVENT_WORKFLOW = GUARD.parent / "fixtures" / "name-guard-event-workflow.yml"
 WORDS = "quokka\nzebrafish\n"
+
+
+def isolated_env(cwd: Path) -> dict[str, str]:
+    return {
+        "PATH": os.environ["PATH"],
+        "HOME": str(cwd),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "BLACKHOLE_BANNED_FILE": str(cwd / "no-such-list"),
+    }
 
 
 def run(
@@ -18,14 +34,7 @@ def run(
     stdin: str = "",
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    full = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(cwd),
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-        "BLACKHOLE_BANNED_FILE": str(cwd / "no-such-list"),
-        **(env or {}),
-    }
+    full = isolated_env(cwd) | (env or {})
     if banned is not None:
         full["BLACKHOLE_BANNED"] = banned
     return subprocess.run(
@@ -39,24 +48,53 @@ def run(
     )
 
 
-def git(cwd: Path, *args: str) -> str:
+def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
     done = subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
         cwd=cwd,
+        input=stdin,
         capture_output=True,
         text=True,
         check=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "HOME": str(cwd),
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-        },
+        env=isolated_env(cwd),
     )
     return done.stdout.strip()
 
 
+ACTIONS = {
+    "pull_request_target": "opened",
+    "issues": "opened",
+    "issue_comment": "created",
+    "release": "published",
+}
+
+
+class Workflow(unittest.TestCase):
+    def test_workflow_event_types_match_guard_actions(self) -> None:
+        types = re.findall(
+            r"^  (\w+):\n    types: \[([^\]\n]*)\]$",
+            EVENT_WORKFLOW.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        self.assertEqual(
+            {event: {action.strip() for action in actions.split(",")} for event, actions in types},
+            name_guard.ACTIONS,
+        )
+
+
 class Repo(unittest.TestCase):
+    def empty_directory(self, name: str) -> str:
+        """A tree holding one empty directory, which only plumbing can build."""
+        empty = git(self.dir, "mktree", stdin="")
+        return git(self.dir, "mktree", stdin=f"040000 tree {empty}\t{name}\n")
+
+    def loose_tree(self, path: str, text: str) -> str:
+        self.write(path, text)
+        git(self.dir, "add", "--", path)
+        tree = git(self.dir, "write-tree")
+        git(self.dir, "reset", "-q")
+        return tree
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -72,6 +110,45 @@ class Repo(unittest.TestCase):
         git(self.dir, "add", "-A")
         git(self.dir, "commit", "-q", "--allow-empty", "-m", message)
         return git(self.dir, "rev-parse", "HEAD")
+
+
+class WorkflowScan(Repo):
+    def test_workflow_scans_head_named_branches_without_logging_them(self) -> None:
+        script = dedent(EVENT_WORKFLOW.read_text(encoding="utf-8").split("        run: |\n", 1)[1])
+        self.write("tools/name_guard.py", GUARD.read_text(encoding="utf-8"))
+        base = self.commit("chore: install guard")
+
+        for branch in ("HEAD/topic", "HEAD"):
+            for expected in (0, 1):
+                with self.subTest(branch=branch, expected=expected), tempfile.TemporaryDirectory() as tmp:
+                    directory = Path(tmp)
+                    origin = directory / "origin.git"
+                    git(self.dir, "clone", "--bare", "-q", ".", str(origin))
+                    tip = base
+                    if expected == 1:
+                        blob = git(origin, "hash-object", "-w", "--stdin", stdin="Quokka\n")
+                        tree = git(origin, "mktree", stdin=f"100644 blob {blob}\texample.txt\n")
+                        tip = git(origin, "commit-tree", tree, "-p", base, "-m", "chore: add fixture")
+                    git(origin, "update-ref", f"refs/heads/{branch}", tip)
+                    event = directory / "event.json"
+                    event.write_text('{"repository":{"owner":{"type":"User"}}}', encoding="utf-8")
+                    env = isolated_env(directory) | {
+                        "BLACKHOLE_BANNED": WORDS,
+                        "GITHUB_SERVER_URL": directory.as_uri(),
+                        "GITHUB_REPOSITORY": "origin",
+                        "GITHUB_EVENT_NAME": "schedule",
+                        "GITHUB_EVENT_PATH": str(event),
+                        "PR_NUMBER": "",
+                        "RUNNER_TEMP": str(directory),
+                    }
+                    done = subprocess.run(
+                        ["sh", "-c", script], cwd=directory, env=env,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(done.returncode, expected, done.stderr)
+                    self.assertNotIn(branch, done.stdout + done.stderr)
+                    if expected == 1:
+                        self.assertIn("banned name #1", done.stderr)
 
 
 class Text(Repo):
@@ -169,11 +246,32 @@ class Staged(Repo):
         git(self.dir, "checkout", "-q", "-b", "fix/quokka-sync")
         self.assertEqual(run(["staged"], self.dir).returncode, 1)
 
+    def test_deleting_a_badly_named_file_is_allowed(self) -> None:
+        self.write("quokka.txt", "fine\n")
+        self.commit("chore: start")
+        git(self.dir, "rm", "-q", "quokka.txt")
+        self.assertEqual(run(["staged"], self.dir).returncode, 0)
+
     def test_unstaged_content_is_ignored(self) -> None:
         self.write("a.txt", "fine\n")
         git(self.dir, "add", "-A")
         self.write("a.txt", "Quokka\n")
         self.assertEqual(run(["staged"], self.dir).returncode, 0)
+
+
+class OddPaths(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        Path(self.dir, os.fsdecode(b"caf\xe9.txt")).write_bytes(b"Quokka\n")
+
+    def test_staged_content_under_a_non_utf8_name_is_caught(self) -> None:
+        git(self.dir, "add", "-A")
+        self.assertEqual(run(["staged"], self.dir).returncode, 1)
+
+    def test_committed_content_under_a_non_utf8_name_is_caught(self) -> None:
+        head = self.commit("feat: add")
+        self.assertEqual(run(["range", "0" * 40, head], self.dir).returncode, 1)
+        self.assertEqual(run(["tree"], self.dir).returncode, 1)
 
 
 class Message(Repo):
@@ -201,6 +299,16 @@ class Range(Repo):
         head = self.commit("fix: clean a")
         self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
 
+    def test_a_blob_repeated_across_commits_is_reported_once(self) -> None:
+        base = self.commit("chore: start")
+        self.write("a.txt", "Quokka\n")
+        self.commit("feat: add a")
+        git(self.dir, "mv", "a.txt", "b.txt")
+        head = self.commit("refactor: move a")
+        done = run(["range", base, head], self.dir)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stderr.count("banned name #1"), 1)
+
     def test_message_in_range_is_caught(self) -> None:
         base = self.commit("chore: start")
         head = self.commit("fix: quokka outage")
@@ -225,6 +333,12 @@ class Range(Repo):
         self.write("a.txt", "fine\n")
         head = self.commit("fix: clean a")
         self.assertEqual(run(["range", "1" * 40, head], self.dir).returncode, 1)
+
+    def test_an_empty_directory_name_is_caught(self) -> None:
+        base = self.commit("chore: start")
+        tree = self.empty_directory("quokka")
+        head = git(self.dir, "commit-tree", tree, "-p", base, "-m", "feat: add a directory")
+        self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
 
     def test_env_text_is_scanned_with_the_range(self) -> None:
         base = self.commit("chore: start")
@@ -259,8 +373,11 @@ class Push(Repo):
 
     def test_pushed_ref_name_is_caught(self) -> None:
         head = self.commit("chore: start")
-        line = f"refs/heads/x {head} refs/heads/quokka-fix {'0' * 40}\n"
-        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+        refs = [("x", "quokka-fix"), ("quokka-fix", "x")]
+        for local, remote in refs:
+            with self.subTest(local=local, remote=remote):
+                line = f"refs/heads/{local} {head} refs/heads/{remote} {'0' * 40}\n"
+                self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
     def test_annotated_tag_message_is_caught(self) -> None:
         self.commit("chore: start")
@@ -269,10 +386,325 @@ class Push(Repo):
         line = f"refs/tags/v1 {tag} refs/tags/v1 {'0' * 40}\n"
         self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
 
+    def test_a_tag_inside_a_tag_is_caught(self) -> None:
+        self.commit("chore: start")
+        git(self.dir, "tag", "-a", "inner", "-m", "release for Quokka")
+        git(self.dir, "tag", "-a", "outer", "-m", "fine", "refs/tags/inner")
+        tag = git(self.dir, "rev-parse", "refs/tags/outer")
+        line = f"refs/tags/outer {tag} refs/tags/outer {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
+    def test_a_tracking_ref_is_not_proof_of_publication(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        git(self.dir, "update-ref", "refs/remotes/origin/main", head)
+        line = f"refs/heads/main {head} refs/heads/new {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
+    def test_a_tagged_tree_is_caught(self) -> None:
+        self.commit("chore: start")
+        tree = self.loose_tree("a.txt", "Quokka\n")
+        line = f"refs/tags/t {tree} refs/tags/t {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
+    def test_a_tagged_empty_directory_name_is_caught(self) -> None:
+        self.commit("chore: start")
+        line = f"refs/tags/t {self.empty_directory('quokka')} refs/tags/t {'0' * 40}\n"
+        self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 1)
+
     def test_branch_delete_is_skipped(self) -> None:
         self.commit("chore: start")
         line = f"(delete) {'0' * 40} refs/heads/old {'1' * 40}\n"
         self.assertEqual(run(["push"], self.dir, stdin=line).returncode, 0)
+
+
+class Event(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.commit("chore: start")
+
+    def event(
+        self, name: str, payload: dict[str, object], **env: str
+    ) -> subprocess.CompletedProcess[str]:
+        path = self.dir / ".git" / "event.json"
+        repository = {"full_name": "o/r", "owner": {"type": "User"}}
+        known = {"repository": repository} | ({"action": ACTIONS[name]} if name in ACTIONS else {})
+        path.write_text(json.dumps(known | payload), encoding="utf-8")
+        env |= {"GITHUB_EVENT_NAME": name, "GITHUB_EVENT_PATH": str(path)}
+        return run(["event"], self.dir, env=env)
+
+    def pull_request(
+        self,
+        title: str | None = "fix: sync",
+        body: str | None = None,
+        association: str = "OWNER",
+        head_repo: str | None = "o/r",
+        head: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        pull = {
+            "title": title,
+            "body": body,
+            "author_association": association,
+            "head": {
+                "ref": "fix/sync",
+                "sha": head or self.base,
+                "repo": {"full_name": head_repo} if head_repo else None,
+            },
+            "base": {"sha": self.base},
+        }
+        return self.event("pull_request_target", {"pull_request": pull})
+
+    def test_clean_pull_request_passes(self) -> None:
+        self.assertEqual(self.pull_request().returncode, 0)
+
+    def test_pull_request_title_is_caught_without_printing_it(self) -> None:
+        done = self.pull_request(title="Quokka fix")
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_pull_request_body_is_caught(self) -> None:
+        self.assertEqual(self.pull_request(body="for Quokka").returncode, 1)
+
+    def test_pull_request_commits_are_caught(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        self.assertEqual(self.pull_request(head=head).returncode, 1)
+
+    def test_a_strangers_pull_request_gives_no_signal(self) -> None:
+        for association in ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "MEMBER"]:
+            with self.subTest(association=association):
+                done = self.pull_request(title="Quokka?", association=association)
+                self.assertEqual(done.returncode, 0)
+
+    def test_a_head_outside_the_repository_gives_no_signal(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        for head_repo in ["stranger/r", None]:
+            with self.subTest(head_repo=head_repo):
+                done = self.pull_request(head_repo=head_repo, head=head)
+                self.assertEqual(done.returncode, 0)
+
+    def test_a_writers_title_is_caught_whatever_the_head(self) -> None:
+        self.assertEqual(self.pull_request(title="Quokka", head_repo="stranger/r").returncode, 1)
+
+    def test_issue_text_is_caught_for_a_trusted_author_only(self) -> None:
+        for association, expected in [("OWNER", 1), ("COLLABORATOR", 1), ("NONE", 0)]:
+            with self.subTest(association=association):
+                issue = {"title": "bug", "body": "seen at Quokka", "author_association": association}
+                self.assertEqual(self.event("issues", {"issue": issue}).returncode, expected)
+
+    def test_comment_is_scanned_without_the_issue_it_is_on(self) -> None:
+        issue = {"title": "Quokka?", "body": "", "author_association": "NONE"}
+
+        def comment(body: str, association: str) -> int:
+            said = {"body": body, "author_association": association}
+            return self.event("issue_comment", {"issue": issue, "comment": said}).returncode
+
+        self.assertEqual(comment("thanks", "OWNER"), 0)
+        self.assertEqual(comment("yes, Quokka", "OWNER"), 1)
+        self.assertEqual(comment("is it Quokka?", "NONE"), 0)
+
+    def test_release_text_is_caught(self) -> None:
+        release = {"name": "v1", "tag_name": "v1", "body": "thanks Quokka"}
+        self.assertEqual(self.event("release", {"release": release}).returncode, 1)
+
+    def test_pushed_commits_and_ref_are_caught(self) -> None:
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        clean = {"ref": "refs/heads/main", "before": self.base, "after": self.base}
+        self.assertEqual(self.event("push", clean).returncode, 0)
+        self.assertEqual(self.event("push", clean | {"after": head}).returncode, 1)
+        self.assertEqual(self.event("push", clean | {"ref": "refs/heads/quokka"}).returncode, 1)
+
+    def test_pushed_annotated_tag_message_is_caught(self) -> None:
+        git(self.dir, "tag", "-a", "v1", "-m", "release for Quokka")
+        tag = git(self.dir, "rev-parse", "refs/tags/v1")
+        payload = {"ref": "refs/tags/v1", "before": "0" * 40, "after": tag}
+        self.assertEqual(self.event("push", payload).returncode, 1)
+
+    def test_ref_deletion_passes(self) -> None:
+        payload = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
+        self.assertEqual(self.event("push", payload).returncode, 0)
+
+    def test_a_scheduled_run_scans_every_ref(self) -> None:
+        self.assertEqual(self.event("schedule", {}).returncode, 0)
+        git(self.dir, "tag", "quokka-1")
+        self.assertEqual(self.event("schedule", {}).returncode, 1)
+        git(self.dir, "tag", "-d", "quokka-1")
+        git(self.dir, "checkout", "-q", "-b", "side")
+        self.write("a.txt", "Quokka\n")
+        self.commit("feat: add a")
+        git(self.dir, "checkout", "-q", "-")
+        self.assertEqual(self.event("workflow_dispatch", {}).returncode, 1)
+
+    def test_a_scheduled_run_scans_tagged_objects(self) -> None:
+        tree = self.loose_tree("a.txt", "Quokka\n")
+        blob = git(self.dir, "hash-object", "-w", "a.txt")
+        empty = self.empty_directory("quokka")
+        for target in [tree, blob, empty]:
+            with self.subTest(target=target):
+                git(self.dir, "tag", "-f", "odd", target)
+                self.assertEqual(self.event("schedule", {}).returncode, 1)
+
+    def edit(self, text: str, before: str) -> int:
+        said = {"body": text, "author_association": "NONE", "user": {"login": "visitor"}}
+        payload = {
+            "action": "edited",
+            "sender": {"login": "owner"},
+            "changes": {"body": {"from": before}},
+            "issue": {"title": "Quokka?", "body": None, "author_association": "NONE"},
+            "comment": said,
+        }
+        return self.event("issue_comment", payload).returncode
+
+    def test_a_writers_edit_of_a_strangers_text_gives_no_signal(self) -> None:
+        # The same edit must not pass or fail depending on what the stranger had written.
+        edited = "Please send logs from Zebrafish."
+        self.assertEqual(self.edit(edited, before="Could it be Quokka?"), 0)
+        self.assertEqual(self.edit(edited, before="Could it be Otter?"), 0)
+        self.assertEqual(self.edit("is it Quokka? (edited)", before="is it Quokka?"), 0)
+
+    def test_an_action_the_workflow_does_not_send_fails_closed(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "NONE"}
+        for action in [1, None, "deleted"]:
+            with self.subTest(action=action):
+                payload = {"issue": issue, "action": action}
+                self.assertEqual(self.event("issues", payload).returncode, 2)
+
+    def test_a_missing_title_fails_closed(self) -> None:
+        issue = {"title": None, "body": "Quokka", "author_association": "OWNER"}
+        self.assertEqual(self.event("issues", {"issue": issue}).returncode, 2)
+        self.assertEqual(self.pull_request(title=None).returncode, 2)
+        comment = {"body": None, "author_association": "OWNER"}
+        self.assertEqual(self.event("issue_comment", {"comment": comment}).returncode, 2)
+
+    def test_an_organization_repository_fails_closed(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "MEMBER"}
+        payload = {"repository": {"full_name": "o/r", "owner": {"type": "Organization"}}}
+        self.assertEqual(self.event("issues", payload | {"issue": issue}).returncode, 2)
+
+    def test_ungated_events_reject_an_organization_repository(self) -> None:
+        repository = {"full_name": "o/r", "owner": {"type": "Organization"}}
+        events = {
+            "push": {"ref": "refs/heads/main", "before": self.base, "after": self.base},
+            "release": {"release": {"name": "v1", "tag_name": "v1", "body": None}},
+            "schedule": {},
+            "workflow_dispatch": {},
+        }
+        for name, payload in events.items():
+            with self.subTest(name=name):
+                done = self.event(name, payload | {"repository": repository})
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertIn("repository owned by a user", done.stderr)
+
+    def test_a_field_of_the_wrong_type_fails_closed(self) -> None:
+        owner = {"title": "bug", "body": None, "author_association": "OWNER"}
+        unknown = owner | {"author_association": "UNRECOGNIZED", "body": "Quokka"}
+        for issue in [owner | {"author_association": None}, owner | {"body": []}, owner | {"title": 1}, unknown]:
+            with self.subTest(issue=issue):
+                self.assertEqual(self.event("issues", {"issue": issue}).returncode, 2)
+        push = {"ref": "refs/heads/old", "before": self.base, "after": "0" * 40}
+        newline = push | {"after": "0" * 40 + "\n"}
+        for payload in [push | {"after": "main"}, push | {"before": None}, {"ref": push["ref"], "after": push["after"]}, newline]:
+            with self.subTest(payload=payload):
+                self.assertEqual(self.event("push", payload).returncode, 2)
+
+    def test_an_event_without_a_scan_fails_closed(self) -> None:
+        self.assertEqual(self.event("fork", {}).returncode, 2)
+
+    def test_environment_text_is_not_scanned_for_an_event(self) -> None:
+        issue = {"title": "bug", "body": None, "author_association": "NONE"}
+        done = self.event("issues", {"issue": issue}, GUARD_TEXT_ISSUE="Quokka")
+        self.assertEqual(done.returncode, 0)
+
+    def test_an_unexpected_payload_fails_closed(self) -> None:
+        self.assertEqual(self.event("issues", {}).returncode, 2)
+        self.assertEqual(self.event("issues", {"issue": "Quokka"}).returncode, 2)
+        self.assertEqual(self.pull_request(head="0" * 40).returncode, 2)
+        self.assertEqual(run(["event"], self.dir).returncode, 2)
+
+    def test_review_text_is_scanned_for_writers_only(self) -> None:
+        events = (
+            ("pull_request_review_comment", "comment", ("created", "edited")),
+            ("pull_request_review", "review", ("submitted", "edited")),
+        )
+        for event, item, actions in events:
+            for action in actions:
+                for association, expected in (("OWNER", 1), ("NONE", 0)):
+                    with self.subTest(event=event, action=action, association=association):
+                        payload = {
+                            "action": action,
+                            item: {"author_association": association, "body": "Quokka"},
+                        }
+                        done = self.event(event, payload)
+                        self.assertEqual(done.returncode, expected, done.stderr)
+                        self.assertNotIn("Quokka", done.stdout + done.stderr)
+        approval = {"action": "submitted", "review": {"author_association": "OWNER", "body": None}}
+        self.assertEqual(self.event("pull_request_review", approval).returncode, 0)
+
+    def test_push_event_rejects_invalid_refs_and_two_zero_tips(self) -> None:
+        valid = {"ref": "refs/heads/main", "before": self.base, "after": self.base}
+        zero = "0" * 40
+        invalid = (
+            valid | {"ref": ""},
+            valid | {"ref": "refs/pull/7/head"},
+            valid | {"ref": "refs/heads/"},
+            valid | {"before": zero, "after": zero},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                done = self.event("push", payload)
+                self.assertEqual(done.returncode, 2, done.stderr)
+
+    def test_git_ref_records_keep_unicode_line_separators(self) -> None:
+        ref = "refs/heads/quo\u2028kka"
+        git(self.dir, "update-ref", ref, self.base)
+        line = f"{ref} {self.base} refs/heads/destination {'0' * 40}\n"
+        scans = {"schedule": self.event("schedule", {}), "pre-push": run(["push"], self.dir, stdin=line)}
+        for scan, done in scans.items():
+            with self.subTest(scan=scan):
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertIn("banned name #1", done.stderr)
+
+
+class Errors(Repo):
+    def test_a_git_failure_does_not_echo_its_input(self) -> None:
+        self.commit("chore: start")
+        done = run(["range", "0" * 40, "quokka-missing"], self.dir)
+        self.assertEqual(done.returncode, 2)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_an_unexpected_failure_is_not_reported_as_a_found_name(self) -> None:
+        done = run(["push"], self.dir, stdin="quokka\n")
+        self.assertEqual(done.returncode, 2)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+
+class Replaced(Repo):
+    def test_a_replacement_ref_does_not_hide_a_commit(self) -> None:
+        base = self.commit("chore: start")
+        self.write("a.txt", "Quokka\n")
+        head = self.commit("feat: add a")
+        clean = git(self.dir, "commit-tree", f"{base}^{{tree}}", "-p", base, "-m", "feat: add a")
+        git(self.dir, "replace", head, clean)
+        self.assertEqual(run(["range", base, head], self.dir).returncode, 1)
+
+
+class HiddenSubmodules(Repo):
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.commit("chore: start")
+        git(self.dir, "update-index", "--add", "--cacheinfo", f"160000,{self.base},quokka-mod")
+
+    def test_a_staged_submodule_name_is_caught(self) -> None:
+        git(self.dir, "config", "diff.ignoreSubmodules", "all")
+        self.assertEqual(run(["staged"], self.dir).returncode, 1)
+
+    def test_a_committed_submodule_name_is_caught(self) -> None:
+        self.write(".gitmodules", '[submodule "m"]\n\tpath = quokka-mod\n\turl = ./m\n\tignore = all\n')
+        git(self.dir, "commit", "-q", "--no-verify", "-m", "feat: add a module")
+        self.assertEqual(run(["range", self.base, "HEAD"], self.dir, banned="zebrafish").returncode, 0)
+        self.assertEqual(run(["range", self.base, "HEAD"], self.dir).returncode, 1)
 
 
 if __name__ == "__main__":
