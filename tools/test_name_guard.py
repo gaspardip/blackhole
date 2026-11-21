@@ -13,6 +13,7 @@ from textwrap import dedent
 import name_guard
 
 GUARD = Path(__file__).with_name("name_guard.py")
+EVENT_WORKFLOW = GUARD.parent / "fixtures" / "name-guard-event-workflow.yml"
 WORDS = "quokka\nzebrafish\n"
 
 
@@ -70,10 +71,9 @@ ACTIONS = {
 
 class Workflow(unittest.TestCase):
     def test_workflow_event_types_match_guard_actions(self) -> None:
-        workflow = GUARD.parents[1] / ".github" / "workflows" / "name-guard.yml"
         types = re.findall(
             r"^  (\w+):\n    types: \[([^\]\n]*)\]$",
-            workflow.read_text(encoding="utf-8"),
+            EVENT_WORKFLOW.read_text(encoding="utf-8"),
             re.MULTILINE,
         )
         self.assertEqual(
@@ -114,8 +114,7 @@ class Repo(unittest.TestCase):
 
 class WorkflowScan(Repo):
     def test_workflow_scans_head_named_branches_without_logging_them(self) -> None:
-        workflow = GUARD.parents[1] / ".github" / "workflows" / "name-guard.yml"
-        script = dedent(workflow.read_text(encoding="utf-8").split("        run: |\n", 1)[1])
+        script = dedent(EVENT_WORKFLOW.read_text(encoding="utf-8").split("        run: |\n", 1)[1])
         self.write("tools/name_guard.py", GUARD.read_text(encoding="utf-8"))
         base = self.commit("chore: install guard")
 

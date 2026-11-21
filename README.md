@@ -18,12 +18,10 @@ The hooks run `tools/name_guard.py`, which needs a list of names kept outside
 the repository (`BLACKHOLE_BANNED`, or the file named by `BLACKHOLE_BANNED_FILE`).
 Without the list the guard refuses to run and the commit is blocked.
 
-CI scans PR titles and bodies only when their author has write access, including
-when the head is in a fork. It scans PR commits only when the author has write
-access and the head is in this repository. Use `bin/merge-outside` for fork PRs
-and PRs from people without write access. The script only accepts PRs targeting
-`main`, scans the commits, title and body before merging, and checks the landed
-squash.
+CI scans pull request titles, bodies and commit ranges, including for pull
+requests from forks. To scan a pull request locally before merging it into
+`main`, use `bin/merge-outside`. The script scans the commits, title and body
+before merging and checks the landed squash.
 
 ```sh
 bin/merge-outside <number>
@@ -32,16 +30,12 @@ bin/merge-outside <number>
 A squash merge copies the title and body into `main`. Text typed into the merge
 dialog is scanned only after it lands, so merge without editing the message.
 
-CI does not scan your edit of someone else's issue, pull request or comment
-either. Write the new text to a file and scan it before you save it:
+To scan text locally before posting or editing it, write it to a file and run
+this command.
 
 ```sh
 python3 -I tools/name_guard.py message <file>
 ```
-
-On a pull request from a fork, the review scan fails because it cannot read the
-list, so run `python3 -I tools/name_guard.py message <file>` on the review text
-before posting it.
 
 The guard stops mistakes. It cannot stop someone with write access who sets out
 to publish a name: they could change the workflow on their own branch, or post
