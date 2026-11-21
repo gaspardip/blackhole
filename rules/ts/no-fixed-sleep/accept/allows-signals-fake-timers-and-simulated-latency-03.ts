@@ -1,1 +1,1 @@
-test('x', async () => { vi.useFakeTimers(); await new Promise((resolve) => { setTimeout(resolve, 250); }); expect(readState()).toEqual(expectedState); });
+test('x', async () => { vi.useFakeTimers(); start(); await vi.advanceTimersByTimeAsync(250); expect(readState()).toEqual(expectedState); });

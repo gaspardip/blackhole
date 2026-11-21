@@ -607,7 +607,6 @@ pub(super) fn enclosing_runners<'ctx, 'a>(
 
 #[derive(Clone, Copy)]
 pub(super) struct CallbackSite<'a> {
-    pub(super) at: NodeId,
     pub(super) runner: Runner<'a>,
 }
 
@@ -632,10 +631,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                 && call.args.iter().flatten().any(|arg| {
                     callback_kind(ctx, arg).is_some_and(|kind| kind.node_id() == function)
                 }))
-            .then_some(CallbackSite {
-                at: function,
-                runner,
-            })
+            .then_some(CallbackSite { runner })
         });
     let named = direct
         .is_none()
@@ -644,7 +640,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                 .named_callbacks
                 .get_or_init(|| {
                     let mut sites = std::collections::HashMap::<_, Vec<_>>::new();
-                    for (at, node) in ctx.semantic.nodes().iter_enumerated() {
+                    for node in ctx.semantic.nodes().iter() {
                         let Some(site) = super::values::site(ctx, node.kind()) else {
                             continue;
                         };
@@ -659,7 +655,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                                 sites
                                     .entry(callback.node_id())
                                     .or_default()
-                                    .push(CallbackSite { at, runner });
+                                    .push(CallbackSite { runner });
                             }
                         }
                     }
@@ -671,60 +667,6 @@ pub(super) fn callback_sites<'ctx, 'a>(
     direct
         .into_iter()
         .chain(named.into_iter().flatten().copied())
-}
-
-pub(super) fn registration_sites(ctx: &TsCtx<'_>, function: NodeId) -> Option<Vec<NodeId>> {
-    let mut sites = Vec::new();
-    for site in callback_sites(ctx, function) {
-        if site.runner.hook().is_some() {
-            return None;
-        }
-        sites.push(site.at);
-    }
-
-    let nodes = ctx.semantic.nodes();
-    let named = match nodes.kind(function) {
-        AstKind::Function(f) => f.id.as_ref(),
-        _ => None,
-    };
-    let bound = match super::values::outer(ctx, function) {
-        Some(AstKind::VariableDeclarator(v)) => v.id.get_binding_identifier(),
-        _ => None,
-    };
-    if named.is_none() && bound.is_none() && sites.is_empty() {
-        sites.push(function);
-    }
-    let registered = sites.len();
-    let scoping = ctx.semantic.scoping();
-    for binding in [named, bound].into_iter().flatten() {
-        let symbol = binding.symbol_id.get()?;
-        let declaration = ctx.semantic.symbol_declaration(symbol);
-        if !scoping.symbol_redeclarations(symbol).is_empty()
-            || nodes.ancestors(declaration.id()).take(2).any(|node| {
-                matches!(
-                    node.kind(),
-                    AstKind::ExportNamedDeclaration(_) | AstKind::ExportDefaultDeclaration(_)
-                )
-            })
-        {
-            return None;
-        }
-        for reference in scoping
-            .get_resolved_references(symbol)
-            .filter(|r| r.is_value())
-        {
-            let at = reference.node_id();
-            let Some(AstKind::CallExpression(call)) = super::values::outer(ctx, at) else {
-                return None;
-            };
-            if unwrapped(&call.callee).node_id() == at {
-                sites.push(call.node_id());
-            } else if !sites[..registered].contains(&call.node_id()) {
-                return None;
-            }
-        }
-    }
-    (!sites.is_empty()).then_some(sites)
 }
 
 pub(super) fn callback_parameter<'a>(

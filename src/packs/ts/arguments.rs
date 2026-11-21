@@ -18,7 +18,6 @@ pub(super) struct Arguments<'a> {
     done: HashSet<u32>,
     emitted: usize,
     unreadable: Option<Span>,
-    spread: bool,
 }
 impl<'a> Arguments<'a> {
     pub(super) fn prepend(&mut self, args: &'a [Argument<'a>]) {
@@ -35,10 +34,7 @@ impl<'a> Arguments<'a> {
         args
     }
     pub(super) fn array(value: Option<&'a Expression<'a>>) -> Self {
-        let mut args = Self {
-            spread: true,
-            ..Self::default()
-        };
+        let mut args = Self::default();
         if let Some(value) = value {
             args.pending.push(Part::Spread(value));
         }
@@ -59,7 +55,6 @@ impl<'a> Arguments<'a> {
                     }
                 }
                 Part::Spread(e) => {
-                    self.spread = true;
                     let Expression::ArrayExpression(array) = resolve(ctx, e) else {
                         self.unreadable = Some(e.span());
                         self.pending.clear();
@@ -89,12 +84,12 @@ impl<'a> Arguments<'a> {
     pub(super) fn finish(
         mut self,
         ctx: &TsCtx<'a>,
-    ) -> (Vec<Option<&'a Expression<'a>>>, Option<Span>, bool) {
+    ) -> (Vec<Option<&'a Expression<'a>>>, Option<Span>) {
         let mut result = Vec::new();
         // Rules index the first three arguments and search the remaining values.
         while let Some(value) = self.next(ctx, result.len() >= 3) {
             result.push(value.0);
         }
-        (result, self.unreadable, self.spread)
+        (result, self.unreadable)
     }
 }
