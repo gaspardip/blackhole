@@ -1,0 +1,7 @@
+# Boat offload for `heavy run` (~/.agents/docs/boat.md).
+name = "blackhole"
+commands = ["bin/check", "cargo test"]
+# Blessing writes expectations here and needs BLACKHOLE_BLESS, which the VM never sees.
+local_only = ["cargo test --test fixtures"]
+timeout = 1800
+hash = ["rust-toolchain.toml", "Cargo.lock", "Cargo.toml"]
