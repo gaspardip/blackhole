@@ -39,6 +39,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    pub(crate) arena: &'a Allocator,
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
     pub text: &'a str,
@@ -88,6 +89,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_reflect_apply::RULE,
         crate::packs::ts::no_reflect_get::RULE,
         crate::packs::ts::no_runtime_typeof::RULE,
+        crate::packs::ts::no_shape_in_symbol_names::RULE,
         crate::packs::ts::no_skipped_tests::RULE,
         crate::packs::ts::no_test_aware_code::RULE,
         crate::packs::ts::no_test_doubles::RULE,
@@ -194,6 +196,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        arena,
         resolution: crate::packs::ts::values::Resolution::default(),
         path,
         text,
@@ -218,26 +221,39 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     text: &str,
-    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
+    parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
-    let ts = parsed.ok().flatten();
+    let (mut ts, error) = match parsed {
+        Ok(ts) => (ts, None),
+        Err(error) => (None, Some(error)),
+    };
     let ctx = FileCtx {
         path,
         text,
-        comments: ts.map(|ts| ts.comments),
+        comments: ts.as_ref().map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
+    let mut alternate = None;
     for rule in rules {
         let mut findings = Findings::default();
         match rule.run {
             Run::File(check) => check(&ctx, &mut findings),
             Run::Ts(check) => {
-                if let Some(ts) = ts {
+                if let Some(ts) = ts.as_deref_mut() {
+                    let conservative = rule.id == "ts/no-shape-in-symbol-names";
+                    if conservative != ts.resolution.conservative {
+                        std::mem::swap(
+                            &mut ts.resolution,
+                            alternate.get_or_insert_with(
+                                crate::packs::ts::values::Resolution::conservative,
+                            ),
+                        );
+                    }
                     check(ts, &mut findings);
                 }
             }
             Run::ParseError => {
-                if let Err((at, message)) = parsed {
+                if let Some((at, message)) = error {
                     findings.report(*at, Some(message));
                 }
             }
@@ -260,8 +276,8 @@ fn parsed_hits<'r>(
             .stack_size(STACK_BYTES)
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
-                let ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&ts))))
+                let mut ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()

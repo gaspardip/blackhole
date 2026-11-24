@@ -14,6 +14,7 @@ mod packs {
         pub(crate) mod dictionary_types;
         mod double_mutations;
         pub(crate) mod function_types;
+        mod local_alias;
         mod native_properties;
         pub(crate) mod no_assertionless_tests;
         pub(crate) mod no_chained_type_assertions;
@@ -28,6 +29,7 @@ mod packs {
         pub(crate) mod no_reflect_apply;
         pub(crate) mod no_reflect_get;
         pub(crate) mod no_runtime_typeof;
+        pub(crate) mod no_shape_in_symbol_names;
         pub(crate) mod no_skipped_tests;
         pub(crate) mod no_test_aware_code;
         pub(crate) mod no_test_doubles;

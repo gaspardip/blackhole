@@ -1,6 +1,10 @@
 #[path = "arguments.rs"]
 mod arguments;
 use arguments::Arguments;
+#[path = "member_values.rs"]
+mod member_values;
+#[path = "strings.rs"]
+mod strings;
 #[path = "tracked_uses.rs"]
 pub(super) mod tracked_uses;
 use crate::engine::TsCtx;
@@ -30,13 +34,27 @@ pub(crate) struct Resolution<'a> {
         OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
+    pub(crate) conservative: bool,
+    member_values: member_values::MemberValues<'a>,
+    eval_mention: OnceCell<bool>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
+    pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
+    strings: strings::StringCache<'a>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
+impl Resolution<'_> {
+    pub(crate) fn conservative() -> Self {
+        Self {
+            conservative: true,
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
@@ -462,7 +480,12 @@ pub(super) fn resolves_to_global<'a>(
     id.name == name && ctx.semantic.is_reference_to_global_variable(id)
 }
 
+pub(super) use strings::static_string;
+
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
+    if ctx.resolution.conservative {
+        return static_string(ctx, expr)?.as_str();
+    }
     match resolve(ctx, expr) {
         Expression::StringLiteral(s) => s.value.as_str(),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
@@ -681,18 +704,21 @@ pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Optio
         .nodes()
         .ancestors(id)
         .map(oxc::semantic::AstNode::kind)
-        .find(|kind| {
-            !matches!(
-                kind,
-                AstKind::ParenthesizedExpression(_)
-                    | AstKind::ChainExpression(_)
-                    | AstKind::TSAsExpression(_)
-                    | AstKind::TSSatisfiesExpression(_)
-                    | AstKind::TSInstantiationExpression(_)
-                    | AstKind::TSNonNullExpression(_)
-                    | AstKind::TSTypeAssertion(_)
-            )
-        })
+        .find(|kind| !transparent(kind))
+}
+
+/// Wrappers that leave the wrapped expression's value and target unchanged.
+fn transparent(kind: &AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::ParenthesizedExpression(_)
+            | AstKind::ChainExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSSatisfiesExpression(_)
+            | AstKind::TSInstantiationExpression(_)
+            | AstKind::TSNonNullExpression(_)
+            | AstKind::TSTypeAssertion(_)
+    )
 }
 
 pub(super) fn global_object(name: &str) -> bool {

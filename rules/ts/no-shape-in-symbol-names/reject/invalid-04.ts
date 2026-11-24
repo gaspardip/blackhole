@@ -1,0 +1,1 @@
+type Payload = { shape: string };
