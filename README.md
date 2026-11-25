@@ -90,6 +90,8 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
 
 ## Repository checks
 
+Advisory rules report findings without affecting the verdict.
+
 `blackhole ci` requires the existing independent head approval for changes to
 conventional TypeScript, lint, formatter, test, coverage and Git hook configs,
 including `package.json` and conventional local ESLint rule directories. For

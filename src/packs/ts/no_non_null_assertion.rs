@@ -1,9 +1,10 @@
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{ast::AstKind, span::GetSpan};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-non-null-assertion",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Agents add ! to silence a nullability error instead of handling the missing value.",
     fix: "Handle the missing value where it can be missing, or change the type so it cannot be.",
     run: Run::Ts(check),

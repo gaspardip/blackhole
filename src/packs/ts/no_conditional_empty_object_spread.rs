@@ -2,7 +2,7 @@ use super::{
     local_alias::{is_local, is_type_exported},
     values::{const_initializer, outer, symbol, unwrapped},
 };
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{Expression, ObjectPropertyKind, VariableDeclarationKind},
@@ -16,6 +16,7 @@ use std::collections::HashMap;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-conditional-empty-object-spread",
     family: Family::Slop,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-conditional-empty-object-spread.",
     fix: "Build the object first and add the optional property only when it is present.",
     run: Run::Ts(check),

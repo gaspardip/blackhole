@@ -54,6 +54,9 @@ mod packs {
 }
 pub mod verdict;
 
+#[cfg(test)]
+mod advisory_tests;
+
 use std::{
     env, fs,
     io::{self, Write},
@@ -70,24 +73,32 @@ const MISPLACED: &str = ".blackhole must be a directory";
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
     let scan = scan(&files::root()?, paths, output)?;
-    report_stale(&scan.stale, &scan.actual, output)?;
-    Ok(scan.over || !scan.stale.is_empty())
+    let stale = report_stale(&scan.stale, &scan.actual, output)?;
+    Ok(scan.over || stale)
 }
 
 fn report_stale(
     stale: &ledger::Counts,
     actual: &ledger::Counts,
     output: &mut impl Write,
-) -> io::Result<()> {
+) -> io::Result<bool> {
+    let mut reported = false;
     for (key, allowed) in stale {
         let (rule, path) = key;
+        if engine::registry()
+            .iter()
+            .any(|r| r.gate == engine::Gate::Advisory && r.id == rule)
+        {
+            continue;
+        }
         let found = actual.get(key).copied().unwrap_or(0);
         writeln!(
             output,
             "{path} {rule}: ledger allows {allowed}, found {found}; run blackhole ledger"
         )?;
+        reported = true;
     }
-    Ok(())
+    Ok(reported)
 }
 
 /// Regenerates the repository ledger within its existing allowances.
@@ -209,7 +220,6 @@ fn scan_files<'a>(
     Ok(findings)
 }
 
-// Only the findings above their allowance are printed.
 fn report(
     findings: &[engine::Finding],
     over: &ledger::Counts,
@@ -217,10 +227,16 @@ fn report(
 ) -> io::Result<()> {
     let findings: Vec<_> = findings
         .iter()
-        .filter(|f| over.contains_key(&(f.rule.to_owned(), f.path.clone())))
+        .filter(|f| {
+            f.gate == engine::Gate::Advisory
+                || (!over.is_empty() && over.contains_key(&(f.rule.to_owned(), f.path.clone())))
+        })
         .collect();
     for f in &findings {
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
+        if f.gate == engine::Gate::Advisory {
+            write!(output, " [advisory]")?;
+        }
         if let Some(note) = &f.note {
             write!(output, " {note}")?;
         }

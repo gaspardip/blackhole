@@ -2,12 +2,13 @@ use super::{
     dictionary_types::{Resolution, report},
     function_types::parameter,
 };
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-object-parameters",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-object-parameters.",
     fix: "Accept a named owner type and parse external input before calling this function.",
     run: Run::Ts(check),

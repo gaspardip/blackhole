@@ -3,7 +3,7 @@ use super::function_types::{
     bindings::{ConstBindings, symbol},
     expressions::{assertion, known_value},
 };
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
@@ -17,6 +17,7 @@ use std::ops::ControlFlow::{Break, Continue};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-widen-then-assert",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-widen-then-assert.",
     fix: "Keep the precise type from initialization through use. Parse boundary input once.",
     run: Run::Ts(check),

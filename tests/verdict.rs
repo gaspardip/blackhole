@@ -1,5 +1,5 @@
 use blackhole_check::{
-    engine::Finding,
+    engine::{Finding, Gate},
     ledger::Counts,
     objections::Rows,
     verdict::{Approvals, Change, Inputs, Kind, judge},
@@ -91,6 +91,7 @@ fn gate_table() {
         let findings = (0..found)
             .map(|_| Finding {
                 rule: "core/no-suppression",
+                gate: Gate::Blocking,
                 path: dest.into(),
                 line: 1,
                 col: 1,
@@ -166,6 +167,7 @@ fn objection_transitions() {
     let excludes = GlobSetBuilder::new().build().unwrap();
     let findings = [Finding {
         rule: "core/no-suppression",
+        gate: Gate::Blocking,
         path: "x".into(),
         line: 1,
         col: 1,

@@ -1,10 +1,11 @@
 use super::dictionary_types::{Resolution, report};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::AstKind;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unknown-type-aliases",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-unknown-type-aliases.",
     fix: "Keep unknown explicit at the parsing boundary or use the parsed owner type.",
     run: Run::Ts(check),

@@ -1,12 +1,13 @@
 use super::test_context::single_value;
 use super::values::{MemberKeys, call_expr, invoked, member_object, receiver, resolve, unwrapped};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::ast::Expression;
 use oxc::span::GetSpan;
 use std::collections::HashSet;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unsignaled-poll",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Port of landmines testing/no-unsignaled-poll.",
     fix: "Await the operation or resolve a promise from the handler that records the event.",
     run: Run::Ts(check),

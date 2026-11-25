@@ -1,11 +1,12 @@
 use super::values::{contains_shape, static_string_contains_shape};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{ast::AstKind, span::GetSpan};
 use std::collections::HashSet;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-shape-in-symbol-names",
     family: Family::Slop,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-shape-in-symbol-names.",
     fix: "Rename the symbol for the domain value it represents.",
     run: Run::Ts(check),

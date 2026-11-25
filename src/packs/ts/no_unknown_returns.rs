@@ -2,12 +2,13 @@ use super::{
     dictionary_types::{Resolution, report},
     function_types::returns,
 };
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unknown-returns",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-unknown-returns.",
     fix: "Parse the value at its boundary and return a named domain type.",
     run: Run::Ts(check),

@@ -1,4 +1,4 @@
-use crate::engine::{Finding, Rule, registry};
+use crate::engine::{Finding, Gate, Rule, registry};
 use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
@@ -83,7 +83,7 @@ pub fn write(rows: &Counts) -> io::Result<String> {
 #[must_use]
 pub fn counts(findings: &[Finding]) -> Counts {
     let mut rows = Counts::new();
-    for f in findings {
+    for f in findings.iter().filter(|f| f.gate == Gate::Blocking) {
         *rows.entry((f.rule.to_owned(), f.path.clone())).or_default() += 1;
     }
     rows

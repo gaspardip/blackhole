@@ -1,4 +1,4 @@
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{
     ast::{AstKind, ast::Expression},
     span::GetSpan,
@@ -8,6 +8,7 @@ use oxc::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-runtime-typeof",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-runtime-typeof.",
     fix: "Parse input at its I/O boundary and branch on the domain value.",
     run: Run::Ts(check),

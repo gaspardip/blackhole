@@ -1,10 +1,11 @@
 use super::test_context::{Runner, TestOption, enclosing_runners, test_file};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::BTreeSet;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-skipped-tests",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Agents skip, focus or stub out a failing test to get a green run. Upstream accepts 255, 257, 261 and 266 differ because an unbound `context` is the runner's suite alias.",
     fix: "Make the test pass or delete it with the behaviour it covered. A skipped test proves nothing.",
     run: Run::Ts(check),

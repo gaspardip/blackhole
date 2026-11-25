@@ -1,6 +1,6 @@
 use super::test_context::test_file;
 use super::values::MemberKeys;
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
@@ -15,6 +15,7 @@ use oxc::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-test-aware-code",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "ImpossibleBench and similar reports observed agents special-casing a test run in production code.",
     fix: "Production code must not know it is under test. Inject the dependency or the configuration instead.",
     run: Run::Ts(check),

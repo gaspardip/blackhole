@@ -1,4 +1,4 @@
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{ArrowFunctionBody, BindingPattern, Expression, FormalParameters, Statement},
@@ -7,6 +7,7 @@ use oxc::ast::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/strict-msw",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Port of landmines testing/strict-msw.",
     fix: "Start MSW with onUnhandledRequest set to error. Add handlers for the requests the test makes.",
     run: Run::Ts(check),

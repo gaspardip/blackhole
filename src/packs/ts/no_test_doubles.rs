@@ -1,5 +1,5 @@
 use super::values::Imported;
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{Expression, ObjectPropertyKind},
@@ -9,6 +9,7 @@ use oxc::span::GetSpan;
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-test-doubles",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Ports of landmines testing/no-test-doubles and anti-slop no-module-mocking. Spy-only module mocks follow landmines as observation. Unlike upstream case 303, passing vi.mock and vi to a shadowed Reflect.apply reports both uses.",
     fix: "Exercise the real implementation. Intercept network requests with MSW and use spies only to observe calls.",
     run: Run::Ts(check),
