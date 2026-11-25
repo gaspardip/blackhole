@@ -1,6 +1,10 @@
 #[path = "arguments.rs"]
 mod arguments;
 use arguments::Arguments;
+#[path = "member_values.rs"]
+mod member_values;
+#[path = "strings.rs"]
+mod strings;
 #[path = "tracked_uses.rs"]
 pub(super) mod tracked_uses;
 use crate::engine::TsCtx;
@@ -30,13 +34,29 @@ pub(crate) struct Resolution<'a> {
         OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
+    member_values: member_values::MemberValues<'a>,
+    eval_mention: OnceCell<bool>,
+    has_with: Rc<OnceCell<bool>>,
+    with_bodies: OnceCell<Vec<bool>>,
+    under_with_statement: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
+    pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
+    strings: strings::StringCache,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
+pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
+    *ctx.resolution.has_with.get_or_init(|| {
+        let scoping = ctx.semantic.scoping();
+        scoping
+            .scope_descendants_from_root()
+            .any(|id| scoping.scope_flags(id).is_with())
+    })
+}
+
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
@@ -93,7 +113,7 @@ fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
                 }
                 AstKind::IdentifierReference(id) if id.reference_id.get().is_some_and(|r|scopes.get_reference(r).is_write()) => {
                     let plain=matches!(nodes.parent_kind(node.id()),AstKind::AssignmentExpression(a) if a.operator.is_assign() && a.left.span()==id.span);
-                    if !plain || nodes.ancestors(node.id()).any(|n|matches!(n.kind(),AstKind::WithStatement(_))) {
+                    if !plain || under_with_statement(ctx, node.id()) {
                         symbols.extend(symbol(ctx,id));
                     }
                 }
@@ -102,6 +122,21 @@ fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
         }
         symbols
     }).contains(&sym)
+}
+
+fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool {
+    has_with(ctx)
+        && ctx.resolution.under_with_statement.get_or_init(|| {
+            let nodes = ctx.semantic.nodes();
+            let mut under = Vec::with_capacity(nodes.len());
+            // Oxc numbers parents before children, and the root is its own parent.
+            for node in nodes.iter() {
+                let parent = nodes.parent_id(node.id());
+                let inherited = parent != node.id() && under[parent.index()];
+                under.push(inherited || matches!(nodes.kind(parent), AstKind::WithStatement(_)));
+            }
+            under
+        })[id.index()]
 }
 
 pub(super) fn declaration<'a>(
@@ -462,6 +497,8 @@ pub(super) fn resolves_to_global<'a>(
     id.name == name && ctx.semantic.is_reference_to_global_variable(id)
 }
 
+pub(super) use strings::{contains_shape, static_string_contains_shape};
+
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
     match resolve(ctx, expr) {
         Expression::StringLiteral(s) => s.value.as_str(),
@@ -681,18 +718,21 @@ pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Optio
         .nodes()
         .ancestors(id)
         .map(oxc::semantic::AstNode::kind)
-        .find(|kind| {
-            !matches!(
-                kind,
-                AstKind::ParenthesizedExpression(_)
-                    | AstKind::ChainExpression(_)
-                    | AstKind::TSAsExpression(_)
-                    | AstKind::TSSatisfiesExpression(_)
-                    | AstKind::TSInstantiationExpression(_)
-                    | AstKind::TSNonNullExpression(_)
-                    | AstKind::TSTypeAssertion(_)
-            )
-        })
+        .find(|kind| !transparent(kind))
+}
+
+/// Wrappers that leave the wrapped expression's value and target unchanged.
+fn transparent(kind: &AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::ParenthesizedExpression(_)
+            | AstKind::ChainExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSSatisfiesExpression(_)
+            | AstKind::TSInstantiationExpression(_)
+            | AstKind::TSNonNullExpression(_)
+            | AstKind::TSTypeAssertion(_)
+    )
 }
 
 pub(super) fn global_object(name: &str) -> bool {

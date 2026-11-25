@@ -39,6 +39,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    pub(crate) arena: &'a Allocator,
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
     pub text: &'a str,
@@ -88,6 +89,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_reflect_apply::RULE,
         crate::packs::ts::no_reflect_get::RULE,
         crate::packs::ts::no_runtime_typeof::RULE,
+        crate::packs::ts::no_shape_in_symbol_names::RULE,
         crate::packs::ts::no_skipped_tests::RULE,
         crate::packs::ts::no_test_aware_code::RULE,
         crate::packs::ts::no_test_doubles::RULE,
@@ -194,6 +196,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        arena,
         resolution: crate::packs::ts::values::Resolution::default(),
         path,
         text,

@@ -1,0 +1,1 @@
+type PayloadShape = { id: string };

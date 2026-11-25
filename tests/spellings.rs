@@ -462,3 +462,838 @@ fn poll_and_recorder_aliases_match_direct_expressions() {
         ]
     );
 }
+
+fn check_spelling(
+    missing: &mut Vec<String>,
+    label: &str,
+    rule: &str,
+    source: &str,
+    offset: Option<usize>,
+) {
+    check_file_spelling(missing, label, rule, (TEST_FILE, source), offset);
+}
+
+fn check_file_spelling(
+    missing: &mut Vec<String>,
+    label: &str,
+    rule: &str,
+    (path, source): (&str, &str),
+    offset: Option<usize>,
+) {
+    let hits = run(registry(), [(path, source.as_bytes())]);
+    let actual: Vec<_> = hits
+        .iter()
+        .filter(|h| h.rule.strip_prefix("ts/") == Some(rule) || h.rule == "core/unparseable")
+        .map(|h| (h.rule.strip_prefix("ts/").unwrap_or(h.rule), h.line, h.col))
+        .collect();
+    let expected: Vec<_> = offset
+        .map(|i| {
+            let prefix = &source[..i];
+            (
+                rule,
+                1 + prefix.bytes().filter(|&c| c == b'\n').count(),
+                1 + prefix.rsplit('\n').next().unwrap().len(),
+            )
+        })
+        .into_iter()
+        .collect();
+    if actual != expected {
+        missing.push(format!(
+            "{label}: {actual:?} expected {expected:?} in {source}"
+        ));
+    }
+}
+
+#[test]
+fn local_binding_spellings() {
+    let mut missing = Vec::new();
+    for source in [
+        "const { shape } = schema;",
+        "const shape = schema.shape;",
+        "({ value: shape } = schema);",
+        "({ shape } = schema);",
+    ] {
+        check_spelling(
+            &mut missing,
+            "local binding",
+            "no-shape-in-symbol-names",
+            source,
+            source.find("shape"),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn type_queries_skip_external_member_names() {
+    let mut missing = Vec::new();
+    for (source, marker) in [
+        ("type Field = typeof schema.shape;", None),
+        ("type Field = typeof a.b.shape;", None),
+        ("type Field = typeof a.shape.b;", None),
+        ("type Field = typeof shapeSchema.x;", Some("shapeSchema")),
+        ("type T = NS.Shape;", Some("Shape")),
+        ("type MyShape = string;", Some("MyShape")),
+        ("type F = typeof import(\"pkg\").shape;", None),
+        ("type F = typeof import(\"pkg\").ns.shape;", None),
+        ("type F = typeof import(\"pkg\").shape.x;", None),
+        (
+            "type F = typeof import(\"pkg\").ns.x<Shape>;",
+            Some("Shape"),
+        ),
+        ("type F = import(\"pkg\").Shape;", Some("Shape")),
+    ] {
+        check_spelling(
+            &mut missing,
+            source,
+            "no-shape-in-symbol-names",
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn computed_names_skip_values_shared_with_types() {
+    let mut missing = Vec::new();
+    check_spelling(
+        &mut missing,
+        "S118 computed name from a const sharing an interface name",
+        "no-shape-in-symbol-names",
+        "interface Keys { name: string } const Keys = { name: 'shape' }; const value = { [Keys.name]: 1 };",
+        None,
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn untouched_const_owners_supply_member_values() {
+    let mut missing = Vec::new();
+    let (label, rule, source, marker) = (
+        "untouched computed name",
+        "no-shape-in-symbol-names",
+        "const p = {t: 'shape'}; consume({[p.t]: 0});",
+        Some("p.t"),
+    );
+    check_spelling(
+        &mut missing,
+        label,
+        rule,
+        source,
+        marker.and_then(|marker| source.find(marker)),
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn template_keys_supply_member_values() {
+    let mut missing = Vec::new();
+    for (label, source) in [
+        (
+            "S72 template key read by dot access",
+            "const box = {[`key`]: 'shape'}; consume({[box.key]: 0});",
+        ),
+        (
+            "S72 template key read by bracket access",
+            "const box = {[`key`]: 'shape'}; consume({[box['key']]: 0});",
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            source,
+            Some(source.find("[box").unwrap() + 1),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn concatenation_budget_is_independent_of_key_order() {
+    use std::fmt::Write as _;
+
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-shape-in-symbol-names")
+        .unwrap();
+    for (seed, fits, budget) in [
+        ("", true, 32_772),
+        ("xxx", false, 32_772),
+        (r"\uDC00\uD800", true, 80_000),
+    ] {
+        let mut declarations = format!("const b0 = '{seed}';\n");
+        let mut reads = String::new();
+        for n in 1..=14 {
+            let prev = n - 1;
+            writeln!(declarations, "const b{n} = b{prev} + b{prev};").unwrap();
+            writeln!(reads, "consume({{ [b{n}]: 0 }});").unwrap();
+        }
+        declarations.push_str("const suffix = 'sha' + 'pe';\n");
+        let target = "consume({ [b14 + suffix]: 0 });\n";
+        let standalone = "consume({ [suffix]: 0 });\n";
+        for (keys, target_line, standalone_line) in [
+            (format!("{target}{reads}{standalone}"), 17, 32),
+            (format!("{standalone}{reads}{target}"), 32, 17),
+        ] {
+            let mut source = format!("{declarations}{keys}");
+            source.extend(std::iter::repeat_n(' ', budget - source.len()));
+            let hits = run(std::slice::from_ref(rule), [(TEST_FILE, source.as_bytes())]);
+            let actual: Vec<_> = hits.iter().map(|h| (h.rule, h.line, h.col)).collect();
+            let mut lines = vec![standalone_line];
+            if fits {
+                lines.push(target_line);
+                lines.sort_unstable();
+            }
+            let expected: Vec<_> = lines
+                .into_iter()
+                .map(|line| ("ts/no-shape-in-symbol-names", line, 12))
+                .collect();
+            assert_eq!(actual, expected, "seed: {seed:?}, target: {target_line}");
+        }
+    }
+}
+
+#[test]
+fn member_writes_hide_computed_names() {
+    let mut missing = Vec::new();
+    for (label, rule, source) in [
+        (
+            "removed symbol name",
+            "no-shape-in-symbol-names",
+            "const p={t:'shape'}; p.t='name'; consume({[p.t]:0});",
+        ),
+        (
+            "introduced symbol name",
+            "no-shape-in-symbol-names",
+            "const p={t:'name'}; p.t='shape'; consume({[p.t]:0});",
+        ),
+        (
+            "introduced name through a bracket write",
+            "no-shape-in-symbol-names",
+            "const p={t:'name'}; p['t']='shape'; consume({[p['t']]:0});",
+        ),
+        (
+            "introduced name through an aliased owner",
+            "no-shape-in-symbol-names",
+            "const p={t:'name'}; const alias=p; alias.t='shape'; consume({[p.t]:0});",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn written_selectors_are_unknown_at_immediate_calls() {
+    let mut missing = Vec::new();
+    let (label, rule, source) = (
+        "bound writer leaves computed name unchanged",
+        "no-shape-in-symbol-names",
+        "const box={key:'name'}; const names={method:'call'}; names.method='bind'; (()=>{box.key='shape';})[names['method']](null); consume({[box.key]:0});",
+    );
+    check_spelling(&mut missing, label, rule, source, None);
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn accessor_assignments_do_not_supply_member_values() {
+    let mut missing = Vec::new();
+    let (label, rule, source) = (
+        "name with a bracket accessor",
+        "no-shape-in-symbol-names",
+        "const box={get ['key'](){return 'name';},set ['key'](value){}}; box['key']='shape'; consume({[box.key]:0});",
+    );
+    check_spelling(&mut missing, label, rule, source, None);
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn unknown_member_values_do_not_depend_on_read_order() {
+    let mut missing = Vec::new();
+    let rule = registry()
+        .iter()
+        .find(|r| r.id == "ts/no-shape-in-symbol-names")
+        .unwrap();
+    for (label, alias, right_first) in [
+        ("member key first", "v", false),
+        ("concatenated key first", "v", true),
+        ("another alias before the member read", "alias", false),
+    ] {
+        let direct = "consume({[v]:0});";
+        let joined = "consume({[key]:0});";
+        let reads = if right_first {
+            [joined, direct]
+        } else {
+            [direct, joined]
+        };
+        let [first, second] = reads;
+        let source = format!(
+            "const o={{k:'name'}}; while(more()) {{ o.k='shape'; const v=o.k; const alias=v; const key={alias}+''; o[key]='other';\n{first}\n{second}\n}}"
+        );
+        let hits = run(std::slice::from_ref(rule), [(TEST_FILE, source.as_bytes())]);
+        let actual: Vec<_> = hits.iter().map(|h| (h.rule, h.line, h.col)).collect();
+        let expected = [];
+        if actual != expected {
+            missing.push(format!("{label}: {actual:?} expected {expected:?}"));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn wrapped_selectors_do_not_restore_written_members() {
+    let mut missing = Vec::new();
+    for (label, selector) in [
+        ("as", "('t' as string)"),
+        ("satisfies", "'t' satisfies string"),
+        ("non-null", "'t'!"),
+        ("parentheses", "(('t'))"),
+        ("aliased selector", "field"),
+    ] {
+        let source = format!(
+            "const p={{t:'name'}}; const field='t'; p.t='shape'; consume({{[p[{selector}]]:0}});"
+        );
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            &source,
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn wrapped_computed_names_fold_neutral_aliases() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "object key",
+            "const token='shape'; const o={[(token)]:1};",
+            "token)",
+        ),
+        (
+            "class key",
+            "const token='shape'; class C { [((token as string) satisfies string)!] = 1; }",
+            "token as",
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            source,
+            source.find(marker),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn accessor_prototype_and_spread_owners_are_unknown() {
+    let mut missing = Vec::new();
+    for (label, source) in [
+        (
+            "S56 own getter",
+            "const box={key:'shape',get touch(){this.key='plain';}}; void box.touch; consume({[box.key]:0});",
+        ),
+        (
+            "S56 own setter",
+            "const box={key:'shape',set touch(value){this.key=value;}}; consume({[box.key]:0});",
+        ),
+        (
+            "S56 inherited getter",
+            "const proto={get touch(){this.key='plain';}}; const box={key:'shape',__proto__:proto}; void box.touch; consume({[box.key]:0});",
+        ),
+        (
+            "S56 getter under computed literal key",
+            "const box={key:'shape',get ['touch'](){this.key='plain';}}; void box.touch; consume({[box.key]:0});",
+        ),
+        (
+            "S56 spread owner",
+            "const box={...other,key:'shape'}; consume({[box.key]:0});",
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            source,
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn direct_eval_hides_member_and_const_string_values() {
+    let mut missing = Vec::new();
+    for (label, path, source) in [
+        (
+            "S57 direct eval before the read",
+            TEST_FILE,
+            "const box={key:'shape'}; eval(\"box.key='plain'\"); consume({[box.key]:0});",
+        ),
+        (
+            "S57 direct eval inside a function",
+            TEST_FILE,
+            "const box={key:'shape'}; function mutate(){eval(\"box.key='plain'\");} mutate(); consume({[box.key]:0});",
+        ),
+        (
+            "S57 direct eval and a bare const",
+            TEST_FILE,
+            "const key='shape'; eval(other); consume({[key]:0});",
+        ),
+        (
+            "S57 references to a local eval binding hide values",
+            TEST_FILE,
+            "const eval=()=>{}; const box={key:'shape'}; eval(other); consume({[box.key]:0});",
+        ),
+        (
+            "S57 optional eval hides values",
+            TEST_FILE,
+            "const box={key:'shape'}; eval?.(other); consume({[box.key]:0});",
+        ),
+        (
+            "S57 ambient function named eval",
+            "case.cts",
+            "declare function eval(source: string): void; const box={key:'shape'}; eval(\"box.key='plain'\"); consume({[box.key]:0});",
+        ),
+        (
+            "S57 ambient const named eval",
+            TEST_FILE,
+            "declare const eval: (s: string) => void; const box={key:'shape'}; eval(\"box.key='plain'\"); consume({[box.key]:0});",
+        ),
+        (
+            "S57 references to a runtime function named eval hide values",
+            "case.cts",
+            "function eval() {} const box={key:'shape'}; eval(other); consume({[box.key]:0});",
+        ),
+        (
+            "S61 eval merged with a namespace containing a const enum hides values",
+            "case.cts",
+            "declare function eval(source: string): void; namespace eval { export const enum E { item } } const box={key:'shape'}; eval(\"box.key='plain'\"); consume({[box.key]:0});",
+        ),
+        (
+            "S62 namespace reference to an ambient eval hides values",
+            "case.cts",
+            "function eval() {} const box={key:'shape'}; namespace N { declare function eval(s: string): void; eval(other); } consume({[box.key]:0});",
+        ),
+        (
+            "an eval alias hides values",
+            TEST_FILE,
+            "const box={key:'shape'}; const e = eval; e(\"box.key='plain'\"); consume({[box.key]:0});",
+        ),
+        (
+            "a type-only typeof eval hides values",
+            TEST_FILE,
+            "const box={key:'shape'}; const other: typeof eval = fn; consume({[box.key]:0});",
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            (path, source),
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+const EVAL_MENTION_SCRIPTS: [(&str, &str, bool); 8] = [
+    (
+        "S67 dot access on globalThis",
+        r#"globalThis.eval("box.key='plain'");"#,
+        false,
+    ),
+    (
+        "S67 string key on globalThis",
+        r#"globalThis['eval']("box.key='plain'");"#,
+        false,
+    ),
+    (
+        "S67 template key on globalThis",
+        r#"globalThis[`eval`]("box.key='plain'");"#,
+        false,
+    ),
+    (
+        "S67 dot access on window",
+        r#"window.eval("box.key='plain'");"#,
+        false,
+    ),
+    (
+        "S67 destructured identifier key",
+        r#"const {eval: run} = globalThis; run("box.key='plain'");"#,
+        false,
+    ),
+    (
+        "S67 destructured string key",
+        r#"const {'eval': run} = globalThis; run("box.key='plain'");"#,
+        false,
+    ),
+    ("an unrelated eval key", "const o = { eval: 1 };", false),
+    (
+        "dynamic code without an eval mention still folds",
+        r#"new Function("box.key='plain'")();"#,
+        true,
+    ),
+];
+
+#[test]
+fn every_eval_mention_hides_member_and_const_string_values() {
+    let mut missing = Vec::new();
+    for (label, declaration) in [
+        (
+            "S63 declare class",
+            "declare class Derived extends base(eval) {}",
+        ),
+        (
+            "S63 exported declare class",
+            "export declare class Derived extends base(eval) {}",
+        ),
+        (
+            "S63 declare namespace",
+            "declare namespace N { class Derived extends base(eval) {} }",
+        ),
+        (
+            "S63 declare module",
+            "declare module \"m\" { class Derived extends base(eval) {} }",
+        ),
+        (
+            "S63 declare global",
+            "export {}; declare global { class Derived extends base(eval) {} }",
+        ),
+        ("S63 runtime class", "class Derived extends base(eval) {}"),
+        (
+            "S63 runtime namespace",
+            "namespace N { class Derived extends base(eval) {} }",
+        ),
+        (
+            "S64 class method overload",
+            "class C { [eval](): void; [key]() {} }",
+        ),
+        (
+            "S64 function overload",
+            "function f({[eval]: {value}}: {x: {value: string}}): void; function f(x: unknown) {}",
+        ),
+        (
+            "S64 abstract method",
+            "abstract class C { abstract [eval](): void; }",
+        ),
+        (
+            "S64 abstract property",
+            "abstract class C { abstract [eval]: string; }",
+        ),
+        (
+            "S64 abstract getter",
+            "abstract class C { abstract get [eval](): string; }",
+        ),
+        (
+            "S64 abstract auto-accessor",
+            "abstract class C { abstract accessor [eval]: string; }",
+        ),
+        (
+            "S64 static method overload",
+            "class C { static [eval](): void; static [key]() {} }",
+        ),
+        ("S64 method implementation", "class C { [eval]() {} }"),
+        ("S64 plain field", "class C { [eval]: string; }"),
+        ("S64 object method", "const obj = { [eval]() {} };"),
+        ("S64 default parameter", "function f(x = eval) {}"),
+        (
+            "S65 interface method destructuring key",
+            "interface I { m({[eval]: {value}}: {x: {value: string}}): void }",
+        ),
+        (
+            "S66 const enum initializer",
+            "const eval = 'x'; const enum E { Item = eval } const v = E.Item;",
+        ),
+        ("a type reference to eval", "type Alias = eval;"),
+    ] {
+        let source = format!("{declaration} const box={{key:'shape'}}; consume({{[box.key]:0}});");
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            &source,
+            None,
+        );
+    }
+
+    for (label, statement, keeps_finding) in EVAL_MENTION_SCRIPTS {
+        let source = format!("const box={{key:'shape'}}; {statement} consume({{[box.key]:0}});");
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            ("case.js", &source),
+            source.find("box.key]").filter(|_| keeps_finding),
+        );
+    }
+
+    let control = "const box={key:'shape'}; consume({[box.key]:0});";
+    check_spelling(
+        &mut missing,
+        "a file without eval preserves values",
+        "no-shape-in-symbol-names",
+        control,
+        Some(control.find("box.key]").unwrap()),
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn jsx_member_checks_only_the_root_name() {
+    let mut missing = Vec::new();
+    for (label, source, columns) in [
+        ("S73 member", "<Vendor.shape />;", &[][..]),
+        ("S73 nested member", "<Vendor.Shape.item />;", &[][..]),
+        (
+            "S73 local root",
+            "const localShape = X; <localShape.shape />;",
+            &[7, 24][..],
+        ),
+    ] {
+        let hits = run(registry(), [("case.tsx", source.as_bytes())]);
+        let actual: Vec<_> = hits
+            .iter()
+            .filter(|h| matches!(h.rule, "ts/no-shape-in-symbol-names" | "core/unparseable"))
+            .map(|h| (h.rule, h.line, h.col))
+            .collect();
+        let expected: Vec<_> = columns
+            .iter()
+            .map(|&column| ("ts/no-shape-in-symbol-names", 1, column))
+            .collect();
+        if actual != expected {
+            missing.push(format!("{label}: {actual:?} expected {expected:?}"));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn jsx_character_references_spelling_eval_keep_values() {
+    let mut missing = Vec::new();
+    let jsx =
+        "const box={key:'shape'}; const view = <X attr=\"ev&#x61;l\" />; consume({[box.key]:0});";
+    check_file_spelling(
+        &mut missing,
+        "S68 a JSX character reference spelling eval still folds",
+        "no-shape-in-symbol-names",
+        ("case.tsx", jsx),
+        Some(jsx.find("box.key]").unwrap()),
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn with_bodies_hide_member_and_const_string_values() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "S58 member read inside with",
+            "const box={key:'shape'}; with ({box:{key:'plain'}}) { consume({[box.key]:0}); }",
+            None,
+        ),
+        (
+            "S58 bare const inside with",
+            "const key='shape'; with ({key:'plain'}) { consume({[key]:0}); }",
+            None,
+        ),
+        (
+            "S58 member read after with",
+            "const box={key:'shape'}; with ({box:{key:'plain'}}) { consume({[box.key]:0}); } consume({[box.key]:0});",
+            Some("box.key]"),
+        ),
+        (
+            "S58 member read in the with object expression",
+            "const box={key:'shape'}; with ({[box.key]:0}) {}",
+            Some("box.key]"),
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            ("case.cjs", source),
+            marker.and_then(|marker| source.rfind(marker)),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn only_plain_safe_integer_keys_supply_numeric_members() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "S60 exponent key",
+            "const box={'1000000000000000000000':'plain',1e21:'shape'}; consume({[box['1000000000000000000000']]:0});",
+            None,
+        ),
+        (
+            "S60 fractional key",
+            "const box={'0.1':'plain',0.1:'shape'}; consume({[box['0.1']]:0});",
+            None,
+        ),
+        (
+            "S60 separated key",
+            "const box={'1000':'plain',1_000:'shape'}; consume({[box['1000']]:0});",
+            None,
+        ),
+        (
+            "S60 unsafe integer key",
+            "const box={9007199254740992:'shape'}; consume({[box['9007199254740992']]:0});",
+            None,
+        ),
+        (
+            "S60 plain safe integer key",
+            "const box={9007199254740991:'shape'}; consume({[box['9007199254740991']]:0});",
+            Some("box["),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            source,
+            marker.and_then(|marker| source.find(marker)),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn commonjs_numeric_keys_require_plain_decimal_spelling() {
+    let mut missing = Vec::new();
+    for (key, selector, keeps_finding) in [
+        ("010", "8", false),
+        ("08", "8", false),
+        ("9007199254740993n", "9007199254740993", false),
+        ("0", "0", true),
+        ("7", "7", true),
+    ] {
+        let source = format!("const box={{{key}:'shape'}}; consume({{[box['{selector}']]:0}});");
+        check_file_spelling(
+            &mut missing,
+            key,
+            "no-shape-in-symbol-names",
+            ("case.cjs", &source),
+            source.find("box[").filter(|_| keeps_finding),
+        );
+    }
+    assert!(missing.is_empty(), "S60\n{}", missing.join("\n"));
+}
+
+#[test]
+fn numeric_member_selectors_use_plain_safe_decimal_keys() {
+    let mut missing = Vec::new();
+    for (owner_key, selector, reports) in [
+        ("0", "0", true),
+        ("123", "(123 as number)", true),
+        ("123", "(sideEffect(), 123)", true),
+        ("9007199254740991", "9007199254740991", true),
+        ("'9007199254740992'", "9007199254740992", false),
+        ("'1000'", "1_000", false),
+        ("'1000'", "1e3", false),
+        ("'16'", "0x10", false),
+        ("'1.5'", "1.5", false),
+        ("'0'", "-0", false),
+    ] {
+        let source = format!(
+            "const names = {{ {owner_key}: 'userShape' }};\nconsume({{ [names[{selector}]]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            selector,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names[").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn jsx_member_tags_keep_const_member_values() {
+    let mut missing = Vec::new();
+    for tag in [
+        "<UI.Section />",
+        "<UI.Components.Section></UI.Components.Section>",
+    ] {
+        let source = format!(
+            "const Panel = () => <section />;\nconst UI = {{ Section: Panel, key: 'userShape' }};\nconst view = {tag};\nconst value = {{ [UI.key]: 1 }};"
+        );
+        check_file_spelling(
+            &mut missing,
+            tag,
+            "no-shape-in-symbol-names",
+            ("case.tsx", &source),
+            source.find("UI.key"),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn type_only_exports_keep_const_member_values() {
+    let mut missing = Vec::new();
+    for (export, reports) in [
+        ("export type { names };", true),
+        ("export { type names };", true),
+        ("export { type names, other };", true),
+        ("export { names, type other };", false),
+    ] {
+        let source = format!(
+            "const names = {{ key: 'userShape' }}; const other = 0;\n{export}\nconsume({{ [names.key]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            export,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names.key").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn computed_member_selectors_preserve_unicode_keys() {
+    let mut missing = Vec::new();
+    for (label, selector, reports) in [
+        ("paired surrogates", r"'\uD83D' + '\uDE00'", false),
+        ("lone surrogate", r"'\uD83D' + '!'", false),
+        ("incomplete key", r"'\uD83D' + '?'", false),
+        ("longer key", r"'\uD83D' + '\uDE00' + '!'", false),
+        ("literal with paired surrogates", "'😀'", true),
+        ("literal with lone surrogate", r"'\uD83D!'", true),
+        (
+            "wrapped template alias",
+            "(sideEffect(), ((key as string) satisfies string)!)",
+            true,
+        ),
+        ("concatenated alias", "joined", false),
+        ("field read", "parts.key", false),
+    ] {
+        let source = format!(
+            r"const names = {{ '😀': 'plain', ['\uD83D\uDE00']: 'userShape', '\uD83D!': 'listShape' }};
+const key = (`😀` as string);
+const joined = '' + key;
+const parts = {{ key }};
+consume({{ [names[{selector}]]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names[").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
