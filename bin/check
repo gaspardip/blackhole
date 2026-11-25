@@ -23,18 +23,24 @@ import sys
 metadata = json.loads(subprocess.check_output(
     ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"]
 ))
-test_targets = [
-    target["name"]
-    for package in metadata["packages"]
-    for target in package["targets"]
-    if "test" in target["kind"] and target["name"] != "resolution_time"
-]
-if not test_targets:
+# Same selection as plain `cargo test`: every target whose manifest leaves `test` on.
+flags = {"bin": "--bin", "test": "--test", "example": "--example", "bench": "--bench"}
+command = ["cargo", "test", "--locked"]
+integration_tests = 0
+for package in metadata["packages"]:
+    for target in package["targets"]:
+        kind = target["kind"][0]
+        if not target["test"] or kind == "custom-build":
+            continue
+        if kind == "test" and target["name"] == "resolution_time":
+            continue
+        if kind in flags:
+            command.extend([flags[kind], target["name"]])
+            integration_tests += kind == "test"
+        elif "--lib" not in command:
+            command.append("--lib")
+if not integration_tests:
     sys.exit("bin/check: no integration test targets selected")
-
-command = ["cargo", "test", "--locked", "--lib", "--bins"]
-for target in test_targets:
-    command.extend(["--test", target])
 os.execvp(command[0], command)
 '
   cargo test --locked --doc
