@@ -18,9 +18,16 @@ pub enum Family {
     Boundary,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum Gate {
+    Blocking,
+    Advisory,
+}
+
 pub struct Rule {
     pub id: &'static str,
     pub family: Family,
+    pub gate: Gate,
     pub provenance: &'static str,
     pub fix: &'static str,
     pub run: Run,
@@ -59,6 +66,7 @@ impl Findings {
 
 pub struct Finding {
     pub rule: &'static str,
+    pub gate: Gate,
     pub path: String,
     pub line: usize,
     pub col: usize,
@@ -72,10 +80,13 @@ pub fn registry() -> &'static [Rule] {
         Rule {
             id: "core/unparseable",
             family: Family::Judge,
+            gate: Gate::Blocking,
             provenance: "A syntax error would hide the file from parsed rules.",
             fix: "Make the file parse. The judge must be able to read it.",
             run: Run::ParseError,
         },
+        #[cfg(test)]
+        crate::advisory_tests::RULE,
         crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
@@ -316,6 +327,7 @@ pub fn run<'a>(
             }
             result.push(Finding {
                 rule: rule.id,
+                gate: rule.gate,
                 path: path.to_owned(),
                 line,
                 col,

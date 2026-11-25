@@ -1,11 +1,12 @@
 use super::dictionary_types::{Resolution, report};
 use super::function_types::{parameter, predicate_subject, returns};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unknown-parameters",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-unknown-parameters.",
     fix: "Accept a named domain type. Parse input at the I/O boundary before calling this function.",
     run: Run::Ts(check),

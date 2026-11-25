@@ -1,10 +1,11 @@
 use super::function_types::expressions::{assertion, parent};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::span::GetSpan;
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-chained-type-assertions",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-chained-type-assertions.",
     fix: "Keep the original precise type, or parse untrusted input before narrowing it.",
     run: Run::Ts(check),

@@ -2,7 +2,7 @@ use super::test_context::{
     Runner, TestOption, callback_kind, enclosing_runners, returned_values, runner,
 };
 use super::values::{Origin, Properties, origin_path, properties, resolve};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
@@ -13,6 +13,7 @@ use oxc::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-flake-masking",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Port of landmines testing/no-flake-masking.",
     fix: "Fix the timing dependency or move slow setup into a suite hook. Wait for the event that makes the assertion true.",
     run: Run::Ts(check),

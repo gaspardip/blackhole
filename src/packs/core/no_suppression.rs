@@ -1,8 +1,9 @@
-use crate::engine::{Family, FileCtx, Findings, Rule, Run};
+use crate::engine::{Family, FileCtx, Findings, Gate, Rule, Run};
 
 pub(crate) const RULE: Rule = Rule {
     id: "core/no-suppression",
     family: Family::Judge,
+    gate: Gate::Blocking,
     provenance: "Agents add suppression comments to make a failing check pass.",
     fix: "Fix what the tool reports instead of silencing it. If the tool is wrong, tell a person.",
     run: Run::File(check),

@@ -7,7 +7,7 @@ use super::{
         predicate_subject,
     },
 };
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{
     ast::{
         AstKind,
@@ -23,6 +23,7 @@ use std::ops::ControlFlow::{self, Break, Continue};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-known-value-widening",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-known-value-widening.",
     fix: "Keep the inferred type, check the value with satisfies, or name the owning contract.",
     run: Run::Ts(check),

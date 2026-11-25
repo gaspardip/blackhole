@@ -1,6 +1,6 @@
 #[path = "common/run_rule.rs"]
 mod rule_runner;
-use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Rule, Run, registry, run};
+use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Gate, Rule, Run, registry, run};
 use rule_runner::run_rule;
 
 fn mark(ctx: &FileCtx<'_>, findings: &mut Findings) {
@@ -887,6 +887,7 @@ fn coordinates_and_sort_order() {
     let rules = ["b", "a"].map(|id| Rule {
         id,
         family: Family::Judge,
+        gate: Gate::Blocking,
         provenance: "test",
         fix: "fix",
         run: Run::File(mark),
@@ -926,6 +927,7 @@ fn places(text: &[u8]) -> Vec<(usize, usize)> {
     let rule = Rule {
         id: "a",
         family: Family::Judge,
+        gate: Gate::Blocking,
         provenance: "test",
         fix: "fix",
         run: Run::File(mark),

@@ -1,10 +1,11 @@
 use super::test_context::{callback_body, callback_kind};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{ast::ast::Expression, span::GetSpan};
 use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-assertionless-tests",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Agents write tests that exercise code without assertions or assert a constant.",
     fix: "Assert the behaviour the test names, on a value the code under test produced.",
     run: Run::Ts(check),

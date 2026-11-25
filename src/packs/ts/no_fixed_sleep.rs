@@ -1,6 +1,6 @@
 use super::test_context::{callback_sites, single_effect};
 use super::values::{Origin, any_assigned_path, call_expr, enclosing_functions, invoked, resolve};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
     ast::{Expression, NewExpression},
@@ -8,6 +8,7 @@ use oxc::ast::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-fixed-sleep",
     family: Family::Tests,
+    gate: Gate::Blocking,
     provenance: "Port of landmines testing/no-fixed-sleep.",
     fix: "With fake timers, advance them (for example, await vi.advanceTimersByTimeAsync(ms)) instead of scheduling a timeout in the test. Otherwise, await a signal from the code under test.",
     run: Run::Ts(check),

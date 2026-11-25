@@ -1,10 +1,11 @@
 use super::dictionary_types::{Resolution, Unjudged, report};
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::{ast::AstKind, span::GetSpan};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-unsafe-dictionary-type",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of anti-slop no-unsafe-dictionary-type.",
     fix: "Use an owner or schema-derived value type. Parse external payloads before inserting them.",
     run: Run::Ts(check),

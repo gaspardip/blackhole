@@ -1,9 +1,10 @@
-use crate::engine::{Family, Findings, Rule, Run, TsCtx};
+use crate::engine::{Family, Findings, Gate, Rule, Run, TsCtx};
 use oxc::ast::{AstKind, ast::TSType};
 
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-explicit-return-types",
     family: Family::Types,
+    gate: Gate::Blocking,
     provenance: "Port of landmines no-explicit-return-types.",
     fix: "Infer the return type. Pin a contract with a typed variable or satisfies at the return site.",
     run: Run::Ts(check),

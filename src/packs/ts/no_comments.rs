@@ -1,5 +1,5 @@
 use crate::{
-    engine::{Family, Findings, Rule, Run, TsCtx},
+    engine::{Family, Findings, Gate, Rule, Run, TsCtx},
     packs::core::no_suppression::suppressed_comment,
 };
 use oxc::{
@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-comments",
     family: Family::Narration,
+    gate: Gate::Blocking,
     provenance: "Port of landmines style/no-comments.",
     fix: "Delete the comment. Put its meaning in names and its rationale in the pull request.",
     run: Run::Ts(check),

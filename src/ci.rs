@@ -12,7 +12,7 @@ use std::{
 };
 
 fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
-    ledger::load(tree.judge_file(".blackhole/ledger", batch)?)
+    ledger::load(tree.judge_file(".blackhole/ledger", batch)?.as_deref())
 }
 fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
     config::parse(
