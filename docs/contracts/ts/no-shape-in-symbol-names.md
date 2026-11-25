@@ -11,8 +11,9 @@ A case-insensitive `shape` inside one of these names:
    element name, a type name, a label or a private name (`invalid-01.ts`
    through `invalid-05.ts`, `wrapped-symbol.ts`, `loop-labels.ts`).
 2. A property, method or accessor name written as an identifier or a
-   string literal in an object literal, class, interface or type literal
-   (`invalid-01.ts` through `invalid-05.ts`, `quoted-property-keys.ts`).
+   string literal in an object literal, class, interface or type literal,
+   and an enum member name written as an identifier (`invalid-01.ts`
+   through `invalid-05.ts`, `quoted-property-keys.ts`, `enum-members.ts`).
 3. A quoted enum member, import or export specifier name, `export * as`
    name, or import attribute key (`quoted-symbol-names.ts`,
    `name-literals.ts`).
@@ -54,7 +55,9 @@ An untouched const object is `const o = { ... }` with a plain name, where:
 
 Anything outside the list above. In particular:
 
-- A JSX attribute name such as `<area shape="rect" />`, a member property
+- A JSX attribute name such as `<area shape="rect" />`, any part of a
+  namespaced JSX name such as `<svg:shape />` or `xlink:shape`
+  (`jsx-attribute-names.tsx`, `jsx-namespaced-names.tsx`), a member property
   name such as `a.shape` or `<a.Shape />`, a destructuring or assignment
   key that is not also the bound name, such as `{ shape: s }`, and a name
   after the root of a `typeof` query. These name things the code does not
