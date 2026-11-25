@@ -57,7 +57,7 @@ fn literal_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
     }
 }
 
-pub(super) fn const_initializer<'a>(
+pub(in crate::packs::ts) fn const_initializer<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<&'a Expression<'a>> {

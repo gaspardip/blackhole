@@ -79,6 +79,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
+        crate::packs::ts::no_conditional_empty_object_spread::RULE,
         crate::packs::ts::no_explicit_any::RULE,
         crate::packs::ts::no_explicit_return_types::RULE,
         crate::packs::ts::no_fixed_sleep::RULE,

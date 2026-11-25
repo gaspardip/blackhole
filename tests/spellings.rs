@@ -568,21 +568,55 @@ fn computed_names_skip_values_shared_with_types() {
 }
 
 #[test]
+fn documented_slop_rule_limits() {
+    let mut missing = Vec::new();
+    for (label, rule, source) in [
+        (
+            "S74 empty object read in a comma expression",
+            "no-conditional-empty-object-spread",
+            "const empty = {}; (empty, log()); consume({ ...(flag ? empty : payload) });",
+        ),
+        (
+            "empty object read as the final operand of a comma expression",
+            "no-conditional-empty-object-spread",
+            "const empty = {}; void (log(), empty); consume({ ...(flag ? empty : payload) });",
+        ),
+        (
+            "S118 empty spread alias sharing a type name",
+            "no-conditional-empty-object-spread",
+            "declare const ok: boolean; type Empty = {}; const Empty = {}; const value = { ...(ok ? { a: 1 } : Empty) };",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
 fn untouched_const_owners_supply_member_values() {
     let mut missing = Vec::new();
-    let (label, rule, source, marker) = (
-        "untouched computed name",
-        "no-shape-in-symbol-names",
-        "const p = {t: 'shape'}; consume({[p.t]: 0});",
-        Some("p.t"),
-    );
-    check_spelling(
-        &mut missing,
-        label,
-        rule,
-        source,
-        marker.and_then(|marker| source.find(marker)),
-    );
+    for (label, rule, source, marker) in [
+        (
+            "S49: call body writes its own selector",
+            "no-conditional-empty-object-spread",
+            "const names={method:'call'}; (()=>{ names.method='bind'; return {...value}; })[names.method](null); const value=ready?{ok:true}:{};",
+            None,
+        ),
+        (
+            "untouched computed name",
+            "no-shape-in-symbol-names",
+            "const p = {t: 'shape'}; consume({[p.t]: 0});",
+            Some("p.t"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.and_then(|marker| source.find(marker)),
+        );
+    }
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
@@ -688,12 +722,25 @@ fn member_writes_hide_computed_names() {
 #[test]
 fn written_selectors_are_unknown_at_immediate_calls() {
     let mut missing = Vec::new();
-    let (label, rule, source) = (
-        "bound writer leaves computed name unchanged",
-        "no-shape-in-symbol-names",
-        "const box={key:'name'}; const names={method:'call'}; names.method='bind'; (()=>{box.key='shape';})[names['method']](null); consume({[box.key]:0});",
-    );
-    check_spelling(&mut missing, label, rule, source, None);
+    for (label, rule, source) in [
+        (
+            "bound writer leaves computed name unchanged",
+            "no-shape-in-symbol-names",
+            "const box={key:'name'}; const names={method:'call'}; names.method='bind'; (()=>{box.key='shape';})[names['method']](null); consume({[box.key]:0});",
+        ),
+        (
+            "bound reader can see a later empty alias",
+            "no-conditional-empty-object-spread",
+            "const names={method:'call'}; names.method='bind'; (()=>({...value}))[names.method](null); const value=ready?{ok:true}:{};",
+        ),
+        (
+            "immediate reader cannot see a later empty alias",
+            "no-conditional-empty-object-spread",
+            "const names={method:'bind'}; names.method='call'; (()=>({...value}))[names.method](null); const value=ready?{ok:true}:{};",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
@@ -1219,6 +1266,53 @@ fn numeric_member_selectors_use_plain_safe_decimal_keys() {
 }
 
 #[test]
+fn slop_spellings() {
+    let mut missing = Vec::new();
+    for &(label, wrapper) in WRAPPERS {
+        for (slot, source, value, rule, report) in [
+            (
+                "spread argument",
+                "consume({...VALUE});",
+                "(c ? {} : x)",
+                "no-conditional-empty-object-spread",
+                true,
+            ),
+            (
+                "conditional arm",
+                "consume({...(c ? VALUE : x)});",
+                "{}",
+                "no-conditional-empty-object-spread",
+                true,
+            ),
+            (
+                "early read",
+                "consume({...(c ? VALUE : x)});const empty={};",
+                "empty",
+                "no-conditional-empty-object-spread",
+                false,
+            ),
+            (
+                "initialized read",
+                "const empty={};consume({...(c ? VALUE : x)});",
+                "empty",
+                "no-conditional-empty-object-spread",
+                label != "comma",
+            ),
+        ] {
+            let source = source.replace("VALUE", &wrapper.replace("VALUE", value));
+            check_spelling(
+                &mut missing,
+                &format!("{slot} {label}"),
+                rule,
+                &source,
+                report.then(|| source.find("...").unwrap()),
+            );
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
 fn jsx_member_tags_keep_const_member_values() {
     let mut missing = Vec::new();
     for tag in [
@@ -1293,6 +1387,59 @@ consume({{ [names[{selector}]]: 0 }});"
             "no-shape-in-symbol-names",
             &source,
             reports.then(|| source.find("names[").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn conditional_empty_spreads_skip_early_reads_through_reassigned_members() {
+    let source = "const methods = { run: Reflect.apply };
+methods.run = () => {};
+methods.run(() => ({ ...value }), null, []);
+const value = ready ? {} : payload;";
+    let mut missing = Vec::new();
+    check_spelling(
+        &mut missing,
+        "reassigned member with an early reader",
+        "no-conditional-empty-object-spread",
+        source,
+        None,
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn conditional_empty_spreads_hide_aliases_in_dynamic_scope() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "S103 with shadows an empty object alias",
+            "const empty = {}; with ({ empty: { n: 1 } }) { const result = { ...(true ? empty : { n: 2 }) }; }",
+            None,
+        ),
+        (
+            "S103 eval mutates an empty object alias",
+            "const empty = {}; eval('empty.n = 1'); const result = { ...(true ? empty : { n: 2 }) };",
+            None,
+        ),
+        (
+            "S103 with keeps an empty object literal",
+            "with (scope) { const result = { ...(c ? {} : x) }; }",
+            Some("..."),
+        ),
+        (
+            "S103 eval keeps an empty object literal",
+            "eval(source); const result = { ...(c ? {} : x) };",
+            Some("..."),
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-conditional-empty-object-spread",
+            ("case.cjs", source),
+            marker.map(|marker| source.find(marker).unwrap()),
         );
     }
     assert!(missing.is_empty(), "{}", missing.join("\n"));

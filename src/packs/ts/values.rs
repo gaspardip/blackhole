@@ -3,6 +3,7 @@ mod arguments;
 use arguments::Arguments;
 #[path = "member_values.rs"]
 mod member_values;
+pub(super) use member_values::const_initializer;
 #[path = "strings.rs"]
 mod strings;
 #[path = "tracked_uses.rs"]
@@ -41,7 +42,7 @@ pub(crate) struct Resolution<'a> {
     under_with_statement: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
-    pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
+    pub(super) named_exports: OnceCell<super::local_alias::NamedExports>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     strings: strings::StringCache,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
