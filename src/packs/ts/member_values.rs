@@ -34,18 +34,26 @@ impl<'a> MemberValues<'a> {
 
     fn selector(&self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<usize> {
         let expr = unwrapped(expr);
-        let literal = match expr {
-            Expression::NumericLiteral(number) => {
-                return plain_decimal_key(number).map(|key| self.key_id(key));
+        let cache_node = match expr {
+            Expression::NumericLiteral(_) => {
+                return selector_key(ctx, expr).map(|key| self.key_id(key));
             }
-            Expression::Identifier(id) => const_initializer(ctx, id)?,
-            _ => expr,
+            Expression::Identifier(id) => const_initializer(ctx, id)?.node_id(),
+            _ => expr.node_id(),
         };
         *self
             .selectors
             .borrow_mut()
-            .entry(literal.node_id())
-            .or_insert_with(|| literal_key(unwrapped(literal)).map(|key| self.key_id(key)))
+            .entry(cache_node)
+            .or_insert_with(|| selector_key(ctx, expr).map(|key| self.key_id(key)))
+    }
+}
+
+pub(super) fn selector_key<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<JSStr<'a>> {
+    match unwrapped(expr) {
+        Expression::NumericLiteral(number) => plain_decimal_key(number),
+        Expression::Identifier(id) => literal_key(unwrapped(const_initializer(ctx, id)?)),
+        literal => literal_key(literal),
     }
 }
 
@@ -80,7 +88,7 @@ pub(super) fn const_initializer<'a>(
     v.init.as_ref()
 }
 
-fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
+pub(in crate::packs::ts) fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     has_eval_mention(ctx) || inside_with(ctx, id)
 }
 

@@ -79,6 +79,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
+        crate::packs::ts::no_conditional_empty_object_spread::RULE,
         crate::packs::ts::no_explicit_any::RULE,
         crate::packs::ts::no_explicit_return_types::RULE,
         crate::packs::ts::no_fixed_sleep::RULE,
@@ -221,26 +222,35 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     text: &str,
-    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
+    parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
-    let ts = parsed.ok().flatten();
+    let (mut ts, error) = match parsed {
+        Ok(ts) => (ts, None),
+        Err(error) => (None, Some(error)),
+    };
     let ctx = FileCtx {
         path,
         text,
-        comments: ts.map(|ts| ts.comments),
+        comments: ts.as_ref().map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
+    let mut alternate = ts.as_ref().map(|ts| ts.resolution.conservative());
     for rule in rules {
         let mut findings = Findings::default();
         match rule.run {
             Run::File(check) => check(&ctx, &mut findings),
             Run::Ts(check) => {
-                if let Some(ts) = ts {
+                if let (Some(ts), Some(alternate)) = (ts.as_deref_mut(), alternate.as_mut()) {
+                    let conservative = rule.id == "ts/no-conditional-empty-object-spread";
+                    // Call and object summaries depend on the resolver in use.
+                    if conservative != ts.resolution.conservative {
+                        std::mem::swap(&mut ts.resolution, alternate);
+                    }
                     check(ts, &mut findings);
                 }
             }
             Run::ParseError => {
-                if let Err((at, message)) = parsed {
+                if let Some((at, message)) = error {
                     findings.report(*at, Some(message));
                 }
             }
@@ -263,8 +273,8 @@ fn parsed_hits<'r>(
             .stack_size(STACK_BYTES)
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
-                let ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&ts))))
+                let mut ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()

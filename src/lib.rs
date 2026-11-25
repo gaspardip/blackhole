@@ -19,6 +19,7 @@ mod packs {
         pub(crate) mod no_assertionless_tests;
         pub(crate) mod no_chained_type_assertions;
         pub(crate) mod no_comments;
+        pub(crate) mod no_conditional_empty_object_spread;
         pub(crate) mod no_explicit_any;
         pub(crate) mod no_explicit_return_types;
         pub(crate) mod no_fixed_sleep;

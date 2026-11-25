@@ -3,6 +3,7 @@ mod arguments;
 use arguments::Arguments;
 #[path = "member_values.rs"]
 mod member_values;
+pub(super) use member_values::blocks_identifier_resolution;
 #[path = "strings.rs"]
 mod strings;
 #[path = "tracked_uses.rs"]
@@ -17,7 +18,8 @@ use oxc::{
             MemberExpression, ObjectProperty, ObjectPropertyKind, PropertyKey,
         },
     },
-    span::GetSpan,
+    span::{GetSpan, Span},
+    syntax::node::NodeId,
 };
 use std::collections::HashSet;
 
@@ -34,20 +36,34 @@ pub(crate) struct Resolution<'a> {
         OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
-    member_values: member_values::MemberValues<'a>,
-    eval_mention: OnceCell<bool>,
+    pub(crate) conservative: bool,
+    member_values: Rc<member_values::MemberValues<'a>>,
+    eval_mention: Rc<OnceCell<bool>>,
     has_with: Rc<OnceCell<bool>>,
     with_bodies: OnceCell<Vec<bool>>,
     under_with_statement: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
-    pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
+    pub(super) named_exports: OnceCell<super::local_alias::NamedExports>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
-    strings: strings::StringCache,
+    strings: Rc<strings::StringCache>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
+impl Resolution<'_> {
+    pub(crate) fn conservative(&self) -> Self {
+        Self {
+            conservative: true,
+            member_values: Rc::clone(&self.member_values),
+            eval_mention: Rc::clone(&self.eval_mention),
+            has_with: Rc::clone(&self.has_with),
+            strings: Rc::clone(&self.strings),
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.has_with.get_or_init(|| {
         let scoping = ctx.semantic.scoping();
@@ -139,13 +155,10 @@ fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool 
         })[id.index()]
 }
 
-pub(super) fn declaration<'a>(
-    ctx: &TsCtx<'a>,
-    id: &IdentifierReference<'_>,
-) -> Option<AstKind<'a>> {
+fn unwritten_symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     let scope = ctx.semantic.scoping();
     let symbol = symbol(ctx, id)?;
-    (!ctx
+    if ctx
         .resolution
         .written
         .get_or_init(|| {
@@ -155,9 +168,37 @@ pub(super) fn declaration<'a>(
                 .collect()
         })
         .contains(&symbol)
-        && !unreadable(ctx, symbol)
-        && scope.symbol_redeclarations(symbol).is_empty())
-    .then(|| ctx.semantic.symbol_declaration(symbol).kind())
+        || unreadable(ctx, symbol)
+    {
+        return None;
+    }
+    Some(symbol)
+}
+
+pub(super) fn declaration<'a>(
+    ctx: &TsCtx<'a>,
+    id: &IdentifierReference<'_>,
+) -> Option<AstKind<'a>> {
+    let symbol = unwritten_symbol(ctx, id)?;
+    let scope = ctx.semantic.scoping();
+    let redeclarations = scope.symbol_redeclarations(symbol);
+    if redeclarations.is_empty() {
+        return Some(ctx.semantic.symbol_declaration(symbol).kind());
+    }
+    if !ctx.resolution.conservative {
+        return None;
+    }
+    let mut implementation = None;
+    for redeclaration in redeclarations {
+        let kind = ctx.semantic.nodes().kind(redeclaration.declaration);
+        let AstKind::Function(function) = kind else {
+            return None;
+        };
+        if function.body.is_some() && implementation.replace(kind).is_some() {
+            return None;
+        }
+    }
+    implementation
 }
 
 pub(super) fn initializer<'a>(
@@ -453,18 +494,17 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> &'a Expr
     let mut value = binding_value(ctx, expr);
     let mut seen = HashSet::new();
     while let Some(member) = value.get_member_expr() {
-        let Some(key) = member
-            .static_property_name()
-            .and_then(oxc::str::JSStr::as_str)
-        else {
-            break;
+        let next = if ctx.resolution.conservative {
+            member_values::value(ctx, member)
+        } else {
+            member.static_property_name().and_then(|key| {
+                let key = key.as_str()?;
+                projection(ctx, member.object(), key)
+                    .map(|p| &p.value)
+                    .or_else(|| instance_field(ctx, member.object(), key))
+            })
         };
-        let Some(next) = projection(ctx, member.object(), key)
-            .map(|p| &p.value)
-            .or_else(|| instance_field(ctx, member.object(), key))
-        else {
-            break;
-        };
+        let Some(next) = next else { break };
         if !seen.insert(next.span()) {
             break;
         }
@@ -502,9 +542,7 @@ pub(super) use strings::{contains_shape, static_string_contains_shape};
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
     match resolve(ctx, expr) {
         Expression::StringLiteral(s) => s.value.as_str(),
-        Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
-            t.quasis.first()?.value.cooked?.as_str()
-        }
+        Expression::TemplateLiteral(t) => t.single_quasi()?.as_str(),
         _ => None,
     }
 }
@@ -532,6 +570,11 @@ impl<'a> MemberKeys<'_, 'a> {
     }
     pub(super) fn read_kind(&self, member: oxc::ast::MemberExpressionKind<'a>) -> Option<&'a str> {
         match (self, member) {
+            (Self(ctx), oxc::ast::MemberExpressionKind::Computed(m))
+                if ctx.resolution.conservative =>
+            {
+                member_values::selector_key(ctx, &m.expression)?.as_str()
+            }
             (Self(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => literal(ctx, &m.expression),
             (_, m) => m.static_property_name()?.as_str(),
         }
@@ -642,6 +685,100 @@ pub(super) fn enclosing_functions<'ctx, 'a>(
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
         )
     })
+}
+
+fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) -> bool {
+    let mut id = function.id();
+    let callee = function.span();
+    while let Some(parent) = outer(ctx, id) {
+        match parent {
+            AstKind::CallExpression(call) => {
+                if invoked(ctx, call).callee.span() == callee
+                    || unknown_function_method(ctx, &call.callee, callee)
+                {
+                    return true;
+                }
+            }
+            AstKind::SequenceExpression(_)
+            | AstKind::StaticMemberExpression(_)
+            | AstKind::ComputedMemberExpression(_)
+            | AstKind::ArrayExpression(_)
+            | AstKind::SpreadElement(_) => {}
+            _ => return false,
+        }
+        id = parent.node_id();
+    }
+    false
+}
+
+fn unknown_function_method<'a>(
+    ctx: &TsCtx<'a>,
+    callee: &'a Expression<'a>,
+    function: Span,
+) -> bool {
+    matches!(
+        callee.get_member_expr(),
+        Some(MemberExpression::ComputedMemberExpression(m))
+            if unwrapped(&m.object).span() == function
+                && member_values::selector_key(ctx, &m.expression).is_none()
+    )
+}
+
+fn function_region<'a>(
+    ctx: &TsCtx<'a>,
+    function: &oxc::semantic::AstNode<'a>,
+    child: Span,
+) -> Option<NodeId> {
+    let id = function.id();
+    if let AstKind::Function(f) = function.kind()
+        && f.generator
+    {
+        // A generator body runs as it is iterated, apart from the call that binds its parameters.
+        if let Some(body) = f
+            .body
+            .as_ref()
+            .filter(|body| body.span.contains_inclusive(child))
+        {
+            return Some(body.node_id.get());
+        }
+    }
+    (!immediate_call(ctx, function)).then_some(id)
+}
+
+pub(super) fn possible_immediate_region(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
+    let nodes = ctx.semantic.nodes();
+    let mut child = nodes.kind(id).span();
+    let mut ancestors = nodes.ancestors(id);
+    while let Some(node) = ancestors.next() {
+        let once =
+            |part: Option<oxc::span::Span>| part.is_some_and(|p| p.contains_inclusive(child));
+        let boundary = match node.kind() {
+            AstKind::Decorator(_) => {
+                child = ancestors
+                    .find(|n| matches!(n.kind(), AstKind::Class(_)))?
+                    .span();
+                continue;
+            }
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                if let Some(boundary) = function_region(ctx, node, child) {
+                    return Some(boundary);
+                }
+                false
+            }
+            AstKind::PropertyDefinition(p) => {
+                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
+            }
+            AstKind::AccessorProperty(p) => {
+                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
+            }
+            _ => false,
+        };
+        if boundary {
+            return Some(node.id());
+        }
+        child = node.kind().span();
+    }
+    None
 }
 
 pub(super) fn parameter_index(
