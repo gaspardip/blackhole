@@ -73,7 +73,9 @@ Anything outside the list above. In particular:
 - An interpolated template such as `` `sha${'pe'}` ``, a call such as
   `'sha'.concat('pe')`, and an enum member value such as `K.A` (probes).
 - A selector built by addition or read from a field, such as
-  `names[prefix + '-']` or `parts[keys.field]`.
+  `names[prefix + '-']` or `parts[keys.field]`, and a selector that is an
+  alias of an alias (`const b = a`) or a const alias of a number
+  (`const i = 0`) (`selector-alias-limits.ts`).
 - Cyclic, dynamic or over-budget additions
   (`cyclic_shared_additions_share_failed_folds`,
   `repeated_cyclic_key_prefixes_share_failed_folds`,
