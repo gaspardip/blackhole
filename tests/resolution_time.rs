@@ -563,3 +563,34 @@ fn repeated_long_computed_selectors_scale_linearly() {
         "{small:?} {large:?}"
     );
 }
+
+#[test]
+fn repeated_const_reads_with_an_unrelated_with_scale_linearly() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let [small, large] = [1_250, 10_000].map(|n| {
+                // Local bindings keep Oxc from walking outward to resolve each read.
+                let text = format!(
+                    "with (o) {{ f(); }}\n{}const prefix = 'userShape'; const consume = () => {{}};\n{}{}",
+                    "{".repeat(n),
+                    "consume({ [prefix]: 0 });\n".repeat(n),
+                    "}".repeat(n)
+                );
+                let start = Instant::now();
+                let hits = run(registry(), [("computed.js", text.as_bytes())]);
+                let elapsed = start.elapsed();
+                assert_eq!(hits.len(), n);
+                assert!(hits.iter().all(|h| h.rule == "ts/no-shape-in-symbol-names"));
+                elapsed
+            });
+            eprintln!("nested const reads with an unrelated with: 1250 {small:?}, 10000 {large:?}");
+            assert!(
+                large < small * 8 + Duration::from_millis(25),
+                "{small:?} {large:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

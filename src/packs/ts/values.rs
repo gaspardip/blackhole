@@ -37,6 +37,7 @@ pub(crate) struct Resolution<'a> {
     member_values: member_values::MemberValues<'a>,
     eval_mention: OnceCell<bool>,
     has_with: Rc<OnceCell<bool>>,
+    with_bodies: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
     pub(super) named_exports: OnceCell<HashSet<SymbolId>>,

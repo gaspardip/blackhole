@@ -74,10 +74,19 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
         return false;
     }
     let scope = ctx.semantic.nodes().get_node(id).scope_id();
-    let scoping = ctx.semantic.scoping();
-    scoping
-        .scope_ancestors(scope)
-        .any(|scope| scoping.scope_flags(scope).is_with())
+    let with_bodies = ctx.resolution.with_bodies.get_or_init(|| {
+        let scoping = ctx.semantic.scoping();
+        let mut inside = Vec::with_capacity(scoping.scopes_len());
+        // Oxc assigns scope IDs in parent-first order.
+        for scope in scoping.scope_descendants_from_root() {
+            let inherited = scoping
+                .scope_parent_id(scope)
+                .is_some_and(|parent| inside[parent.index()]);
+            inside.push(inherited || scoping.scope_flags(scope).is_with());
+        }
+        inside
+    });
+    with_bodies[scope.index()]
 }
 
 pub(super) fn value<'a>(
