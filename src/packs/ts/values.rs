@@ -38,6 +38,7 @@ pub(crate) struct Resolution<'a> {
     eval_mention: OnceCell<bool>,
     has_with: Rc<OnceCell<bool>>,
     with_bodies: OnceCell<Vec<bool>>,
+    under_with_statement: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
     pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
@@ -112,7 +113,7 @@ fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
                 }
                 AstKind::IdentifierReference(id) if id.reference_id.get().is_some_and(|r|scopes.get_reference(r).is_write()) => {
                     let plain=matches!(nodes.parent_kind(node.id()),AstKind::AssignmentExpression(a) if a.operator.is_assign() && a.left.span()==id.span);
-                    if !plain || nodes.ancestors(node.id()).any(|n|matches!(n.kind(),AstKind::WithStatement(_))) {
+                    if !plain || under_with_statement(ctx, node.id()) {
                         symbols.extend(symbol(ctx,id));
                     }
                 }
@@ -121,6 +122,21 @@ fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
         }
         symbols
     }).contains(&sym)
+}
+
+fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool {
+    has_with(ctx)
+        && ctx.resolution.under_with_statement.get_or_init(|| {
+            let nodes = ctx.semantic.nodes();
+            let mut under = Vec::with_capacity(nodes.len());
+            // Oxc numbers parents before children, and the root is its own parent.
+            for node in nodes.iter() {
+                let parent = nodes.parent_id(node.id());
+                let inherited = parent != node.id() && under[parent.index()];
+                under.push(inherited || matches!(nodes.kind(parent), AstKind::WithStatement(_)));
+            }
+            under
+        })[id.index()]
 }
 
 pub(super) fn declaration<'a>(
