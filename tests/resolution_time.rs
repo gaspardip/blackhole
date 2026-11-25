@@ -462,3 +462,26 @@ fn long_computed_key_chains_share_fold_results() {
         assert!(elapsed < Duration::from_secs(2), "{label}");
     }
 }
+
+#[test]
+fn long_typeof_paths_scale_linearly() {
+    let [small, large] = [2_000, 16_000].map(|n| {
+        let text = format!(
+            "const a = {{}};\ntype T = typeof a{};\n",
+            ".shape".repeat(n)
+        );
+        let start = Instant::now();
+        let hits = run(registry(), [("query.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert!(
+            hits.iter().all(|h| h.rule != "ts/no-shape-in-symbol-names"),
+            "{n}"
+        );
+        elapsed
+    });
+    eprintln!("typeof paths: 2000 segments {small:?}, 16000 {large:?}");
+    assert!(
+        large < small * 16 + Duration::from_millis(100),
+        "{small:?} {large:?}"
+    );
+}

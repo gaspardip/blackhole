@@ -34,7 +34,6 @@ pub(crate) struct Resolution<'a> {
         OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
     unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
-    pub(crate) conservative: bool,
     member_values: member_values::MemberValues<'a>,
     eval_mention: OnceCell<bool>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
@@ -46,15 +45,6 @@ pub(crate) struct Resolution<'a> {
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
-impl Resolution<'_> {
-    pub(crate) fn conservative() -> Self {
-        Self {
-            conservative: true,
-            ..Self::default()
-        }
-    }
-}
-
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
@@ -483,9 +473,6 @@ pub(super) fn resolves_to_global<'a>(
 pub(super) use strings::static_string;
 
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
-    if ctx.resolution.conservative {
-        return static_string(ctx, expr)?.as_str();
-    }
     match resolve(ctx, expr) {
         Expression::StringLiteral(s) => s.value.as_str(),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() => {

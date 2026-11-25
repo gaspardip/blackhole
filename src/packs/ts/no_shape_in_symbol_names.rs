@@ -1,4 +1,4 @@
-use super::values::{key, static_string};
+use super::values::static_string;
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::ast::PropertyKey;
 use oxc::{ast::AstKind, span::GetSpan};
@@ -19,13 +19,30 @@ fn property_bytes<'a>(ctx: &TsCtx<'a>, property: &'a PropertyKey<'a>) -> Option<
         .as_expression()
         .and_then(|expr| static_string(ctx, expr))
         .map(oxc::str::JSStr::as_bytes)
-        .or_else(|| key(ctx, property).map(str::as_bytes))
 }
+
+fn type_path(kind: &AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::TSQualifiedName(_)
+            | AstKind::TSImportType(_)
+            | AstKind::TSImportTypeQualifiedName(_)
+    )
+}
+
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let nodes = ctx.semantic.nodes();
     let mut reported = HashSet::new();
+    let mut queried = HashSet::new();
     for (id, node) in nodes.iter_enumerated() {
         let kind = node.kind();
+        // Parents come before children, so one lookup marks a path under a `typeof` query.
+        if type_path(&kind)
+            && (matches!(nodes.parent_kind(id), AstKind::TSTypeQuery(_))
+                || queried.contains(&nodes.parent_id(id)))
+        {
+            queried.insert(id);
+        }
         let property = match kind {
             AstKind::ObjectProperty(p) => Some(&p.key),
             AstKind::TSPropertySignature(p) => Some(&p.key),
@@ -51,21 +68,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         continue;
                     }
                     // Names after the root of a `typeof` query belong to another module or object.
-                    AstKind::TSQualifiedName(_)
-                    | AstKind::TSImportType(_)
-                    | AstKind::TSImportTypeQualifiedName(_)
-                        if matches!(
-                            nodes.ancestor_kinds(id).find(|parent| !matches!(
-                                parent,
-                                AstKind::TSQualifiedName(_)
-                                    | AstKind::TSImportType(_)
-                                    | AstKind::TSImportTypeQualifiedName(_)
-                            )),
-                            Some(AstKind::TSTypeQuery(_))
-                        ) =>
-                    {
-                        continue;
-                    }
+                    _ if queried.contains(&nodes.parent_id(id)) => continue,
                     _ => n.name.as_bytes(),
                 },
                 AstKind::IdentifierReference(n) => n.name.as_bytes(),
