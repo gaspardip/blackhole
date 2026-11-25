@@ -1188,3 +1188,31 @@ fn commonjs_numeric_keys_require_plain_decimal_spelling() {
     }
     assert!(missing.is_empty(), "S60\n{}", missing.join("\n"));
 }
+
+#[test]
+fn numeric_member_selectors_use_plain_safe_decimal_keys() {
+    let mut missing = Vec::new();
+    for (owner_key, selector, reports) in [
+        ("0", "0", true),
+        ("123", "(123 as number)", true),
+        ("9007199254740991", "9007199254740991", true),
+        ("'9007199254740992'", "9007199254740992", false),
+        ("'1000'", "1_000", false),
+        ("'1000'", "1e3", false),
+        ("'16'", "0x10", false),
+        ("'1.5'", "1.5", false),
+        ("'0'", "-0", false),
+    ] {
+        let source = format!(
+            "const names = {{ {owner_key}: 'userShape' }};\nconsume({{ [names[{selector}]]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            selector,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names[").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}

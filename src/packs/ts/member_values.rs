@@ -3,7 +3,10 @@ use crate::{engine::TsCtx, packs::ts::local_alias::is_local};
 use oxc::{
     ast::{
         AstKind,
-        ast::{Expression, IdentifierReference, ObjectPropertyKind, PropertyKey, PropertyKind},
+        ast::{
+            Expression, IdentifierReference, NumericLiteral, ObjectPropertyKind, PropertyKey,
+            PropertyKind,
+        },
     },
     span::GetSpan,
     str::JSStr,
@@ -114,20 +117,9 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         } else {
             match &field.key {
                 PropertyKey::BigIntLiteral(_) => return None,
-                PropertyKey::NumericLiteral(number) => {
-                    let raw = number.raw?.as_str();
-                    let plain_decimal = match raw.as_bytes() {
-                        [b'0'] => true,
-                        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
-                        _ => false,
-                    };
-                    if !plain_decimal || !(0.0..9_007_199_254_740_992.0).contains(&number.value) {
-                        return None;
-                    }
-                }
-                _ => {}
+                PropertyKey::NumericLiteral(number) => plain_decimal_key(number)?,
+                _ => field.key.static_name()?.into_js_str_in(&ctx.arena),
             }
-            field.key.static_name()?.into_js_str_in(&ctx.arena)
         };
         if key == "__proto__" {
             return None;
@@ -135,6 +127,16 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         fields.insert(key, &field.value);
     }
     Some(fields)
+}
+
+pub(super) fn plain_decimal_key<'a>(number: &NumericLiteral<'a>) -> Option<JSStr<'a>> {
+    let raw = number.raw?;
+    let plain_decimal = match raw.as_bytes() {
+        [b'0'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    (plain_decimal && (0.0..9_007_199_254_740_992.0).contains(&number.value)).then(|| raw.into())
 }
 
 fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {

@@ -115,7 +115,7 @@ enum Step<'a> {
     Visit(&'a Expression<'a>),
     Copy(NodeId, NodeId, bool),
     Add(NodeId, NodeId, NodeId),
-    Select(NodeId, &'a Expression<'a>, NodeId),
+    Select(NodeId, &'a Expression<'a>, &'a Expression<'a>),
 }
 
 fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
@@ -162,7 +162,7 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                         if let Some(member) = expr.get_member_expr() {
                             if let MemberExpression::ComputedMemberExpression(m) = member {
                                 pending.extend([
-                                    Step::Select(id, &m.object, m.expression.node_id()),
+                                    Step::Select(id, &m.object, &m.expression),
                                     Step::Visit(&m.expression),
                                 ]);
                             } else if let Some(key) = member.static_property_name()
@@ -194,8 +194,15 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                 (id, value)
             }
             Step::Select(id, object, key) => {
-                if let Some(key) = cache[&key].filter(|key| key.selector)
-                    && let Some(value) = member_values::value(ctx, object, key.parts.text(ctx))
+                let key = if let Expression::NumericLiteral(number) = key.get_inner_expression() {
+                    member_values::plain_decimal_key(number)
+                } else {
+                    cache[&key.node_id()]
+                        .filter(|key| key.selector)
+                        .map(|key| key.parts.text(ctx))
+                };
+                if let Some(key) = key
+                    && let Some(value) = member_values::value(ctx, object, key)
                 {
                     copy(&mut pending, id, value, false);
                 }
