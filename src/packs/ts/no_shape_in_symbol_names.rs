@@ -1,6 +1,5 @@
-use super::values::static_string;
+use super::values::{contains_shape, static_string_contains_shape};
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
-use oxc::ast::ast::PropertyKey;
 use oxc::{ast::AstKind, span::GetSpan};
 use std::collections::HashSet;
 
@@ -11,15 +10,6 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Rename the symbol for the domain value it represents.",
     run: Run::Ts(check),
 };
-
-const NEEDLE: &[u8] = b"shape";
-
-fn property_bytes<'a>(ctx: &TsCtx<'a>, property: &'a PropertyKey<'a>) -> Option<&'a [u8]> {
-    property
-        .as_expression()
-        .and_then(|expr| static_string(ctx, expr))
-        .map(oxc::str::JSStr::as_bytes)
-}
 
 fn type_path(kind: &AstKind<'_>) -> bool {
     matches!(
@@ -52,9 +42,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             AstKind::AccessorProperty(p) => Some(&p.key),
             _ => None,
         };
-        let (name, span) = if let Some(property) = property {
+        let (has_shape, span) = if let Some(property) = property {
             (
-                property_bytes(ctx, property),
+                property
+                    .as_expression()
+                    .is_some_and(|expr| static_string_contains_shape(ctx, expr)),
                 property
                     .as_expression()
                     .map_or_else(|| property.span(), |e| e.get_inner_expression().span()),
@@ -109,13 +101,9 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 }
                 _ => continue,
             };
-            (Some(name), node.span())
+            (contains_shape(name), node.span())
         };
-        if name.is_some_and(|name| {
-            name.windows(NEEDLE.len())
-                .any(|part| part.eq_ignore_ascii_case(NEEDLE))
-        }) && reported.insert(span)
-        {
+        if has_shape && reported.insert(span) {
             findings.report(span.start as usize, None);
         }
     }

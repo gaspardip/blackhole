@@ -470,7 +470,7 @@ pub(super) fn resolves_to_global<'a>(
     id.name == name && ctx.semantic.is_reference_to_global_variable(id)
 }
 
-pub(super) use strings::static_string;
+pub(super) use strings::{contains_shape, static_string_contains_shape};
 
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
     match resolve(ctx, expr) {

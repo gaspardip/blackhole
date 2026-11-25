@@ -14,7 +14,10 @@ use oxc::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
-type Fields<'a> = HashMap<JSStr<'a>, &'a Expression<'a>>;
+pub(super) struct Fields<'a> {
+    entries: HashMap<JSStr<'a>, &'a Expression<'a>>,
+    longest_key: usize,
+}
 pub(super) type MemberValues<'a> = RefCell<HashMap<SymbolId, Option<Fields<'a>>>>;
 
 pub(super) fn const_initializer<'a>(
@@ -73,7 +76,8 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
 pub(super) fn value<'a>(
     ctx: &TsCtx<'a>,
     object: &'a Expression<'a>,
-    key: JSStr<'_>,
+    key_len: usize,
+    key: impl FnOnce() -> JSStr<'a>,
 ) -> Option<&'a Expression<'a>> {
     let Expression::Identifier(id) = object.get_inner_expression() else {
         return None;
@@ -84,7 +88,11 @@ pub(super) fn value<'a>(
     let sym = symbol(ctx, id)?;
     let mut cache = ctx.resolution.member_values.borrow_mut();
     let fields = cache.entry(sym).or_insert_with(|| fields(ctx, id, sym));
-    fields.as_ref()?.get(&key).copied()
+    let fields = fields.as_ref()?;
+    if key_len > fields.longest_key {
+        return None;
+    }
+    fields.entries.get(&key()).copied()
 }
 
 fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> Option<Fields<'a>> {
@@ -126,7 +134,11 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         }
         fields.insert(key, &field.value);
     }
-    Some(fields)
+    let longest_key = fields.keys().map(|key| key.len()).max()?;
+    Some(Fields {
+        entries: fields,
+        longest_key,
+    })
 }
 
 pub(super) fn plain_decimal_key<'a>(number: &NumericLiteral<'a>) -> Option<JSStr<'a>> {

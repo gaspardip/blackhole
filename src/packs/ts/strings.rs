@@ -10,6 +10,15 @@ use std::{
     collections::HashMap,
 };
 
+const SHAPE: &[u8; 5] = b"shape";
+const EDGE: usize = SHAPE.len() - 1;
+
+pub(in crate::packs::ts) fn contains_shape(bytes: &[u8]) -> bool {
+    bytes
+        .windows(SHAPE.len())
+        .any(|part| part.eq_ignore_ascii_case(SHAPE))
+}
+
 #[derive(Clone, Copy)]
 enum Parts<'a> {
     Text(JSStr<'a>),
@@ -75,12 +84,52 @@ impl<'a> Parts<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct ShapeMatch {
+    prefix: [u8; EDGE],
+    suffix: [u8; EDGE],
+    found: bool,
+}
+
+impl ShapeMatch {
+    fn leaf(bytes: &[u8]) -> Self {
+        let edge = bytes.len().min(EDGE);
+        let mut prefix = [0; EDGE];
+        let mut suffix = [0; EDGE];
+        prefix[..edge].copy_from_slice(&bytes[..edge]);
+        suffix[EDGE - edge..].copy_from_slice(&bytes[bytes.len() - edge..]);
+        Self {
+            prefix,
+            suffix,
+            found: contains_shape(bytes),
+        }
+    }
+
+    fn join(self, right: Self, left_len: usize, right_len: usize) -> Self {
+        let mut prefix = self.prefix;
+        let left_edge = left_len.min(EDGE);
+        prefix[left_edge..].copy_from_slice(&right.prefix[..EDGE - left_edge]);
+        let mut suffix = right.suffix;
+        let right_edge = right_len.min(EDGE);
+        suffix[..EDGE - right_edge].copy_from_slice(&self.suffix[right_edge..]);
+        let mut boundary = [0; 2 * EDGE];
+        boundary[..EDGE].copy_from_slice(&self.suffix);
+        boundary[EDGE..].copy_from_slice(&right.prefix);
+        Self {
+            prefix,
+            suffix,
+            found: self.found || right.found || contains_shape(&boundary),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct Fold<'a> {
     parts: Parts<'a>,
     len: usize,
     selector: bool,
     starts_low: bool,
     ends_high: bool,
+    shape: ShapeMatch,
 }
 
 impl<'a> Fold<'a> {
@@ -92,6 +141,7 @@ impl<'a> Fold<'a> {
             selector: true,
             starts_low: matches!(bytes, [0xed, 0xb0..=0xbf, _, ..]),
             ends_high: matches!(bytes, [.., 0xed, 0xa0..=0xaf, _]),
+            shape: ShapeMatch::leaf(bytes),
         }
     }
 
@@ -105,6 +155,8 @@ impl<'a> Fold<'a> {
             selector: self.selector && right.selector,
             starts_low: self.starts_low || (self.len == 0 && right.starts_low),
             ends_high: right.ends_high || (right.len == 0 && self.ends_high),
+            // Surrogate pairing cannot add or remove an ASCII match.
+            shape: self.shape.join(right.shape, self.len, right.len),
         })
     }
 }
@@ -166,7 +218,8 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                                     Step::Visit(&m.expression),
                                 ]);
                             } else if let Some(key) = member.static_property_name()
-                                && let Some(value) = member_values::value(ctx, member.object(), key)
+                                && let Some(value) =
+                                    member_values::value(ctx, member.object(), key.len(), || key)
                             {
                                 copy(&mut pending, id, value, false);
                             }
@@ -194,16 +247,17 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                 (id, value)
             }
             Step::Select(id, object, key) => {
-                let key = if let Expression::NumericLiteral(number) = key.get_inner_expression() {
+                let value = if let Expression::NumericLiteral(number) = key.get_inner_expression() {
                     member_values::plain_decimal_key(number)
+                        .and_then(|key| member_values::value(ctx, object, key.len(), || key))
                 } else {
                     cache[&key.node_id()]
                         .filter(|key| key.selector)
-                        .map(|key| key.parts.text(ctx))
+                        .and_then(|key| {
+                            member_values::value(ctx, object, key.len, || key.parts.text(ctx))
+                        })
                 };
-                if let Some(key) = key
-                    && let Some(value) = member_values::value(ctx, object, key)
-                {
+                if let Some(value) = value {
                     copy(&mut pending, id, value, false);
                 }
                 continue;
@@ -214,9 +268,9 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
     cache[&expr.node_id()]
 }
 
-pub(in crate::packs::ts) fn static_string<'a>(
+pub(in crate::packs::ts) fn static_string_contains_shape<'a>(
     ctx: &TsCtx<'a>,
     expr: &'a Expression<'a>,
-) -> Option<JSStr<'a>> {
-    Some(fold(ctx, expr)?.parts.text(ctx))
+) -> bool {
+    fold(ctx, expr).is_some_and(|value| value.shape.found)
 }

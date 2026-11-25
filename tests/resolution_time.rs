@@ -485,3 +485,26 @@ fn long_typeof_paths_scale_linearly() {
         "{small:?} {large:?}"
     );
 }
+
+#[test]
+fn repeated_long_computed_keys_scale_linearly() {
+    let [small, large] = [2_000, 12_000].map(|n| {
+        let mut text = format!("const prefix = '{}';\n", "x".repeat(n));
+        text.push_str(&"consume({ [prefix + '-id']: 0 });\n".repeat(n));
+        text.push_str("consume({ [prefix + 's' + 'Ha' + 'Pe']: 0 });\n");
+        let start = Instant::now();
+        let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].rule, hits[0].line),
+            ("ts/no-shape-in-symbol-names", n + 2)
+        );
+        elapsed
+    });
+    eprintln!("long computed keys: 2000 {small:?}, 12000 {large:?}");
+    assert!(
+        large < small * 8 + Duration::from_millis(25),
+        "{small:?} {large:?}"
+    );
+}
