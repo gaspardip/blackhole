@@ -173,6 +173,7 @@ fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {
         AstKind::StaticMemberExpression(m) => &m.object,
         AstKind::ComputedMemberExpression(m) => &m.object,
         AstKind::PrivateFieldExpression(m) => &m.object,
+        AstKind::JSXMemberExpression(m) => return m.object.span() == child,
         _ => return false,
     };
     if object.get_inner_expression().span() != child {

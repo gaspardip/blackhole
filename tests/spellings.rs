@@ -1218,6 +1218,27 @@ fn numeric_member_selectors_use_plain_safe_decimal_keys() {
 }
 
 #[test]
+fn jsx_member_tags_keep_const_member_values() {
+    let mut missing = Vec::new();
+    for tag in [
+        "<UI.Section />",
+        "<UI.Components.Section></UI.Components.Section>",
+    ] {
+        let source = format!(
+            "const Panel = () => <section />;\nconst UI = {{ Section: Panel, key: 'userShape' }};\nconst view = {tag};\nconst value = {{ [UI.key]: 1 }};"
+        );
+        check_file_spelling(
+            &mut missing,
+            tag,
+            "no-shape-in-symbol-names",
+            ("case.tsx", &source),
+            source.find("UI.key"),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
 fn type_only_exports_keep_const_member_values() {
     let mut missing = Vec::new();
     for (export, reports) in [
