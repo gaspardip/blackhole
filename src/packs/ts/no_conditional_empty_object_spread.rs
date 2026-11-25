@@ -18,7 +18,7 @@ pub(crate) const RULE: Rule = Rule {
     family: Family::Slop,
     provenance: "Port of anti-slop no-conditional-empty-object-spread.",
     fix: "Build the object first and add the optional property only when it is present.",
-    run: Run::TsConservative(check),
+    run: Run::Ts(check),
 };
 
 #[derive(Clone, Copy)]

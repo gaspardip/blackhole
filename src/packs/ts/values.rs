@@ -33,41 +33,22 @@ pub(crate) struct Resolution<'a> {
     array_callbacks: OnceCell<HashMap<oxc::span::Span, Vec<Rc<Invocation<'a>>>>>,
     pub(super) named_callbacks:
         OnceCell<HashMap<oxc::syntax::node::NodeId, Vec<super::test_context::CallbackSite<'a>>>>,
-    unreadable: Rc<OnceCell<HashSet<SymbolId>>>,
+    unreadable: OnceCell<HashSet<SymbolId>>,
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
-    conservative: bool,
-    member_values: Rc<member_values::MemberValues<'a>>,
-    eval_mention: Rc<OnceCell<bool>>,
+    member_values: member_values::MemberValues<'a>,
+    eval_mention: OnceCell<bool>,
     has_with: Rc<OnceCell<bool>>,
-    with_bodies: Rc<OnceCell<Vec<bool>>>,
-    under_with_statement: Rc<OnceCell<Vec<bool>>>,
+    with_bodies: OnceCell<Vec<bool>>,
+    under_with_statement: OnceCell<Vec<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
-    written: Rc<OnceCell<HashSet<SymbolId>>>,
-    pub(super) named_exports: Rc<OnceCell<super::local_alias::NamedExports>>,
+    written: OnceCell<HashSet<SymbolId>>,
+    pub(super) named_exports: OnceCell<super::local_alias::NamedExports>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
-    strings: Rc<strings::StringCache>,
+    strings: strings::StringCache,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
-impl Resolution<'_> {
-    pub(crate) fn conservative(&self) -> Self {
-        Self {
-            conservative: true,
-            member_values: Rc::clone(&self.member_values),
-            eval_mention: Rc::clone(&self.eval_mention),
-            has_with: Rc::clone(&self.has_with),
-            unreadable: Rc::clone(&self.unreadable),
-            with_bodies: Rc::clone(&self.with_bodies),
-            under_with_statement: Rc::clone(&self.under_with_statement),
-            written: Rc::clone(&self.written),
-            named_exports: Rc::clone(&self.named_exports),
-            strings: Rc::clone(&self.strings),
-            ..Self::default()
-        }
-    }
-}
-
 pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.has_with.get_or_init(|| {
         let scoping = ctx.semantic.scoping();
@@ -165,7 +146,7 @@ pub(super) fn declaration<'a>(
 ) -> Option<AstKind<'a>> {
     let scope = ctx.semantic.scoping();
     let symbol = symbol(ctx, id)?;
-    if ctx
+    (!ctx
         .resolution
         .written
         .get_or_init(|| {
@@ -175,14 +156,9 @@ pub(super) fn declaration<'a>(
                 .collect()
         })
         .contains(&symbol)
-        || unreadable(ctx, symbol)
-    {
-        return None;
-    }
-    scope
-        .symbol_redeclarations(symbol)
-        .is_empty()
-        .then(|| ctx.semantic.symbol_declaration(symbol).kind())
+        && !unreadable(ctx, symbol)
+        && scope.symbol_redeclarations(symbol).is_empty())
+    .then(|| ctx.semantic.symbol_declaration(symbol).kind())
 }
 
 pub(super) fn initializer<'a>(
@@ -478,17 +454,18 @@ pub(super) fn resolve<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> &'a Expr
     let mut value = binding_value(ctx, expr);
     let mut seen = HashSet::new();
     while let Some(member) = value.get_member_expr() {
-        let next = if ctx.resolution.conservative {
-            member_values::value(ctx, member)
-        } else {
-            member.static_property_name().and_then(|key| {
-                let key = key.as_str()?;
-                projection(ctx, member.object(), key)
-                    .map(|p| &p.value)
-                    .or_else(|| instance_field(ctx, member.object(), key))
-            })
+        let Some(key) = member
+            .static_property_name()
+            .and_then(oxc::str::JSStr::as_str)
+        else {
+            break;
         };
-        let Some(next) = next else { break };
+        let Some(next) = projection(ctx, member.object(), key)
+            .map(|p| &p.value)
+            .or_else(|| instance_field(ctx, member.object(), key))
+        else {
+            break;
+        };
         if !seen.insert(next.span()) {
             break;
         }
@@ -526,7 +503,9 @@ pub(super) use strings::{contains_shape, static_string_contains_shape};
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
     match resolve(ctx, expr) {
         Expression::StringLiteral(s) => s.value.as_str(),
-        Expression::TemplateLiteral(t) => t.single_quasi()?.as_str(),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
+            t.quasis.first()?.value.cooked?.as_str()
+        }
         _ => None,
     }
 }
@@ -554,13 +533,7 @@ impl<'a> MemberKeys<'_, 'a> {
     }
     pub(super) fn read_kind(&self, member: oxc::ast::MemberExpressionKind<'a>) -> Option<&'a str> {
         match (self, member) {
-            (Self(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => {
-                if ctx.resolution.conservative {
-                    member_values::selector_key(ctx, &m.expression)?.as_str()
-                } else {
-                    literal(ctx, &m.expression)
-                }
-            }
+            (Self(ctx), oxc::ast::MemberExpressionKind::Computed(m)) => literal(ctx, &m.expression),
             (_, m) => m.static_property_name()?.as_str(),
         }
     }
@@ -594,14 +567,6 @@ pub(super) fn origin_path<'a>(
     ctx: &TsCtx<'a>,
     expr: &'a Expression<'a>,
 ) -> Option<(Origin, Vec<&'a str>)> {
-    bounded_origin_path(ctx, expr, usize::MAX)
-}
-
-fn bounded_origin_path<'a>(
-    ctx: &TsCtx<'a>,
-    expr: &'a Expression<'a>,
-    max_members: usize,
-) -> Option<(Origin, Vec<&'a str>)> {
     let mut origin = Origin::Global;
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
@@ -612,9 +577,6 @@ fn bounded_origin_path<'a>(
             return None;
         }
         if let Some((object, key)) = receiver(ctx, expr) {
-            if parts.len() == max_members {
-                return None;
-            }
             parts.push(key);
             expr = object;
             continue;
@@ -890,15 +852,14 @@ fn invocation<'a>(
     let mut args = args();
     let mut intrinsic_targets = Vec::new();
     let mut seen = HashSet::new();
-    loop {
+    let path = loop {
+        let parts = path(ctx, callee);
+
         if !seen.insert(callee.span()) {
-            break;
+            break parts;
         }
-        // Intrinsic names are short, so each call or apply peels only a bounded prefix.
-        let intrinsic = bounded_origin_path(ctx, callee, 4)
-            .filter(|(origin, _)| *origin == Origin::Global)
-            .map(|(_, parts)| parts);
-        if intrinsic.as_deref() == Some(&["Function", "prototype", "call", "call"])
+        if parts.as_deref() == Some(&["Function", "prototype", "call", "call"])
+            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
             && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
         {
             intrinsic_targets.push(target.span());
@@ -912,7 +873,7 @@ fn invocation<'a>(
         {
             args.prepend(&c.arguments);
             let bound_this = args.next(ctx, false).and_then(|slot| slot.0);
-            if bounded_origin_path(ctx, m.object(), 3).is_some_and(|(origin, path)| {
+            if origin_path(ctx, m.object()).is_some_and(|(origin, path)| {
                 origin == Origin::Global && path == ["Function", "prototype", "call"]
             }) && let Some(target) = bound_this
             {
@@ -924,7 +885,8 @@ fn invocation<'a>(
             }
             continue;
         }
-        if intrinsic.as_deref() == Some(&["Reflect", "apply"])
+        if parts.as_deref() == Some(&["Reflect", "apply"])
+            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
             && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
         {
             args.next(ctx, false);
@@ -934,7 +896,7 @@ fn invocation<'a>(
             continue;
         }
         let Some(m) = callee.get_member_expr() else {
-            break;
+            break parts;
         };
         match MemberKeys(ctx).read(m) {
             Some("call") => {
@@ -944,14 +906,14 @@ fn invocation<'a>(
                 args.next(ctx, false);
                 args = Arguments::array(args.next(ctx, false).and_then(|slot| slot.0));
             }
-            _ => break,
+            _ => break parts,
         }
         callee = resolve(ctx, m.object());
-    }
+    };
     let (args, unreadable_args) = args.finish(ctx);
     let result = Rc::new(Invocation {
         callee,
-        path: path(ctx, callee),
+        path,
         unreadable_args,
         template_arg,
         intrinsic_targets,

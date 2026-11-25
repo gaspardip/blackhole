@@ -29,7 +29,6 @@ pub struct Rule {
 pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
-    TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     ParseError,
 }
 
@@ -223,14 +222,13 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     text: &str,
-    parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
+    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
-    let error = parsed.as_ref().err().copied();
-    let mut ts = parsed.ok().flatten();
+    let ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
         text,
-        comments: ts.as_ref().map(|ts| ts.comments),
+        comments: ts.map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
     for rule in rules {
@@ -238,20 +236,12 @@ fn collect<'r>(
         match rule.run {
             Run::File(check) => check(&ctx, &mut findings),
             Run::Ts(check) => {
-                if let Some(ts) = ts.as_deref() {
+                if let Some(ts) = ts {
                     check(ts, &mut findings);
-                }
-            }
-            Run::TsConservative(check) => {
-                if let Some(ts) = ts.as_deref_mut() {
-                    let conservative = ts.resolution.conservative();
-                    let normal = std::mem::replace(&mut ts.resolution, conservative);
-                    check(ts, &mut findings);
-                    ts.resolution = normal;
                 }
             }
             Run::ParseError => {
-                if let Some((at, message)) = error {
+                if let Err((at, message)) = parsed {
                     findings.report(*at, Some(message));
                 }
             }
@@ -274,8 +264,8 @@ fn parsed_hits<'r>(
             .stack_size(STACK_BYTES)
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
-                let mut ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
+                let ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&ts))))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()

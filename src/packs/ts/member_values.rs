@@ -49,20 +49,6 @@ impl<'a> MemberValues<'a> {
     }
 }
 
-pub(super) fn selector_key<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<JSStr<'a>> {
-    match unwrapped(expr) {
-        Expression::Identifier(id) => literal_key(unwrapped(const_initializer(ctx, id)?)),
-        expr => direct_selector_key(expr),
-    }
-}
-
-fn direct_selector_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
-    match expr {
-        Expression::NumericLiteral(number) => plain_decimal_key(number),
-        literal => literal_key(literal),
-    }
-}
-
 fn literal_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
     match expr {
         Expression::StringLiteral(s) => Some(s.value),
