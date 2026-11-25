@@ -28,7 +28,7 @@ impl<'a> MemberValues<'a> {
     fn key_id(&self, key: JSStr<'a>) -> usize {
         let mut keys = self.keys.borrow_mut();
         let next = keys.len();
-        // Intern by value so repeated reads never hash or compare the string again.
+        // Intern by value so reads through one const alias hash its string once.
         *keys.entry(key).or_insert(next)
     }
 
@@ -45,14 +45,15 @@ impl<'a> MemberValues<'a> {
             .selectors
             .borrow_mut()
             .entry(literal.node_id())
-            .or_insert_with(|| {
-                let key = match unwrapped(literal) {
-                    Expression::StringLiteral(s) => s.value,
-                    Expression::TemplateLiteral(t) => t.single_quasi()?,
-                    _ => return None,
-                };
-                Some(self.key_id(key))
-            })
+            .or_insert_with(|| literal_key(unwrapped(literal)).map(|key| self.key_id(key)))
+    }
+}
+
+fn literal_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
+    match expr {
+        Expression::StringLiteral(s) => Some(s.value),
+        Expression::TemplateLiteral(t) => t.single_quasi(),
+        _ => None,
     }
 }
 
@@ -133,13 +134,16 @@ pub(super) fn value<'a>(
     }
     let sym = symbol(ctx, id)?;
     let members = &ctx.resolution.member_values;
+    let mut cache = members.owners.borrow_mut();
+    let fields = cache
+        .entry(sym)
+        .or_insert_with(|| fields(ctx, id, sym))
+        .as_ref()?;
     let key = match member {
         MemberExpression::ComputedMemberExpression(m) => members.selector(ctx, &m.expression)?,
         _ => members.key_id(member.static_property_name()?),
     };
-    let mut cache = members.owners.borrow_mut();
-    let fields = cache.entry(sym).or_insert_with(|| fields(ctx, id, sym));
-    fields.as_ref()?.get(&key).copied()
+    fields.get(&key).copied()
 }
 
 fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> Option<Fields<'a>> {
@@ -164,11 +168,7 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
             return None;
         }
         let key = if field.computed {
-            match field.key.as_expression()?.get_inner_expression() {
-                Expression::StringLiteral(key) => key.value,
-                Expression::TemplateLiteral(key) => key.single_quasi()?,
-                _ => return None,
-            }
+            literal_key(field.key.as_expression()?.get_inner_expression())?
         } else {
             match &field.key {
                 PropertyKey::BigIntLiteral(_) => return None,
