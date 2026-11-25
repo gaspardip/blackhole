@@ -73,6 +73,14 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 AstKind::JSXIdentifier(n) => match nodes.parent_kind(id) {
                     AstKind::JSXMemberExpression(m) if m.property.span == n.span => continue,
                     AstKind::JSXAttribute(a) if a.name.span() == n.span => continue,
+                    AstKind::JSXNamespacedName(_)
+                        if matches!(
+                            nodes.parent_kind(nodes.parent_id(id)),
+                            AstKind::JSXAttribute(_)
+                        ) =>
+                    {
+                        continue;
+                    }
                     _ => n.name.as_bytes(),
                 },
                 AstKind::LabelIdentifier(n) => n.name.as_bytes(),
