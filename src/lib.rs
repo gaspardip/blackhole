@@ -73,32 +73,24 @@ const MISPLACED: &str = ".blackhole must be a directory";
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
     let scan = scan(&files::root()?, paths, output)?;
-    let stale = report_stale(&scan.stale, &scan.actual, output)?;
-    Ok(scan.over || stale)
+    report_stale(&scan.stale, &scan.actual, output)?;
+    Ok(scan.over || !scan.stale.is_empty())
 }
 
 fn report_stale(
     stale: &ledger::Counts,
     actual: &ledger::Counts,
     output: &mut impl Write,
-) -> io::Result<bool> {
-    let mut reported = false;
+) -> io::Result<()> {
     for (key, allowed) in stale {
         let (rule, path) = key;
-        if engine::registry()
-            .iter()
-            .any(|r| r.gate == engine::Gate::Advisory && r.id == rule)
-        {
-            continue;
-        }
         let found = actual.get(key).copied().unwrap_or(0);
         writeln!(
             output,
             "{path} {rule}: ledger allows {allowed}, found {found}; run blackhole ledger"
         )?;
-        reported = true;
     }
-    Ok(reported)
+    Ok(())
 }
 
 /// Regenerates the repository ledger within its existing allowances.
@@ -111,14 +103,18 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
     let root = files::root()?;
     let _lock = files::lock(&root)?;
     let scan = scan(&root, &[], output)?;
-    if !scan.over && !scan.stale.is_empty() {
+    if !scan.over
+        && let Some(bytes) = scan.ledger_bytes
+    {
         let mut shrunk = scan.base;
         shrunk.retain(|key, n| {
             *n = (*n).min(scan.actual.get(key).copied().unwrap_or(0));
             *n > 0
         });
-        // A stale row means the ledger was read, so the process is inside the directory.
-        replace("ledger", &ledger::write(&shrunk)?)?;
+        let contents = ledger::write(&shrunk)?;
+        if contents.as_bytes() != bytes {
+            replace("ledger", &contents)?;
+        }
     }
     Ok(scan.over)
 }
@@ -159,6 +155,7 @@ fn replace(name: &str, contents: &str) -> io::Result<()> {
 }
 
 struct Scan {
+    ledger_bytes: Option<Vec<u8>>,
     base: ledger::Counts,
     actual: ledger::Counts,
     over: bool,
@@ -170,7 +167,8 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     let (mut names, selection) = files::list(root, paths)?;
     let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     let entered = enter(root)?;
-    let base = ledger::load(policy(entered, "ledger")?)?;
+    let ledger_bytes = policy(entered, "ledger")?;
+    let base = ledger::load(ledger_bytes.as_deref())?;
     let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
     // A path with no file left is still a selection while the ledger has a row under it. A path that holds the repository would match every file, so it is not one.
     for chosen in &selection {
@@ -199,6 +197,7 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     }
     report(&findings, &over, output)?;
     Ok(Scan {
+        ledger_bytes,
         base,
         actual,
         over: !over.is_empty(),
@@ -228,8 +227,9 @@ fn report(
     let findings: Vec<_> = findings
         .iter()
         .filter(|f| {
+            // Advisory findings need output even when there is no overage.
             f.gate == engine::Gate::Advisory
-                || (!over.is_empty() && over.contains_key(&(f.rule.to_owned(), f.path.clone())))
+                || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
         })
         .collect();
     for f in &findings {

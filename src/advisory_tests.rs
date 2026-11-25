@@ -20,17 +20,19 @@ const FINDING: &str = "advice.txt:1:1 test/advisory [advisory] test marker\n\
                        test/advisory Remove the test marker.\n";
 
 fn git(args: &[&str]) {
-    let output = crate::git::command()
-        .args([
-            "-c",
-            "user.name=fixture",
-            "-c",
-            "user.email=fixture@example.org",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
+    crate::git::output(
+        crate::git::command()
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.org",
+            ])
+            .args(args),
+    )
+    .unwrap();
 }
 
 fn in_repo(test: impl FnOnce()) {
@@ -69,20 +71,14 @@ fn legacy_ledger() {
 #[test]
 fn check_reports_advice_without_failing() {
     in_repo(|| {
-        let mut out = Vec::new();
-        let red = check(&[], &mut out).unwrap();
+        let assert_reports_advice = || {
+            let mut out = Vec::new();
+            let red = check(&[], &mut out).unwrap();
+            assert_eq!((red, from_utf8(&out).unwrap()), (false, FINDING));
+        };
+        assert_reports_advice();
         legacy_ledger();
-        let mut with_ledger = Vec::new();
-        let legacy_red = check(&[], &mut with_ledger).unwrap();
-        assert_eq!(
-            (
-                red,
-                from_utf8(&out).unwrap(),
-                legacy_red,
-                from_utf8(&with_ledger).unwrap()
-            ),
-            (false, FINDING, false, FINDING)
-        );
+        assert_reports_advice();
     });
 }
 
@@ -91,22 +87,18 @@ fn ci_reports_advice_without_failing() {
     in_repo(|| {
         git(&["add", "-A"]);
         git(&["commit", "-qm", "advice"]);
-        let mut out = Vec::new();
-        let red = ci::run("HEAD", "HEAD", None, None, &mut out).unwrap();
         legacy_ledger();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "legacy ledger"]);
-        let mut with_ledger = Vec::new();
-        let legacy_red = ci::run("HEAD", "HEAD", None, None, &mut with_ledger).unwrap();
-        assert_eq!(
-            (
-                red,
-                from_utf8(&out).unwrap(),
-                legacy_red,
-                from_utf8(&with_ledger).unwrap()
-            ),
-            (false, FINDING, false, FINDING)
-        );
+        for (base, head) in [("HEAD^", "HEAD^"), ("HEAD", "HEAD"), ("HEAD^", "HEAD")] {
+            let mut out = Vec::new();
+            let red = ci::run(base, head, None, None, &mut out).unwrap();
+            assert_eq!(
+                (red, from_utf8(&out).unwrap()),
+                (false, FINDING),
+                "{base} to {head}"
+            );
+        }
     });
 }
 
@@ -126,6 +118,22 @@ fn ledger_leaves_new_advice_unrecorded_and_drops_old_allowances() {
                 fs::read_to_string(ledger).unwrap().as_str()
             ),
             (false, false, HEADER)
+        );
+    });
+}
+
+#[test]
+fn advisory_rules_cannot_receive_objections() {
+    in_repo(|| {
+        let object_error =
+            object(RULE.id.into(), "advice.txt".into(), Some("reason"), false).unwrap_err();
+        let today = "2026-11-18".parse().unwrap();
+        let row = b"test/advisory\tadvice.txt\t1\t2026-11-18\t-\treason\n";
+        let parse_error = objections::parse(row, today).unwrap_err();
+        assert_eq!(object_error.to_string(), "rule cannot be objected to");
+        assert_eq!(
+            parse_error.to_string(),
+            "objections line 1: invalid rule or path"
         );
     });
 }

@@ -158,7 +158,7 @@ fn decode(bytes: &[u8]) -> (String, Option<usize>) {
 pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
     rules
         .iter()
-        .any(|r| r.id == id && !matches!(r.run, Run::ParseError))
+        .any(|r| r.id == id && r.gate == Gate::Blocking && !matches!(r.run, Run::ParseError))
 }
 
 fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {

@@ -1,4 +1,4 @@
-use crate::engine::{Finding, Gate, Rule, registry};
+use crate::engine::{Finding, Gate, Rule, Run, registry};
 use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
@@ -16,6 +16,7 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         ));
     }
     let mut rows = Counts::new();
+    let mut previous = None;
     for (i, raw) in lines.enumerate() {
         let error = |reason| {
             io::Error::new(
@@ -33,25 +34,29 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         else {
             return Err(error("expected three fields"));
         };
-        if !crate::engine::can_allow(rules, rule) {
-            return Err(error("unknown or prohibited rule"));
-        }
+        let rule = rules
+            .iter()
+            .find(|r| r.id == rule && !matches!(r.run, Run::ParseError))
+            .ok_or_else(|| error("unknown or prohibited rule"))?;
         let count = count_of(count).ok_or_else(|| error("invalid count"))?;
         if invalid_path(path) {
             return Err(error("invalid path"));
         }
-        let key = (rule.to_owned(), path.to_owned());
-        if rows.last_key_value().is_some_and(|(prev, _)| prev >= &key) {
+        let key = (rule.id, path);
+        if previous.is_some_and(|prev| prev >= key) {
             return Err(error("expected strictly increasing keys"));
         }
-        rows.insert(key, count);
+        previous = Some(key);
+        if rule.gate == Gate::Blocking {
+            rows.insert((rule.id.to_owned(), path.to_owned()), count);
+        }
     }
     Ok(rows)
 }
 
 /// A repository without a ledger allows nothing, which is what an empty one says.
-pub(crate) fn load(bytes: Option<Vec<u8>>) -> io::Result<Counts> {
-    bytes.map_or_else(|| Ok(Counts::new()), |bytes| parse(&bytes, registry()))
+pub(crate) fn load(bytes: Option<&[u8]>) -> io::Result<Counts> {
+    bytes.map_or_else(|| Ok(Counts::new()), |bytes| parse(bytes, registry()))
 }
 
 // A count has one spelling, so a file has one spelling too.

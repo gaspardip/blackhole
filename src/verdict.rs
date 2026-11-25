@@ -202,8 +202,9 @@ pub(crate) fn judge_with_guard(i: &Inputs<'_>, guard: &GlobSet) -> io::Result<Ve
     }
     let actual = ledger::counts(i.findings);
     let stale = ledger::excess(head, &actual);
-    if crate::report_stale(&stale, &actual, &mut v.lines)? {
+    if !stale.is_empty() {
         v.gates.insert("ledger");
+        crate::report_stale(&stale, &actual, &mut v.lines)?;
     }
     let over = ledger::excess(&actual, &objections::allowances(&allowed, &rows, i.today));
     if !over.is_empty() {
