@@ -21,6 +21,7 @@ pub(super) struct MemberValues<'a> {
     owners: RefCell<HashMap<SymbolId, Option<Fields<'a>>>>,
     keys: RefCell<HashMap<JSStr<'a>, usize>>,
     selectors: RefCell<HashMap<NodeId, Option<usize>>>,
+    target_ancestors: RefCell<HashMap<NodeId, bool>>,
 }
 
 impl<'a> MemberValues<'a> {
@@ -196,11 +197,11 @@ fn plain_decimal_key<'a>(number: &NumericLiteral<'a>) -> Option<JSStr<'a>> {
 fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     let nodes = ctx.semantic.nodes();
     let mut child = nodes.kind(id).span();
-    let mut parents = nodes.ancestor_kinds(id);
-    let Some(member) = parents.find(|kind| !transparent(kind)) else {
+    let mut parents = nodes.ancestors(id);
+    let Some(member) = parents.find(|node| !transparent(&node.kind())) else {
         return false;
     };
-    let object = match member {
+    let object = match member.kind() {
         AstKind::StaticMemberExpression(m) => &m.object,
         AstKind::ComputedMemberExpression(m) => &m.object,
         AstKind::PrivateFieldExpression(m) => &m.object,
@@ -210,27 +211,38 @@ fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     if object.get_inner_expression().span() != child {
         return false;
     }
-    child = member.span();
-    for parent in parents {
-        match parent {
-            AstKind::AssignmentExpression(a) => return a.left.span() != child,
-            AstKind::UpdateExpression(u) => return u.argument.span() != child,
+    child = member.kind().span();
+    let mut cache = ctx.resolution.member_values.target_ancestors.borrow_mut();
+    let mut path = Vec::new();
+    let readonly = loop {
+        let Some(parent) = parents.next() else {
+            break true;
+        };
+        let kind = parent.kind();
+        match kind {
+            AstKind::AssignmentExpression(a) => break a.left.span() != child,
+            AstKind::UpdateExpression(u) => break u.argument.span() != child,
             AstKind::UnaryExpression(u) => {
-                return !u.operator.is_delete() || u.argument.span() != child;
+                break !u.operator.is_delete() || u.argument.span() != child;
             }
-            AstKind::ForInStatement(f) => return f.left.span() != child,
-            AstKind::ForOfStatement(f) => return f.left.span() != child,
-            AstKind::CallExpression(c) => return c.callee.span() != child,
-            AstKind::TaggedTemplateExpression(t) => return t.tag.span() != child,
+            AstKind::ForInStatement(f) => break f.left.span() != child,
+            AstKind::ForOfStatement(f) => break f.left.span() != child,
+            AstKind::CallExpression(c) => break c.callee.span() != child,
+            AstKind::TaggedTemplateExpression(t) => break t.tag.span() != child,
             AstKind::AssignmentTargetPropertyProperty(p) if p.binding.span() == child => {}
             AstKind::AssignmentTargetWithDefault(p) if p.binding.span() == child => {}
             AstKind::ObjectAssignmentTarget(_)
             | AstKind::ArrayAssignmentTarget(_)
             | AstKind::AssignmentTargetRest(_) => {}
             kind if transparent(&kind) => {}
-            _ => return true,
+            _ => break true,
         }
-        child = parent.span();
-    }
-    true
+        if let Some(&readonly) = cache.get(&parent.id()) {
+            break readonly;
+        }
+        path.push(parent.id());
+        child = kind.span();
+    };
+    cache.extend(path.into_iter().map(|node| (node, readonly)));
+    readonly
 }

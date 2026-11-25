@@ -607,6 +607,41 @@ fn varying_concatenated_selectors_scale_linearly() {
 }
 
 #[test]
+fn nested_assignment_targets_scale_linearly_across_owners() {
+    let [small, large] = [2_000, 12_000].map(|n| {
+        let mut text = String::from("const defaults = { key: 'userShape' };\n");
+        for i in 0..n {
+            writeln!(text, "const o{i} = {{ key: 'userShape' }};").unwrap();
+        }
+        text.push_str("([o0.key = defaults.key, ");
+        for i in 1..n {
+            write!(text, "[o{i}.key, ").unwrap();
+        }
+        text.push_str("[]");
+        text.push_str(&"]".repeat(n));
+        text.push_str(" = input);\n");
+        for i in 0..n {
+            writeln!(text, "consume({{ [o{i}.key]: 0 }});").unwrap();
+        }
+        text.push_str("consume({ [defaults.key]: 0 });\n");
+        let start = Instant::now();
+        let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].rule, hits[0].line),
+            ("ts/no-shape-in-symbol-names", 2 * n + 3)
+        );
+        elapsed
+    });
+    eprintln!("nested assignment targets: 2000 {small:?}, 12000 {large:?}");
+    assert!(
+        large < small * 8 + Duration::from_millis(25),
+        "{small:?} {large:?}"
+    );
+}
+
+#[test]
 fn repeated_const_reads_with_an_unrelated_with_scale_linearly() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
