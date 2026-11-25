@@ -14,9 +14,10 @@ fn named_exports(ctx: &TsCtx<'_>) -> HashSet<SymbolId> {
     let mut exported = HashSet::new();
     for node in ctx.semantic.nodes().iter() {
         let value = match node.kind() {
-            AstKind::ExportNamedDeclaration(decl) => {
+            AstKind::ExportNamedDeclaration(decl) if !decl.export_kind.is_type() => {
                 for spec in &decl.specifiers {
-                    if let ModuleExportName::IdentifierReference(local) = &spec.local
+                    if !spec.export_kind.is_type()
+                        && let ModuleExportName::IdentifierReference(local) = &spec.local
                         && let Some(symbol) = ctx
                             .semantic
                             .scoping()

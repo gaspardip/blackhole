@@ -1216,3 +1216,26 @@ fn numeric_member_selectors_use_plain_safe_decimal_keys() {
     }
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
+
+#[test]
+fn type_only_exports_keep_const_member_values() {
+    let mut missing = Vec::new();
+    for (export, reports) in [
+        ("export type { names };", true),
+        ("export { type names };", true),
+        ("export { type names, other };", true),
+        ("export { names, type other };", false),
+    ] {
+        let source = format!(
+            "const names = {{ key: 'userShape' }}; const other = 0;\n{export}\nconsume({{ [names.key]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            export,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names.key").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
