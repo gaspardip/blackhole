@@ -1195,6 +1195,7 @@ fn numeric_member_selectors_use_plain_safe_decimal_keys() {
     for (owner_key, selector, reports) in [
         ("0", "0", true),
         ("123", "(123 as number)", true),
+        ("123", "(sideEffect(), 123)", true),
         ("9007199254740991", "9007199254740991", true),
         ("'9007199254740992'", "9007199254740992", false),
         ("'1000'", "1_000", false),
@@ -1265,13 +1266,25 @@ fn type_only_exports_keep_const_member_values() {
 fn computed_member_selectors_preserve_unicode_keys() {
     let mut missing = Vec::new();
     for (label, selector, reports) in [
-        ("paired surrogates", r"'\uD83D' + '\uDE00'", true),
-        ("lone surrogate", r"'\uD83D' + '!'", true),
+        ("paired surrogates", r"'\uD83D' + '\uDE00'", false),
+        ("lone surrogate", r"'\uD83D' + '!'", false),
         ("incomplete key", r"'\uD83D' + '?'", false),
         ("longer key", r"'\uD83D' + '\uDE00' + '!'", false),
+        ("literal with paired surrogates", "'😀'", true),
+        ("literal with lone surrogate", r"'\uD83D!'", true),
+        (
+            "wrapped template alias",
+            "(sideEffect(), ((key as string) satisfies string)!)",
+            true,
+        ),
+        ("concatenated alias", "joined", false),
+        ("field read", "parts.key", false),
     ] {
         let source = format!(
             r"const names = {{ '😀': 'plain', ['\uD83D\uDE00']: 'userShape', '\uD83D!': 'listShape' }};
+const key = (`😀` as string);
+const joined = '' + key;
+const parts = {{ key }};
 consume({{ [names[{selector}]]: 0 }});"
         );
         check_spelling(

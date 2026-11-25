@@ -42,7 +42,7 @@ pub(crate) struct Resolution<'a> {
     written: OnceCell<HashSet<SymbolId>>,
     pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
-    strings: strings::StringCache<'a>,
+    strings: strings::StringCache,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,

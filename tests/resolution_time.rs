@@ -544,7 +544,7 @@ fn repeated_const_reads_in_nested_blocks_scale_linearly() {
 }
 
 #[test]
-fn repeated_long_computed_selectors_scale_linearly() {
+fn repeated_long_concatenated_selectors_stay_unknown() {
     let [small, large] = [2_000, 16_000].map(|n| {
         let prefix = "x".repeat(n);
         let mut text =
@@ -553,11 +553,53 @@ fn repeated_long_computed_selectors_scale_linearly() {
         let start = Instant::now();
         let hits = run(registry(), [("computed.ts", text.as_bytes())]);
         let elapsed = start.elapsed();
-        assert_eq!(hits.len(), n);
-        assert!(hits.iter().all(|h| h.rule == "ts/no-shape-in-symbol-names"));
+        assert!(hits.is_empty(), "{n}: {} findings", hits.len());
         elapsed
     });
     eprintln!("computed selectors: 2000 {small:?}, 16000 {large:?}");
+    assert!(
+        large < small * 8 + Duration::from_millis(25),
+        "{small:?} {large:?}"
+    );
+}
+
+#[test]
+fn repeated_long_literal_selectors_scale_linearly() {
+    let [small, large] = [8_000, 32_000].map(|n| {
+        let key = "x".repeat(n);
+        let mut text = format!("const key = '{key}'; const names = {{ '{key}': 'id' }};\n");
+        text.push_str(&"consume({ [names[key]]: 0 });\n".repeat(n));
+        let start = Instant::now();
+        let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert!(hits.is_empty(), "{n}: {} findings", hits.len());
+        elapsed
+    });
+    eprintln!("literal selectors: 8000 {small:?}, 32000 {large:?}");
+    assert!(
+        large < small * 6 + Duration::from_millis(25),
+        "{small:?} {large:?}"
+    );
+}
+
+#[test]
+fn varying_concatenated_selectors_scale_linearly() {
+    let [small, large] = [500, 2_000].map(|n| {
+        let key = "x".repeat(2 * (n + 1));
+        let mut text = format!("const names = {{ '{key}': 'id' }};\nconst p0 = 'x';\n");
+        for i in 1..=n {
+            writeln!(text, "const p{i} = p{} + 'x';", i - 1).unwrap();
+        }
+        for i in 1..=n {
+            writeln!(text, "consume({{ [names[p{i} + p{n}]]: 0 }});").unwrap();
+        }
+        let start = Instant::now();
+        let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert!(hits.is_empty(), "{n}: {} findings", hits.len());
+        elapsed
+    });
+    eprintln!("varying concatenated selectors: 500 {small:?}, 2000 {large:?}");
     assert!(
         large < small * 8 + Duration::from_millis(25),
         "{small:?} {large:?}"

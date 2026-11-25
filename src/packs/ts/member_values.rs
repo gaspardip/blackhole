@@ -1,15 +1,11 @@
-use super::{
-    declaration, has_with,
-    strings::{Selector, SelectorTrie},
-    symbol, transparent,
-};
+use super::{declaration, has_with, symbol, transparent, unwrapped};
 use crate::{engine::TsCtx, packs::ts::local_alias::is_local};
 use oxc::{
     ast::{
         AstKind,
         ast::{
-            Expression, IdentifierReference, NumericLiteral, ObjectPropertyKind, PropertyKey,
-            PropertyKind,
+            Expression, IdentifierReference, MemberExpression, NumericLiteral, ObjectPropertyKind,
+            PropertyKey, PropertyKind,
         },
     },
     span::GetSpan,
@@ -18,11 +14,46 @@ use oxc::{
 };
 use std::{cell::RefCell, collections::HashMap};
 
-pub(super) struct Fields<'a> {
-    entries: HashMap<JSStr<'a>, &'a Expression<'a>>,
-    selectors: Option<SelectorTrie<'a>>,
+type Fields<'a> = HashMap<usize, &'a Expression<'a>>;
+
+#[derive(Default)]
+pub(super) struct MemberValues<'a> {
+    owners: RefCell<HashMap<SymbolId, Option<Fields<'a>>>>,
+    keys: RefCell<HashMap<JSStr<'a>, usize>>,
+    selectors: RefCell<HashMap<NodeId, Option<usize>>>,
 }
-pub(super) type MemberValues<'a> = RefCell<HashMap<SymbolId, Option<Fields<'a>>>>;
+
+impl<'a> MemberValues<'a> {
+    fn key_id(&self, key: JSStr<'a>) -> usize {
+        let mut keys = self.keys.borrow_mut();
+        let next = keys.len();
+        // Intern by value so repeated reads never hash or compare the string again.
+        *keys.entry(key).or_insert(next)
+    }
+
+    fn selector(&self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<usize> {
+        let expr = unwrapped(expr);
+        let literal = match expr {
+            Expression::NumericLiteral(number) => {
+                return plain_decimal_key(number).map(|key| self.key_id(key));
+            }
+            Expression::Identifier(id) => const_initializer(ctx, id)?,
+            _ => expr,
+        };
+        *self
+            .selectors
+            .borrow_mut()
+            .entry(literal.node_id())
+            .or_insert_with(|| {
+                let key = match unwrapped(literal) {
+                    Expression::StringLiteral(s) => s.value,
+                    Expression::TemplateLiteral(t) => t.single_quasi()?,
+                    _ => return None,
+                };
+                Some(self.key_id(key))
+            })
+    }
+}
 
 pub(super) fn const_initializer<'a>(
     ctx: &TsCtx<'a>,
@@ -91,20 +122,23 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
 
 pub(super) fn value<'a>(
     ctx: &TsCtx<'a>,
-    object: &'a Expression<'a>,
-    selector: Selector<'a>,
+    member: &'a MemberExpression<'a>,
 ) -> Option<&'a Expression<'a>> {
-    let Expression::Identifier(id) = object.get_inner_expression() else {
+    let Expression::Identifier(id) = member.object().get_inner_expression() else {
         return None;
     };
     if inside_with(ctx, id.node_id.get()) {
         return None;
     }
     let sym = symbol(ctx, id)?;
-    let mut cache = ctx.resolution.member_values.borrow_mut();
+    let members = &ctx.resolution.member_values;
+    let key = match member {
+        MemberExpression::ComputedMemberExpression(m) => members.selector(ctx, &m.expression)?,
+        _ => members.key_id(member.static_property_name()?),
+    };
+    let mut cache = members.owners.borrow_mut();
     let fields = cache.entry(sym).or_insert_with(|| fields(ctx, id, sym));
-    let fields = fields.as_mut()?;
-    selector.find(&fields.entries, &mut fields.selectors)
+    fields.as_ref()?.get(&key).copied()
 }
 
 fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> Option<Fields<'a>> {
@@ -144,15 +178,12 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         if key == "__proto__" {
             return None;
         }
-        fields.insert(key, &field.value);
+        fields.insert(ctx.resolution.member_values.key_id(key), &field.value);
     }
-    (!fields.is_empty()).then_some(Fields {
-        entries: fields,
-        selectors: None,
-    })
+    (!fields.is_empty()).then_some(fields)
 }
 
-pub(super) fn plain_decimal_key<'a>(number: &NumericLiteral<'a>) -> Option<JSStr<'a>> {
+fn plain_decimal_key<'a>(number: &NumericLiteral<'a>) -> Option<JSStr<'a>> {
     let raw = number.raw?;
     let plain_decimal = match raw.as_bytes() {
         [b'0'] => true,
