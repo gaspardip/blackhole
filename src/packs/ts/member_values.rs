@@ -33,26 +33,40 @@ impl<'a> MemberValues<'a> {
     }
 
     fn selector(&self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<usize> {
-        let expr = unwrapped(expr);
-        let cache_node = match expr {
-            Expression::NumericLiteral(_) => {
-                return selector_key(ctx, expr).map(|key| self.key_id(key));
+        let expr = match unwrapped(expr) {
+            Expression::Identifier(id) => {
+                let init = unwrapped(const_initializer(ctx, id)?);
+                if !matches!(
+                    init,
+                    Expression::StringLiteral(_) | Expression::TemplateLiteral(_)
+                ) {
+                    return None;
+                }
+                init
             }
-            Expression::Identifier(id) => const_initializer(ctx, id)?.node_id(),
-            _ => expr.node_id(),
+            expr => expr,
         };
         *self
             .selectors
             .borrow_mut()
-            .entry(cache_node)
-            .or_insert_with(|| selector_key(ctx, expr).map(|key| self.key_id(key)))
+            .entry(expr.node_id())
+            .or_insert_with(|| direct_selector_key(expr).map(|key| self.key_id(key)))
     }
 }
 
-pub(super) fn selector_key<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<JSStr<'a>> {
+pub(in crate::packs::ts) fn selector_key<'a>(
+    ctx: &TsCtx<'a>,
+    expr: &'a Expression<'a>,
+) -> Option<JSStr<'a>> {
     match unwrapped(expr) {
-        Expression::NumericLiteral(number) => plain_decimal_key(number),
         Expression::Identifier(id) => literal_key(unwrapped(const_initializer(ctx, id)?)),
+        expr => direct_selector_key(expr),
+    }
+}
+
+fn direct_selector_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
+    match expr {
+        Expression::NumericLiteral(number) => plain_decimal_key(number),
         literal => literal_key(literal),
     }
 }
@@ -65,7 +79,7 @@ fn literal_key<'a>(expr: &Expression<'a>) -> Option<JSStr<'a>> {
     }
 }
 
-pub(super) fn const_initializer<'a>(
+pub(in crate::packs::ts) fn const_initializer<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<&'a Expression<'a>> {
@@ -88,7 +102,7 @@ pub(super) fn const_initializer<'a>(
     v.init.as_ref()
 }
 
-pub(in crate::packs::ts) fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
+fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     has_eval_mention(ctx) || inside_with(ctx, id)
 }
 

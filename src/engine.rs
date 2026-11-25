@@ -29,6 +29,7 @@ pub struct Rule {
 pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
+    TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     ParseError,
 }
 
@@ -224,29 +225,29 @@ fn collect<'r>(
     text: &str,
     parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
-    let (mut ts, error) = match parsed {
-        Ok(ts) => (ts, None),
-        Err(error) => (None, Some(error)),
-    };
+    let error = parsed.as_ref().err().copied();
+    let mut ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
         text,
         comments: ts.as_ref().map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
-    let mut alternate = ts.as_ref().map(|ts| ts.resolution.conservative());
     for rule in rules {
         let mut findings = Findings::default();
         match rule.run {
             Run::File(check) => check(&ctx, &mut findings),
             Run::Ts(check) => {
-                if let (Some(ts), Some(alternate)) = (ts.as_deref_mut(), alternate.as_mut()) {
-                    let conservative = rule.id == "ts/no-conditional-empty-object-spread";
-                    // Call and object summaries depend on the resolver in use.
-                    if conservative != ts.resolution.conservative {
-                        std::mem::swap(&mut ts.resolution, alternate);
-                    }
+                if let Some(ts) = ts.as_deref() {
                     check(ts, &mut findings);
+                }
+            }
+            Run::TsConservative(check) => {
+                if let Some(ts) = ts.as_deref_mut() {
+                    let conservative = ts.resolution.conservative();
+                    let normal = std::mem::replace(&mut ts.resolution, conservative);
+                    check(ts, &mut findings);
+                    ts.resolution = normal;
                 }
             }
             Run::ParseError => {

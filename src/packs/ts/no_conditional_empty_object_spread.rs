@@ -1,14 +1,11 @@
 use super::{
-    local_alias::is_spread_alias,
-    values::{
-        blocks_identifier_resolution, initializer, outer, possible_immediate_region, symbol,
-        unwrapped,
-    },
+    local_alias::{is_local, is_type_exported},
+    values::{const_initializer, invoked, outer, selector_key, symbol, unwrapped},
 };
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{Expression, ObjectPropertyKind},
+    ast::{Expression, MemberExpression, ObjectPropertyKind},
 };
 use oxc::{
     span::{GetSpan, Span},
@@ -21,7 +18,7 @@ pub(crate) const RULE: Rule = Rule {
     family: Family::Slop,
     provenance: "Port of anti-slop no-conditional-empty-object-spread.",
     fix: "Build the object first and add the optional property only when it is present.",
-    run: Run::Ts(check),
+    run: Run::TsConservative(check),
 };
 
 #[derive(Clone, Copy)]
@@ -31,6 +28,11 @@ enum Destination {
 }
 
 type Climbs = HashMap<NodeId, Option<Destination>>;
+
+fn is_spread_alias(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    // A local type export can keep an empty spread alias observable.
+    is_local(ctx, symbol) && !is_type_exported(ctx, symbol)
+}
 
 fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option<Destination> {
     let nodes = ctx.semantic.nodes();
@@ -87,6 +89,100 @@ fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option
     };
     climbs.extend(path.into_iter().map(|c| (c, found)));
     found
+}
+
+fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) -> bool {
+    let mut id = function.id();
+    let callee = function.span();
+    while let Some(parent) = outer(ctx, id) {
+        match parent {
+            AstKind::CallExpression(call) => {
+                if invoked(ctx, call).callee.span() == callee
+                    || unknown_function_method(ctx, &call.callee, callee)
+                {
+                    return true;
+                }
+            }
+            AstKind::SequenceExpression(_)
+            | AstKind::StaticMemberExpression(_)
+            | AstKind::ComputedMemberExpression(_)
+            | AstKind::ArrayExpression(_)
+            | AstKind::SpreadElement(_) => {}
+            _ => return false,
+        }
+        id = parent.node_id();
+    }
+    false
+}
+
+fn unknown_function_method<'a>(
+    ctx: &TsCtx<'a>,
+    callee: &'a Expression<'a>,
+    function: Span,
+) -> bool {
+    matches!(
+        callee.get_member_expr(),
+        Some(MemberExpression::ComputedMemberExpression(m))
+            if unwrapped(&m.object).span() == function
+                && selector_key(ctx, &m.expression).is_none()
+    )
+}
+
+fn function_region<'a>(
+    ctx: &TsCtx<'a>,
+    function: &oxc::semantic::AstNode<'a>,
+    child: Span,
+) -> Option<NodeId> {
+    let id = function.id();
+    if let AstKind::Function(f) = function.kind()
+        && f.generator
+    {
+        // A generator body runs as it is iterated, apart from the call that binds its parameters.
+        if let Some(body) = f
+            .body
+            .as_ref()
+            .filter(|body| body.span.contains_inclusive(child))
+        {
+            return Some(body.node_id.get());
+        }
+    }
+    (!immediate_call(ctx, function)).then_some(id)
+}
+
+fn possible_immediate_region(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
+    let nodes = ctx.semantic.nodes();
+    let mut child = nodes.kind(id).span();
+    let mut ancestors = nodes.ancestors(id);
+    while let Some(node) = ancestors.next() {
+        let once =
+            |part: Option<oxc::span::Span>| part.is_some_and(|p| p.contains_inclusive(child));
+        let boundary = match node.kind() {
+            AstKind::Decorator(_) => {
+                child = ancestors
+                    .find(|n| matches!(n.kind(), AstKind::Class(_)))?
+                    .span();
+                continue;
+            }
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
+                if let Some(boundary) = function_region(ctx, node, child) {
+                    return Some(boundary);
+                }
+                false
+            }
+            AstKind::PropertyDefinition(p) => {
+                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
+            }
+            AstKind::AccessorProperty(p) => {
+                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
+            }
+            _ => false,
+        };
+        if boundary {
+            return Some(node.id());
+        }
+        child = node.kind().span();
+    }
+    None
 }
 
 fn dependencies(ctx: &TsCtx<'_>, climbs: &mut Climbs, symbol: SymbolId) -> Option<Vec<SymbolId>> {
@@ -157,9 +253,9 @@ impl<'a> Visibility<'a> {
             let Expression::Identifier(id) = expr else {
                 break Some(expr);
             };
-            if blocks_identifier_resolution(ctx, id.node_id.get()) {
+            let Some(next) = const_initializer(ctx, id) else {
                 break None;
-            }
+            };
             let Some(symbol) = symbol(ctx, id).filter(|&binding| is_spread_alias(ctx, binding))
             else {
                 break None;
@@ -171,9 +267,6 @@ impl<'a> Visibility<'a> {
             if !self.harmless(ctx, symbol) {
                 break None;
             }
-            let Some(next) = initializer(ctx, id) else {
-                break None;
-            };
             expr = unwrapped(next);
         };
         self.terminals

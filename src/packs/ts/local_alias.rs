@@ -52,9 +52,8 @@ fn named_exports<'ctx>(ctx: &'ctx TsCtx<'_>) -> &'ctx NamedExports {
     })
 }
 
-pub(super) fn is_spread_alias(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
-    // A local type export can keep an empty spread alias observable.
-    is_local(ctx, symbol) && !named_exports(ctx).types.contains(&symbol)
+pub(super) fn is_type_exported(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    named_exports(ctx).types.contains(&symbol)
 }
 
 pub(super) fn is_local(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
