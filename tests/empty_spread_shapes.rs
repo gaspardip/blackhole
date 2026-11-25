@@ -96,6 +96,17 @@ fn report(cases: &mut Cases, path: &str, branch: &str, ternary: &str, operand: &
 fn literal_and_wrapped_conditionals() {
     let mut cases = Cases::default();
     for (path, wrappers) in [(TS, WRAPPERS), ("case.tsx", &WRAPPERS[..4])] {
+        for &wrapper in wrappers {
+            let inner = wrap(wrapper, "(d ? {} : x)");
+            for outer in conditionals(0) {
+                let operand = wrap(&outer, &inner);
+                cases.check(
+                    path,
+                    &format!("wrapped inner ternary: {operand}"),
+                    &format!("consume({{ ^...{operand} }});"),
+                );
+            }
+        }
         for depth in 0..=2 {
             for ternary in conditionals(depth) {
                 report(&mut cases, path, "{}", &ternary, "VALUE");
@@ -159,6 +170,20 @@ fn const_aliases_and_harmless_uses() {
             }
         }
     }
+    let declaration = "const inner = d ? {} : {};\n";
+    for outer in conditionals(0) {
+        let operand = wrap(&outer, "inner");
+        cases.check(
+            TS,
+            &format!("const-bound ternary in outer arm: {operand}"),
+            &format!("{declaration}consume({{ ^...{operand} }});"),
+        );
+    }
+    cases.check(
+        TS,
+        "wrapped const-bound ternary as spread operand",
+        &format!("{declaration}consume({{ ^...((inner)!) }});"),
+    );
     cases.finish();
 }
 
@@ -184,6 +209,14 @@ fn conditionals_need_an_empty_arm_and_an_object_spread() {
             "argument without a spread",
             &control,
             &format!("consume({ternary});"),
+        );
+    }
+    for (declaration, arm) in [("", "{}"), ("const empty = {};\n", "empty")] {
+        cases.pair(
+            TS,
+            &format!("direct spread of {arm}"),
+            &format!("{declaration}consume({{ ^...(c ? {arm} : x) }});"),
+            &format!("{declaration}consume({{ ...{arm} }});"),
         );
     }
     cases.finish();
@@ -218,10 +251,11 @@ fn observed_aliases_are_silent() {
         );
     }
 
+    // A cycle-only control is impossible because every in-order alias edge points to a later declaration.
     let head = "const empty = {};\nconst left = c ? empty : right;\n";
     cases.pair(
         TS,
-        "alias cycle",
+        "alias cycle and out-of-order read",
         &format!(
             "const empty = {{}};\nconst left = c ? empty : x;\nconst right = left;\n{MARKED_SPREAD}"
         ),
@@ -299,7 +333,7 @@ fn member_reads_are_silent() {
         &format!("{prefix}{member}"),
     );
 
-    // Untouched member reads are already silent, so object uses have no reporting member control.
+    // Reporting controls for owner observations depend on the contract's member-resolution follow-up.
     for (label, observation) in [
         ("write", "p.empty = x;"),
         ("delete", "delete p.empty;"),
@@ -325,8 +359,8 @@ fn dynamic_scope_blocks_aliases_but_keeps_literals() {
     cases.pair(
         path,
         "with body",
-        &format!("{declaration}if (scope) {{ {MARKED_SPREAD} }}"),
-        &format!("{declaration}with (scope) {{ {MARKED_SPREAD} }}"),
+        &format!("{declaration}with (scope) {{ void 0; }}\n{MARKED_SPREAD}"),
+        &format!("{declaration}with (scope) {{ void 0; {MARKED_SPREAD} }}"),
     );
     cases.check(
         path,
@@ -335,6 +369,12 @@ fn dynamic_scope_blocks_aliases_but_keeps_literals() {
             "with (scope) {{ {} }}",
             MARKED_SPREAD.replace("empty", "{}")
         ),
+    );
+    cases.pair(
+        path,
+        "eval mention after the spread",
+        &format!("{declaration}{MARKED_SPREAD}\nvoid other;"),
+        &format!("{declaration}{MARKED_SPREAD}\nvoid eval;"),
     );
     for (path, mention) in [
         (path, "eval(source);"),
