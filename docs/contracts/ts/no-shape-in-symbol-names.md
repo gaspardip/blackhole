@@ -40,8 +40,8 @@ A known string is one of:
 
 An untouched const object is `const o = { ... }` with a plain name, where:
 
-- every property is `key: value` or a method, with no spread, getter,
-  setter or `__proto__` key;
+- every property is `key: value` (shorthand `{ key }` included) or a
+  method, with no spread, getter, setter or `__proto__` key;
 - every key is a name, a string literal or a template literal with no
   substitutions (bracketed or not), or a plain non-negative decimal
   integer below 2^53 written without brackets;
