@@ -477,8 +477,8 @@ function read() { consume({ [^o.key]: 0 }); }"#,
     check_with_scripts(
         &mut failures,
         JS,
-        "const o = { key: 'userShapeInput' }; consume({ [^o.key]: 0 });",
-        [("writer.js", "o.key = 'plain';")],
+        "const o = { key: 'userShapeInput' }; function read() { consume({ [^o.key]: 0 }); }",
+        [("writer.js", "o.key = 'plain'; read();")],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
