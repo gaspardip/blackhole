@@ -12,17 +12,31 @@ if [ "${have}" != "${want}" ]; then
 fi
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-if [ "${BLACKHOLE_SHARED_CPU+x}" = x ]; then
+if [ "${BLACKHOLE_SHARED_CPU:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" != true ]; then
   echo "bin/check: timing tests left to local and CI runs"
-  set -- --lib --bins
-  for file in tests/*.rs; do
-    target=${file##*/}
-    target=${target%.rs}
-    if [ "${target}" != resolution_time ]; then
-      set -- "$@" --test "${target}"
-    fi
-  done
-  cargo test --locked "$@"
+  python3 -I -c '
+import json
+import os
+import subprocess
+import sys
+
+metadata = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"]
+))
+test_targets = [
+    target["name"]
+    for package in metadata["packages"]
+    for target in package["targets"]
+    if "test" in target["kind"] and target["name"] != "resolution_time"
+]
+if not test_targets:
+    sys.exit("bin/check: no integration test targets selected")
+
+command = ["cargo", "test", "--locked", "--lib", "--bins"]
+for target in test_targets:
+    command.extend(["--test", target])
+os.execvp(command[0], command)
+'
   cargo test --locked --doc
 else
   cargo test --locked
