@@ -30,10 +30,11 @@ A known string is one of:
   (`wrapped_computed_names_fold_neutral_aliases` in `tests/spellings.rs`);
 - `o.name`, `o["name"]` or `o[0]`, optional (`o?.name`) or not, reading a
   field of an untouched const object whose value is a known string. The
-  selector is a known string
-  that does not itself come from a field read, or a plain non-negative
-  decimal integer below 2^53
-  (`untouched_const_owners_supply_member_values` in `tests/spellings.rs`);
+  selector is a string literal, a template literal with no substitutions,
+  a reference to a plain-named `const` whose initializer is one of these,
+  or a plain non-negative decimal integer below 2^53, any of them wrapped
+  as below (`untouched_const_owners_supply_member_values` in
+  `tests/spellings.rs`);
 - any of these in parentheses, behind `as`, `!`, `satisfies` or `<T>`, or
   as the last expression of a comma sequence such as `(f(), 'userShape')`.
 
@@ -46,7 +47,7 @@ An untouched const object is `const o = { ... }` with a plain name, where:
   integer below 2^53 written without brackets;
 - the object is not exported at runtime (`export type { o }` does not
   count);
-- every other use of `o` reads a field: `o.x` or `o[...]`, never written,
+- every other use of `o` reads a field: `o.x`, `o[...]` or `<o.X />`, never written,
   deleted, passed, aliased, method-called or named in a `typeof` query.
 
 ## Does not catch
@@ -67,8 +68,9 @@ Anything outside the list above. In particular:
   object is not untouched.
 - An addition with a non-string operand, such as `'userShape' + 1`.
 - An interpolated template such as `` `sha${'pe'}` ``, a call such as
-  `'sha'.concat('pe')`, an enum member value such as `K.A`, and a field
-  read used as a selector, such as `parts[keys.field]` (probes).
+  `'sha'.concat('pe')`, and an enum member value such as `K.A` (probes).
+- A selector built by addition or read from a field, such as
+  `names[prefix + '-']` or `parts[keys.field]`.
 - Cyclic, dynamic or over-budget additions
   (`cyclic_shared_additions_share_failed_folds`,
   `repeated_cyclic_key_prefixes_share_failed_folds`,
