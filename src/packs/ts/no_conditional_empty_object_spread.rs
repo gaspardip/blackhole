@@ -149,23 +149,35 @@ fn function_region<'a>(
     (!immediate_call(ctx, function)).then_some(id)
 }
 
-fn possible_immediate_region(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
+fn possible_immediate_region(
+    ctx: &TsCtx<'_>,
+    regions: &mut HashMap<NodeId, Option<NodeId>>,
+    mut child: NodeId,
+) -> Option<NodeId> {
     let nodes = ctx.semantic.nodes();
-    let mut child = nodes.kind(id).span();
-    let mut ancestors = nodes.ancestors(id);
-    while let Some(node) = ancestors.next() {
-        let once =
-            |part: Option<oxc::span::Span>| part.is_some_and(|p| p.contains_inclusive(child));
+    let mut ancestors = nodes.ancestors(child);
+    let mut path = Vec::new();
+    let region = loop {
+        if let Some(&region) = regions.get(&child) {
+            break region;
+        }
+        path.push(child);
+        let Some(node) = ancestors.next() else {
+            break None;
+        };
+        let child_span = nodes.kind(child).span();
+        let once = |part: Option<Span>| part.is_some_and(|p| p.contains_inclusive(child_span));
         let boundary = match node.kind() {
             AstKind::Decorator(_) => {
-                child = ancestors
-                    .find(|n| matches!(n.kind(), AstKind::Class(_)))?
-                    .span();
+                let Some(class) = ancestors.find(|n| matches!(n.kind(), AstKind::Class(_))) else {
+                    break None;
+                };
+                child = class.id();
                 continue;
             }
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
-                if let Some(boundary) = function_region(ctx, node, child) {
-                    return Some(boundary);
+                if let Some(boundary) = function_region(ctx, node, child_span) {
+                    break Some(boundary);
                 }
                 false
             }
@@ -178,14 +190,20 @@ fn possible_immediate_region(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
             _ => false,
         };
         if boundary {
-            return Some(node.id());
+            break Some(node.id());
         }
-        child = node.kind().span();
-    }
-    None
+        child = node.id();
+    };
+    regions.extend(path.into_iter().map(|node| (node, region)));
+    region
 }
 
-fn dependencies(ctx: &TsCtx<'_>, climbs: &mut Climbs, symbol: SymbolId) -> Option<Vec<SymbolId>> {
+fn dependencies(
+    ctx: &TsCtx<'_>,
+    climbs: &mut Climbs,
+    regions: &mut HashMap<NodeId, Option<NodeId>>,
+    symbol: SymbolId,
+) -> Option<Vec<SymbolId>> {
     let decl = ctx.semantic.symbol_declaration(symbol);
     let scope = ctx.semantic.scoping();
     let mut declared = None;
@@ -194,8 +212,9 @@ fn dependencies(ctx: &TsCtx<'_>, climbs: &mut Climbs, symbol: SymbolId) -> Optio
         let node = scope.get_reference(*r).node_id();
         // Code that runs later may read the binding from above its declaration.
         if ctx.semantic.nodes().kind(node).span().start < decl.span().end
-            && possible_immediate_region(ctx, node)
-                == *declared.get_or_insert_with(|| possible_immediate_region(ctx, decl.id()))
+            && possible_immediate_region(ctx, regions, node)
+                == *declared
+                    .get_or_insert_with(|| possible_immediate_region(ctx, regions, decl.id()))
         {
             return None;
         }
@@ -211,6 +230,7 @@ struct Visibility<'a> {
     terminals: HashMap<SymbolId, Option<&'a Expression<'a>>>,
     known: HashMap<SymbolId, bool>,
     climbs: Climbs,
+    regions: HashMap<NodeId, Option<NodeId>>,
     empty_arms: HashMap<Span, bool>,
 }
 
@@ -232,7 +252,9 @@ impl<'a> Visibility<'a> {
                     }
                     // Cycles stay unknown until every outgoing use has been proved harmless.
                     self.known.insert(id, false);
-                    if let Some(aliases) = dependencies(ctx, &mut self.climbs, id) {
+                    if let Some(aliases) =
+                        dependencies(ctx, &mut self.climbs, &mut self.regions, id)
+                    {
                         stack.push(Visit::Finish(id, aliases.clone()));
                         stack.extend(aliases.into_iter().map(Visit::Enter));
                     }

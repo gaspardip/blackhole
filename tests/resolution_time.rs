@@ -732,3 +732,39 @@ fn plain_writes_under_deep_nesting_scale_linearly() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn early_alias_reads_in_nested_immediate_calls_scale_linearly() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let [small, large] = [500, 2_000].map(|n| {
+                let source = format!(
+                    "function f() {{\n{}{}}}\nconst x = c ? {{}} : {{a: 1}};\n({{...x}});\n",
+                    "(() => { void x;\n".repeat(n),
+                    "})();\n".repeat(n),
+                );
+                best_of_three(|| {
+                    let start = Instant::now();
+                    let hits = run(registry(), [("spread.ts", source.as_bytes())]);
+                    let elapsed = start.elapsed();
+                    assert_eq!(hits.len(), 1);
+                    assert_eq!(
+                        (hits[0].rule, hits[0].line),
+                        ("ts/no-conditional-empty-object-spread", 2 * n + 4)
+                    );
+                    elapsed
+                })
+            });
+            eprintln!(
+                "nested immediate calls with early alias reads: 500 {small:?}, 2000 {large:?}"
+            );
+            assert!(
+                large < small * 6 + Duration::from_millis(25),
+                "{small:?} {large:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
