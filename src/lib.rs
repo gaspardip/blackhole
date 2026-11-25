@@ -263,7 +263,11 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
     let bytes = policy(entered, "objections")?.unwrap_or_default();
     let today = objections::Date::today()?;
     let rows = objections::parse(&bytes, today)?;
-    if !engine::can_allow(engine::registry(), &rule) {
+    // Old rows for a rule that became advisory still parse, but a new one would allow nothing.
+    let advisory = engine::registry()
+        .iter()
+        .any(|r| r.id == rule && r.gate == engine::Gate::Advisory);
+    if advisory || !engine::can_allow(engine::registry(), &rule) {
         return Err(io::Error::other("rule cannot be objected to"));
     }
     let key = (rule, path);

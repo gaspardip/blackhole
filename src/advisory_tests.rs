@@ -123,17 +123,32 @@ fn ledger_leaves_new_advice_unrecorded_and_drops_old_allowances() {
 }
 
 #[test]
-fn advisory_rules_cannot_receive_objections() {
+fn advisory_rules_take_no_new_objections_and_ignore_old_ones() {
     in_repo(|| {
         let object_error =
             object(RULE.id.into(), "advice.txt".into(), Some("reason"), false).unwrap_err();
-        let today = "2026-11-18".parse().unwrap();
-        let row = b"test/advisory\tadvice.txt\t1\t2026-11-18\t-\treason\n";
-        let parse_error = objections::parse(row, today).unwrap_err();
         assert_eq!(object_error.to_string(), "rule cannot be objected to");
+        // A row left from when the rule was blocking must not break any command.
+        fs::create_dir(".blackhole").unwrap();
+        fs::write(
+            ".blackhole/objections",
+            "test/advisory\tadvice.txt\t1\t2026-11-18\t-\treason\n",
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "legacy objection"]);
+        let mut checked = Vec::new();
+        let check_red = check(&[], &mut checked).unwrap();
+        let mut judged = Vec::new();
+        let ci_red = ci::run("HEAD", "HEAD", None, None, &mut judged).unwrap();
         assert_eq!(
-            parse_error.to_string(),
-            "objections line 1: invalid rule or path"
+            (
+                check_red,
+                from_utf8(&checked).unwrap(),
+                ci_red,
+                from_utf8(&judged).unwrap()
+            ),
+            (false, FINDING, false, FINDING)
         );
     });
 }
