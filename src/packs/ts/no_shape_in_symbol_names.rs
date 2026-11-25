@@ -43,13 +43,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             _ => None,
         };
         let (has_shape, span) = if let Some(property) = property {
+            let expression = property.as_expression();
             (
-                property
-                    .as_expression()
-                    .is_some_and(|expr| static_string_contains_shape(ctx, expr)),
-                property
-                    .as_expression()
-                    .map_or_else(|| property.span(), |e| e.get_inner_expression().span()),
+                expression.is_some_and(|expr| static_string_contains_shape(ctx, expr)),
+                expression.map_or_else(|| property.span(), |e| e.get_inner_expression().span()),
             )
         } else {
             let name = match kind {

@@ -542,3 +542,24 @@ fn repeated_const_reads_in_nested_blocks_scale_linearly() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn repeated_long_computed_selectors_scale_linearly() {
+    let [small, large] = [2_000, 16_000].map(|n| {
+        let prefix = "x".repeat(n);
+        let mut text =
+            format!("const prefix = '{prefix}';\nconst names = {{ '{prefix}-': 'userShape' }};\n");
+        text.push_str(&"consume({ [names[prefix + '-']]: 0 });\n".repeat(n));
+        let start = Instant::now();
+        let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), n);
+        assert!(hits.iter().all(|h| h.rule == "ts/no-shape-in-symbol-names"));
+        elapsed
+    });
+    eprintln!("computed selectors: 2000 {small:?}, 16000 {large:?}");
+    assert!(
+        large < small * 8 + Duration::from_millis(25),
+        "{small:?} {large:?}"
+    );
+}

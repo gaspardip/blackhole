@@ -2,13 +2,10 @@ use super::{member_values, unwrapped};
 use crate::engine::TsCtx;
 use oxc::{
     ast::ast::{Expression, MemberExpression},
-    str::{JSStr, JSStrBuilder},
+    str::JSStr,
     syntax::{node::NodeId, operator::BinaryOperator},
 };
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-};
+use std::{cell::RefCell, collections::HashMap, ptr};
 
 const SHAPE: &[u8; 5] = b"shape";
 const EDGE: usize = SHAPE.len() - 1;
@@ -22,12 +19,7 @@ pub(in crate::packs::ts) fn contains_shape(bytes: &[u8]) -> bool {
 #[derive(Clone, Copy)]
 enum Parts<'a> {
     Text(JSStr<'a>),
-    Pair(&'a Pair<'a>),
-}
-
-struct Pair<'a> {
-    children: [Parts<'a>; 2],
-    text: Cell<Option<JSStr<'a>>>,
+    Pair(&'a [Parts<'a>; 2]),
 }
 
 impl<'a> Parts<'a> {
@@ -35,51 +27,111 @@ impl<'a> Parts<'a> {
         match (self, right) {
             (Self::Text(s), _) if s.is_empty() => right,
             (_, Self::Text(s)) if s.is_empty() => self,
-            _ => Self::Pair(ctx.arena.alloc(Pair {
-                children: [self, right],
-                text: Cell::new(None),
-            })),
+            _ => Self::Pair(ctx.arena.alloc([self, right])),
         }
     }
 
-    fn text(self, ctx: &TsCtx<'a>) -> JSStr<'a> {
-        let root = match self {
-            Self::Text(text) => return text,
-            Self::Pair(root) => root,
+    fn identity(self) -> PartId<'a> {
+        match self {
+            Self::Text(text) => PartId::Text(ptr::from_ref(text.as_bytes())),
+            Self::Pair(pair) => PartId::Pair(ptr::from_ref(pair)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum PartId<'a> {
+    Text(*const [u8]),
+    Pair(*const [Parts<'a>; 2]),
+}
+
+pub(super) struct Selector<'a>(Parts<'a>);
+
+impl<'a> Selector<'a> {
+    fn literal(text: JSStr<'a>) -> Self {
+        Self(Parts::Text(text))
+    }
+
+    pub(super) fn find(
+        self,
+        entries: &HashMap<JSStr<'a>, &'a Expression<'a>>,
+        trie: &mut Option<SelectorTrie<'a>>,
+    ) -> Option<&'a Expression<'a>> {
+        match self.0 {
+            Parts::Text(text) => entries.get(&text).copied(),
+            parts @ Parts::Pair(_) => trie
+                .get_or_insert_with(|| SelectorTrie::new(entries))
+                .find(parts),
+        }
+    }
+}
+
+pub(super) struct SelectorTrie<'a> {
+    edges: HashMap<(usize, u16), usize>,
+    values: Vec<Option<&'a Expression<'a>>>,
+    transitions: HashMap<(PartId<'a>, usize), Option<usize>>,
+}
+
+enum MatchStep<'a> {
+    Visit(Parts<'a>),
+    Remember(PartId<'a>, usize),
+}
+
+impl<'a> SelectorTrie<'a> {
+    fn new(entries: &HashMap<JSStr<'a>, &'a Expression<'a>>) -> Self {
+        let mut trie = Self {
+            edges: HashMap::new(),
+            values: vec![None],
+            transitions: HashMap::new(),
         };
-        if let Some(text) = root.text.get() {
-            return text;
-        }
-        // Cache the shared children that many distinct root keys can reuse.
-        for part in root.children {
-            if let Self::Pair(pair) = part
-                && pair.text.get().is_none()
-            {
-                pair.text.set(Some(part.flatten(ctx)));
+        for (&key, &value) in entries {
+            let mut node = 0;
+            // UTF-16 preserves matches across a surrogate pair split between parts.
+            for unit in key.encode_utf16() {
+                node = *trie.edges.entry((node, unit)).or_insert_with(|| {
+                    trie.values.push(None);
+                    trie.values.len() - 1
+                });
             }
+            trie.values[node] = Some(value);
         }
-        let text = self.flatten(ctx);
-        root.text.set(Some(text));
-        text
+        trie
     }
 
-    fn flatten(self, ctx: &TsCtx<'a>) -> JSStr<'a> {
-        let mut text = JSStrBuilder::new_in(&ctx.arena);
-        let mut pending = vec![self];
-        while let Some(part) = pending.pop() {
-            match part {
-                Self::Text(leaf) => text.push_js_str(leaf),
-                Self::Pair(pair) => {
-                    if let Some(leaf) = pair.text.get() {
-                        text.push_js_str(leaf);
-                    } else {
-                        let [left, right] = pair.children;
-                        pending.extend([right, left]);
+    fn find(&mut self, parts: Parts<'a>) -> Option<&'a Expression<'a>> {
+        let mut node = Some(0);
+        let mut pending = vec![MatchStep::Visit(parts)];
+        while let Some(step) = pending.pop() {
+            match step {
+                MatchStep::Remember(part, start) => {
+                    self.transitions.insert((part, start), node);
+                }
+                MatchStep::Visit(parts) => {
+                    let Some(start) = node else {
+                        continue;
+                    };
+                    let key = (parts.identity(), start);
+                    if let Some(&end) = self.transitions.get(&key) {
+                        node = end;
+                        continue;
+                    }
+                    match parts {
+                        Parts::Text(text) => {
+                            node = text.encode_utf16().try_fold(start, |node, unit| {
+                                self.edges.get(&(node, unit)).copied()
+                            });
+                            self.transitions.insert(key, node);
+                        }
+                        Parts::Pair(&[left, right]) => pending.extend([
+                            MatchStep::Remember(key.0, start),
+                            MatchStep::Visit(right),
+                            MatchStep::Visit(left),
+                        ]),
                     }
                 }
             }
         }
-        text.into_js_str()
+        self.values[node?]
     }
 }
 
@@ -218,8 +270,11 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                                     Step::Visit(&m.expression),
                                 ]);
                             } else if let Some(key) = member.static_property_name()
-                                && let Some(value) =
-                                    member_values::value(ctx, member.object(), key.len(), || key)
+                                && let Some(value) = member_values::value(
+                                    ctx,
+                                    member.object(),
+                                    Selector::literal(key),
+                                )
                             {
                                 copy(&mut pending, id, value, false);
                             }
@@ -247,17 +302,17 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold<'a>> {
                 (id, value)
             }
             Step::Select(id, object, key) => {
-                let value = if let Expression::NumericLiteral(number) = key.get_inner_expression() {
-                    member_values::plain_decimal_key(number)
-                        .and_then(|key| member_values::value(ctx, object, key.len(), || key))
-                } else {
-                    cache[&key.node_id()]
-                        .filter(|key| key.selector)
-                        .and_then(|key| {
-                            member_values::value(ctx, object, key.len, || key.parts.text(ctx))
-                        })
-                };
-                if let Some(value) = value {
+                let selector =
+                    if let Expression::NumericLiteral(number) = key.get_inner_expression() {
+                        member_values::plain_decimal_key(number).map(Selector::literal)
+                    } else {
+                        cache[&key.node_id()]
+                            .filter(|key| key.selector)
+                            .map(|key| Selector(key.parts))
+                    };
+                if let Some(value) =
+                    selector.and_then(|selector| member_values::value(ctx, object, selector))
+                {
                     copy(&mut pending, id, value, false);
                 }
                 continue;

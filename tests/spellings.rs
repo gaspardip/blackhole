@@ -1239,3 +1239,27 @@ fn type_only_exports_keep_const_member_values() {
     }
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
+
+#[test]
+fn computed_member_selectors_preserve_unicode_keys() {
+    let mut missing = Vec::new();
+    for (label, selector, reports) in [
+        ("paired surrogates", r"'\uD83D' + '\uDE00'", true),
+        ("lone surrogate", r"'\uD83D' + '!'", true),
+        ("incomplete key", r"'\uD83D' + '?'", false),
+        ("longer key", r"'\uD83D' + '\uDE00' + '!'", false),
+    ] {
+        let source = format!(
+            r"const names = {{ '😀': 'plain', ['\uD83D\uDE00']: 'userShape', '\uD83D!': 'listShape' }};
+consume({{ [names[{selector}]]: 0 }});"
+        );
+        check_spelling(
+            &mut missing,
+            label,
+            "no-shape-in-symbol-names",
+            &source,
+            reports.then(|| source.find("names[").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}

@@ -1,4 +1,8 @@
-use super::{declaration, has_with, symbol, transparent};
+use super::{
+    declaration, has_with,
+    strings::{Selector, SelectorTrie},
+    symbol, transparent,
+};
 use crate::{engine::TsCtx, packs::ts::local_alias::is_local};
 use oxc::{
     ast::{
@@ -16,7 +20,7 @@ use std::{cell::RefCell, collections::HashMap};
 
 pub(super) struct Fields<'a> {
     entries: HashMap<JSStr<'a>, &'a Expression<'a>>,
-    longest_key: usize,
+    selectors: Option<SelectorTrie<'a>>,
 }
 pub(super) type MemberValues<'a> = RefCell<HashMap<SymbolId, Option<Fields<'a>>>>;
 
@@ -79,8 +83,7 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
 pub(super) fn value<'a>(
     ctx: &TsCtx<'a>,
     object: &'a Expression<'a>,
-    key_len: usize,
-    key: impl FnOnce() -> JSStr<'a>,
+    selector: Selector<'a>,
 ) -> Option<&'a Expression<'a>> {
     let Expression::Identifier(id) = object.get_inner_expression() else {
         return None;
@@ -91,11 +94,8 @@ pub(super) fn value<'a>(
     let sym = symbol(ctx, id)?;
     let mut cache = ctx.resolution.member_values.borrow_mut();
     let fields = cache.entry(sym).or_insert_with(|| fields(ctx, id, sym));
-    let fields = fields.as_ref()?;
-    if key_len > fields.longest_key {
-        return None;
-    }
-    fields.entries.get(&key()).copied()
+    let fields = fields.as_mut()?;
+    selector.find(&fields.entries, &mut fields.selectors)
 }
 
 fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> Option<Fields<'a>> {
@@ -137,10 +137,9 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         }
         fields.insert(key, &field.value);
     }
-    let longest_key = fields.keys().map(|key| key.len()).max()?;
-    Some(Fields {
+    (!fields.is_empty()).then_some(Fields {
         entries: fields,
-        longest_key,
+        selectors: None,
     })
 }
 
