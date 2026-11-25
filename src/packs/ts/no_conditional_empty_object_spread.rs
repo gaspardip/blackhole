@@ -1,11 +1,11 @@
 use super::{
     local_alias::{is_local, is_type_exported},
-    values::{const_initializer, invoked, outer, selector_key, symbol, unwrapped},
+    values::{const_initializer, outer, symbol, unwrapped},
 };
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{Expression, MemberExpression, ObjectPropertyKind},
+    ast::{Expression, ObjectPropertyKind},
 };
 use oxc::{
     span::{GetSpan, Span},
@@ -92,135 +92,13 @@ fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option
     found
 }
 
-fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) -> bool {
-    let mut id = function.id();
-    let callee = function.span();
-    while let Some(parent) = outer(ctx, id) {
-        match parent {
-            AstKind::CallExpression(call) => {
-                if invoked(ctx, call).callee.span() == callee
-                    || unknown_function_method(ctx, &call.callee, callee)
-                {
-                    return true;
-                }
-            }
-            AstKind::NewExpression(call) => return unwrapped(&call.callee).span() == callee,
-            AstKind::TaggedTemplateExpression(call) => {
-                return unwrapped(&call.tag).span() == callee;
-            }
-            AstKind::SequenceExpression(_)
-            | AstKind::StaticMemberExpression(_)
-            | AstKind::ComputedMemberExpression(_)
-            | AstKind::ArrayExpression(_)
-            | AstKind::SpreadElement(_) => {}
-            _ => return false,
-        }
-        id = parent.node_id();
-    }
-    false
-}
-
-fn unknown_function_method<'a>(
-    ctx: &TsCtx<'a>,
-    callee: &'a Expression<'a>,
-    function: Span,
-) -> bool {
-    matches!(
-        callee.get_member_expr(),
-        Some(MemberExpression::ComputedMemberExpression(m))
-            if unwrapped(&m.object).span() == function
-                && selector_key(ctx, &m.expression).is_none()
-    )
-}
-
-fn function_region<'a>(
-    ctx: &TsCtx<'a>,
-    function: &oxc::semantic::AstNode<'a>,
-    child: Span,
-) -> Option<NodeId> {
-    let id = function.id();
-    if let AstKind::Function(f) = function.kind()
-        && f.generator
-    {
-        // A generator body runs as it is iterated, apart from the call that binds its parameters.
-        if let Some(body) = f
-            .body
-            .as_ref()
-            .filter(|body| body.span.contains_inclusive(child))
-        {
-            return Some(body.node_id.get());
-        }
-    }
-    (!immediate_call(ctx, function)).then_some(id)
-}
-
-fn possible_immediate_region(
-    ctx: &TsCtx<'_>,
-    regions: &mut HashMap<NodeId, Option<NodeId>>,
-    mut child: NodeId,
-) -> Option<NodeId> {
-    let nodes = ctx.semantic.nodes();
-    let mut ancestors = nodes.ancestors(child);
-    let mut path = Vec::new();
-    let region = loop {
-        if let Some(&region) = regions.get(&child) {
-            break region;
-        }
-        path.push(child);
-        let Some(node) = ancestors.next() else {
-            break None;
-        };
-        let child_span = nodes.kind(child).span();
-        let once = |part: Option<Span>| part.is_some_and(|p| p.contains_inclusive(child_span));
-        let boundary = match node.kind() {
-            AstKind::Decorator(_) => {
-                let Some(class) = ancestors.find(|n| matches!(n.kind(), AstKind::Class(_))) else {
-                    break None;
-                };
-                child = class.id();
-                continue;
-            }
-            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
-                if let Some(boundary) = function_region(ctx, node, child_span) {
-                    break Some(boundary);
-                }
-                false
-            }
-            AstKind::PropertyDefinition(p) => {
-                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
-            }
-            AstKind::AccessorProperty(p) => {
-                !p.r#static && once(p.value.as_ref().map(GetSpan::span))
-            }
-            _ => false,
-        };
-        if boundary {
-            break Some(node.id());
-        }
-        child = node.id();
-    };
-    regions.extend(path.into_iter().map(|node| (node, region)));
-    region
-}
-
-fn dependencies(
-    ctx: &TsCtx<'_>,
-    climbs: &mut Climbs,
-    regions: &mut HashMap<NodeId, Option<NodeId>>,
-    symbol: SymbolId,
-) -> Option<Vec<SymbolId>> {
-    let decl = ctx.semantic.symbol_declaration(symbol);
+fn dependencies(ctx: &TsCtx<'_>, climbs: &mut Climbs, symbol: SymbolId) -> Option<Vec<SymbolId>> {
+    let declaration_end = ctx.semantic.symbol_declaration(symbol).span().end;
     let scope = ctx.semantic.scoping();
-    let mut declared = None;
     let mut aliases = Vec::new();
     for r in scope.get_resolved_reference_ids(symbol) {
         let node = scope.get_reference(*r).node_id();
-        // Code that runs later may read the binding from above its declaration.
-        if ctx.semantic.nodes().kind(node).span().start < decl.span().end
-            && possible_immediate_region(ctx, regions, node)
-                == *declared
-                    .get_or_insert_with(|| possible_immediate_region(ctx, regions, decl.id()))
-        {
+        if ctx.semantic.nodes().kind(node).span().start < declaration_end {
             return None;
         }
         if let Destination::Alias(alias) = destination(ctx, climbs, node)? {
@@ -235,7 +113,6 @@ struct Visibility<'a> {
     terminals: HashMap<SymbolId, Option<&'a Expression<'a>>>,
     known: HashMap<SymbolId, bool>,
     climbs: Climbs,
-    regions: HashMap<NodeId, Option<NodeId>>,
     empty_arms: HashMap<Span, bool>,
 }
 
@@ -257,9 +134,7 @@ impl<'a> Visibility<'a> {
                     }
                     // Cycles stay unknown until every outgoing use has been proved harmless.
                     self.known.insert(id, false);
-                    if let Some(aliases) =
-                        dependencies(ctx, &mut self.climbs, &mut self.regions, id)
-                    {
+                    if let Some(aliases) = dependencies(ctx, &mut self.climbs, id) {
                         stack.push(Visit::Finish(id, aliases.clone()));
                         stack.extend(aliases.into_iter().map(Visit::Enter));
                     }

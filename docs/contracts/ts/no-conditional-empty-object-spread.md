@@ -13,9 +13,6 @@
 - Harmless uses through `void`, unused aliases and type-only re-exports
   from another module (`void-read.ts`, `unused-alias.ts`,
   `type-reexport.ts`).
-- Deferred function reads and instance field initializers where a source
-  declaration can appear later in the file (`hoisted-reader.ts` and
-  `field-before-declaration.ts`).
 
 ## Does not catch
 
@@ -28,9 +25,11 @@
   `observable-alias-default.ts`, `observable-alias-query.ts`).
 - A conditional used outside an object spread. Its arms do not end at a
   supported destination (`non-object-destinations.ts`).
-- An alias cycle or a read before initialization in the same execution
-  region. The rule cannot establish a harmless empty object
-  (`alias-cycle.ts`, `before-initialization.ts`).
+- An alias cycle. The rule cannot establish a harmless empty object (`alias-cycle.ts`).
+- An empty const or alias read anywhere above the end of its declaration, even
+  inside a function or class body that runs later. The rule does not decide when
+  such code runs (`before-initialization.ts`, `hoisted-reader.ts`,
+  `field-before-declaration.ts`, `immediate-constructor.ts`, `immediate-tag.ts`).
 - An empty value reached through a member such as `p.empty`. The visibility
   check follows local const bindings and has no member projection (probe).
 - An empty object also read in a comma expression,

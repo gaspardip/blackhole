@@ -3,7 +3,7 @@ mod arguments;
 use arguments::Arguments;
 #[path = "member_values.rs"]
 mod member_values;
-pub(super) use member_values::{const_initializer, selector_key};
+pub(super) use member_values::const_initializer;
 #[path = "strings.rs"]
 mod strings;
 #[path = "tracked_uses.rs"]

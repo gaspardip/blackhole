@@ -49,10 +49,7 @@ impl<'a> MemberValues<'a> {
     }
 }
 
-pub(in crate::packs::ts) fn selector_key<'a>(
-    ctx: &TsCtx<'a>,
-    expr: &'a Expression<'a>,
-) -> Option<JSStr<'a>> {
+pub(super) fn selector_key<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<JSStr<'a>> {
     match unwrapped(expr) {
         Expression::Identifier(id) => literal_key(unwrapped(const_initializer(ctx, id)?)),
         expr => direct_selector_key(expr),

@@ -734,31 +734,35 @@ fn plain_writes_under_deep_nesting_scale_linearly() {
 }
 
 #[test]
-fn early_alias_reads_in_nested_immediate_calls_scale_linearly() {
+fn early_empty_reads_in_nested_callbacks_scale_linearly() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let [small, large] = [500, 2_000].map(|n| {
+            let rule = registry()
+                .iter()
+                .find(|r| r.id == "ts/no-conditional-empty-object-spread")
+                .unwrap();
+            let [(small, small_hits), (large, large_hits)] = [1_000, 4_000].map(|n| {
                 let source = format!(
-                    "function f() {{\n{}{}}}\nconst x = c ? {{}} : {{a: 1}};\n({{...x}});\n",
-                    "(() => { void x;\n".repeat(n),
-                    "})();\n".repeat(n),
+                    "{}0{}; const empty = {{}};",
+                    "wrap(() => ({ ...(flag ? empty : payload) }), ".repeat(n),
+                    ")".repeat(n)
                 );
-                best_of_three(|| {
+                let hits = std::cell::Cell::new(0);
+                let elapsed = best_of_three(|| {
                     let start = Instant::now();
-                    let hits = run(registry(), [("spread.ts", source.as_bytes())]);
-                    let elapsed = start.elapsed();
-                    assert_eq!(hits.len(), 1);
-                    assert_eq!(
-                        (hits[0].rule, hits[0].line),
-                        ("ts/no-conditional-empty-object-spread", 2 * n + 4)
+                    let findings = run(
+                        std::slice::from_ref(rule),
+                        [("spread.ts", source.as_bytes())],
                     );
+                    let elapsed = start.elapsed();
+                    hits.set(findings.len());
                     elapsed
-                })
+                });
+                (elapsed, hits.get())
             });
-            eprintln!(
-                "nested immediate calls with early alias reads: 500 {small:?}, 2000 {large:?}"
-            );
+            eprintln!("nested callbacks with early reads: 1000 {small:?}, 4000 {large:?}");
+            assert_eq!([small_hits, large_hits], [0, 0]);
             assert!(
                 large < small * 6 + Duration::from_millis(25),
                 "{small:?} {large:?}"

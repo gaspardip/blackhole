@@ -1393,7 +1393,7 @@ consume({{ [names[{selector}]]: 0 }});"
 }
 
 #[test]
-fn conditional_empty_spreads_do_not_treat_a_reassigned_member_as_reflect_apply() {
+fn conditional_empty_spreads_skip_early_reads_through_reassigned_members() {
     let source = "const methods = { run: Reflect.apply };
 methods.run = () => {};
 methods.run(() => ({ ...value }), null, []);
@@ -1401,10 +1401,10 @@ const value = ready ? {} : payload;";
     let mut missing = Vec::new();
     check_spelling(
         &mut missing,
-        "reassigned member leaves the reader deferred",
+        "reassigned member with an early reader",
         "no-conditional-empty-object-spread",
         source,
-        source.find("..."),
+        None,
     );
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
