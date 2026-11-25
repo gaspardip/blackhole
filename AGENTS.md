@@ -5,6 +5,7 @@ Rules that coding agents cannot talk their way around. A Rust CLI (`blackhole`, 
 ## Verify
 
 `bin/check` defines green for the code: the `check` workflow runs that script and nothing else. A pull request also has to pass `name-guard`, which scans its commits, branch name, title and body.
+On Boat, `bin/check` leaves `tests/resolution_time.rs` to local and CI runs. For changes to resolution or rule walks, also run `~/.agents/bin/heavy run -- cargo test --locked --test resolution_time` locally.
 
 ## Setup
 

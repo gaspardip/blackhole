@@ -1,5 +1,5 @@
 #!/bin/sh
-# Everything the check workflow runs. Green here means green there.
+# Everything the check workflow runs.
 set -eu
 cd "$(dirname "$0")/.."
 # Without rustup nothing applies rust-toolchain.toml, so a newer local Rust would pass here and fail in CI.
@@ -12,6 +12,20 @@ if [ "${have}" != "${want}" ]; then
 fi
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+if [ "${BLACKHOLE_SHARED_CPU+x}" = x ]; then
+  echo "bin/check: timing tests left to local and CI runs"
+  set -- --lib --bins
+  for file in tests/*.rs; do
+    target=${file##*/}
+    target=${target%.rs}
+    if [ "${target}" != resolution_time ]; then
+      set -- "$@" --test "${target}"
+    fi
+  done
+  cargo test --locked "$@"
+  cargo test --locked --doc
+else
+  cargo test --locked
+fi
 python3 -I -m unittest discover -s tools
 cargo run --locked --quiet -- check
