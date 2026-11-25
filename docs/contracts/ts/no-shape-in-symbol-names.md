@@ -18,7 +18,8 @@ A case-insensitive `shape` inside one of these names:
    `name-literals.ts`).
 4. A computed property or class member key whose expression is a known
    string (`upstream-accept-owned-keys.ts`, `concatenated-keys.ts`,
-   `name-literals.ts`, `wrapped-computed-keys.ts`).
+   `name-literals.ts`, `wrapped-computed-keys.ts`,
+   `sequence-and-optional-keys.ts`).
 
 A known string is one of:
 
@@ -27,12 +28,14 @@ A known string is one of:
 - a reference to a `const` declared with a plain name (not destructured)
   whose initializer is a known string
   (`wrapped_computed_names_fold_neutral_aliases` in `tests/spellings.rs`);
-- `o.name`, `o["name"]` or `o[0]` reading a field of an untouched const
-  object whose value is a known string. The selector is a known string
+- `o.name`, `o["name"]` or `o[0]`, optional (`o?.name`) or not, reading a
+  field of an untouched const object whose value is a known string. The
+  selector is a known string
   that does not itself come from a field read, or a plain non-negative
   decimal integer below 2^53
   (`untouched_const_owners_supply_member_values` in `tests/spellings.rs`);
-- any of these in parentheses or behind `as`, `!`, `satisfies` or `<T>`.
+- any of these in parentheses, behind `as`, `!`, `satisfies` or `<T>`, or
+  as the last expression of a comma sequence such as `(f(), 'userShape')`.
 
 An untouched const object is `const o = { ... }` with a plain name, where:
 
