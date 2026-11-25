@@ -36,6 +36,7 @@ pub(crate) struct Resolution<'a> {
     assignments: OnceCell<HashMap<SymbolId, Vec<Write<'a>>>>,
     member_values: member_values::MemberValues<'a>,
     eval_mention: OnceCell<bool>,
+    has_with: Rc<OnceCell<bool>>,
     escapes: OnceCell<Vec<tracked_uses::Escape>>,
     written: OnceCell<HashSet<SymbolId>>,
     pub(super) named_exports: OnceCell<HashSet<SymbolId>>,
@@ -45,6 +46,15 @@ pub(crate) struct Resolution<'a> {
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<Invocation<'a>>>>,
 }
+pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
+    *ctx.resolution.has_with.get_or_init(|| {
+        let scoping = ctx.semantic.scoping();
+        scoping
+            .scope_descendants_from_root()
+            .any(|id| scoping.scope_flags(id).is_with())
+    })
+}
+
 pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()

@@ -1,4 +1,4 @@
-use super::{declaration, symbol, transparent};
+use super::{declaration, has_with, symbol, transparent};
 use crate::{engine::TsCtx, packs::ts::local_alias::is_local};
 use oxc::{
     ast::{
@@ -66,6 +66,9 @@ fn has_eval_mention(ctx: &TsCtx<'_>) -> bool {
 }
 
 fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
+    if !has_with(ctx) {
+        return false;
+    }
     let scope = ctx.semantic.nodes().get_node(id).scope_id();
     let scoping = ctx.semantic.scoping();
     scoping

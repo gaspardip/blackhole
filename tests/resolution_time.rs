@@ -508,3 +508,37 @@ fn repeated_long_computed_keys_scale_linearly() {
         "{small:?} {large:?}"
     );
 }
+
+#[test]
+fn repeated_const_reads_in_nested_blocks_scale_linearly() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let [small, large] = [1_500, 10_000].map(|n| {
+                let mut text = format!(
+                    "{}const prefix = 'x'; const consume = () => {{}};\n{}{}\n",
+                    "{".repeat(n),
+                    "consume({ [prefix]: 0 });\n".repeat(n),
+                    "}".repeat(n)
+                );
+                text.push_str("consume({ ['sha' + 'pe']: 0 });\n");
+                let start = Instant::now();
+                let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+                let elapsed = start.elapsed();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(
+                    (hits[0].rule, hits[0].line),
+                    ("ts/no-shape-in-symbol-names", n + 3)
+                );
+                elapsed
+            });
+            eprintln!("nested const reads: 1500 {small:?}, 10000 {large:?}");
+            assert!(
+                large < small * 8 + Duration::from_millis(25),
+                "{small:?} {large:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
