@@ -8,12 +8,13 @@ const TSX: &str = "case.tsx";
 const CJS: &str = "case.cjs";
 const JS: &str = "case.js";
 const SPELLINGS: [&str; 3] = ["usershapeInput", "userShapeInput", "userSHAPEInput"];
-const CONTEXTS: [&str; 8] = [
+const CONTEXTS: [&str; 9] = [
     "consume({ [KEY]: 0 });",
     "consume({ [KEY]() {} });",
     "consume({ get [KEY]() { return 0; } });",
     "consume({ set [KEY](value) {} });",
     "class C { [KEY] = 0; }",
+    "class C { accessor [KEY] = 0; }",
     "class C { [KEY]() {} }",
     "class C { get [KEY]() { return 0; } }",
     "class C { set [KEY](value: number) {} }",
@@ -232,6 +233,7 @@ fn broken_owner_preconditions_stay_silent() {
         ("['other']: 0", "[field]: 0"),
         ("[`other`]: 0", "[`oth${'er'}`]: 0"),
         ("1: 0", "[1]: 0"),
+        ("1: 0", "1n: 0"),
         ("'1.1': 0", "1.1: 0"),
         ("'10': 0", "1e1: 0"),
         ("1000: 0", "1_000: 0"),
@@ -269,18 +271,21 @@ fn broken_owner_preconditions_stay_silent() {
         }
     }
     for (declaration, export, mark) in [
-        ("const o", "export type { o };", "^"),
-        ("export const o", "", ""),
-        ("let o", "", ""),
-        ("const [o]", "", ""),
-        ("const o", "", "^"),
+        (
+            "const o = { key: 'userShapeInput' };",
+            "export type { o };",
+            "^",
+        ),
+        ("const o = { key: 'userShapeInput' };", "export { o };", ""),
+        ("export const o = { key: 'userShapeInput' };", "", ""),
+        ("let o = { key: 'userShapeInput' };", "", ""),
+        ("const { o } = { o: { key: 'userShapeInput' } };", "", ""),
+        ("const o = { key: 'userShapeInput' };", "", "^"),
     ] {
         check(
             &mut failures,
             TS,
-            &format!(
-                "{declaration} = {{ key: 'userShapeInput' }};\n                 {export}\nconsume({{ [{mark}o.key]: 0 }});"
-            ),
+            &format!("{declaration}\n{export}\nconsume({{ [{mark}o.key]: 0 }});"),
         );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -290,22 +295,25 @@ fn broken_owner_preconditions_stay_silent() {
 fn broken_alias_and_expression_preconditions_stay_silent() {
     let mut failures = Vec::new();
     for (valid, invalid) in [
-        ("const key", "const [key]"),
-        ("const key", "let key"),
         (
-            "type Key = string; const key",
-            "type key = string; const key",
+            "const key = 'userShapeInput'",
+            "const { key } = { key: 'userShapeInput' }",
+        ),
+        ("const key = 'userShapeInput'", "let key = 'userShapeInput'"),
+        (
+            "type Key = string; const key = 'userShapeInput'",
+            "type key = string; const key = 'userShapeInput'",
         ),
         (
-            "type Evaluate = string; const key",
-            "type eval = string; const key",
+            "type Evaluate = string; const key = 'userShapeInput'",
+            "type eval = string; const key = 'userShapeInput'",
         ),
     ] {
         for (declaration, mark) in [(valid, "^"), (invalid, "")] {
             check(
                 &mut failures,
                 TS,
-                &format!("{declaration} = 'userShapeInput';\nconsume({{ [{mark}key]: 0 }});"),
+                &format!("{declaration};\nconsume({{ [{mark}key]: 0 }});"),
             );
         }
     }
@@ -363,12 +371,15 @@ fn broken_selector_preconditions_stay_silent() {
             );
         }
     }
-    for (binding, mark) in [("field", "^"), ("[field]", "")] {
+    for (declaration, mark) in [
+        ("const field = 'key'", "^"),
+        ("const { field } = { field: 'key' }", ""),
+    ] {
         check(
             &mut failures,
             TS,
             &format!(
-                "const o = {{ key: 'userShapeInput' }}; const {binding} = 'key';\n                 consume({{ [{mark}o[field]]: 0 }});"
+                "const o = {{ key: 'userShapeInput' }}; {declaration};\n                 consume({{ [{mark}o[field]]: 0 }});"
             ),
         );
     }
@@ -389,6 +400,15 @@ fn broken_selector_preconditions_stay_silent() {
                 ),
             );
         }
+    }
+    for (selector, mark) in [("1", "^"), ("1n", "")] {
+        check(
+            &mut failures,
+            TS,
+            &format!(
+                "const o = {{ 1: 'userShapeInput' }}; consume({{ [{mark}o[{selector}]]: 0 }});"
+            ),
+        );
     }
     check(
         &mut failures,
@@ -433,7 +453,6 @@ fn dynamic_and_cross_script_writes_still_report() {
     for (path, effect) in [
         (JS, r#"Function("o.key = 'plain'")();"#),
         (JS, r#"new Function("o.key = 'plain'")();"#),
-        (JS, r#"setTimeout("o.key = 'plain'", 0);"#),
         (TSX, r#"consume(<X attr="ev&#x61;l" />);"#),
         (
             JS,
@@ -448,6 +467,13 @@ fn dynamic_and_cross_script_writes_still_report() {
             ),
         );
     }
+    check(
+        &mut failures,
+        JS,
+        r#"const o = { key: 'userShapeInput' };
+setTimeout("o.key = 'plain'; setTimeout(read, 0)", 0);
+function read() { consume({ [^o.key]: 0 }); }"#,
+    );
     check_with_scripts(
         &mut failures,
         JS,
