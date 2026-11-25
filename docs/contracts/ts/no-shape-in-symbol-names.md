@@ -104,3 +104,7 @@ Anything outside the list above. In particular:
   (`every_eval_mention_hides_member_and_const_string_values` and
   `jsx_character_references_spelling_eval_keep_values` in
   `tests/spellings.rs`).
+- Known false positives: the rule checks one file at a time, so it trusts a
+  field value that another classic script writes through a shared
+  top-level const, or that a getter patched onto a prototype such as
+  `Object.prototype` writes during an apparent read.
