@@ -5,7 +5,7 @@ use super::{
 use crate::engine::{Family, Findings, Rule, Run, TsCtx};
 use oxc::ast::{
     AstKind,
-    ast::{Expression, ObjectPropertyKind},
+    ast::{Expression, ObjectPropertyKind, VariableDeclarationKind},
 };
 use oxc::{
     span::{GetSpan, Span},
@@ -30,8 +30,15 @@ enum Destination {
 type Climbs = HashMap<NodeId, Option<Destination>>;
 
 fn is_spread_alias(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    let binding = ctx.semantic.symbol_declaration(symbol);
+    let AstKind::VariableDeclaration(declaration) = ctx.semantic.nodes().parent_kind(binding.id())
+    else {
+        return false;
+    };
     // A local type export can keep an empty spread alias observable.
-    is_local(ctx, symbol) && !is_type_exported(ctx, symbol)
+    declaration.kind == VariableDeclarationKind::Const
+        && is_local(ctx, symbol)
+        && !is_type_exported(ctx, symbol)
 }
 
 fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option<Destination> {
