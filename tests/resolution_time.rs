@@ -562,7 +562,7 @@ fn repeated_const_reads_in_nested_blocks_scale_linearly() {
 
 #[test]
 fn repeated_long_concatenated_selectors_stay_unknown() {
-    let [small, large] = [2_000, 16_000].map(|n| {
+    let [small, large] = [4_000, 16_000].map(|n| {
         best_of_three(|| {
             let prefix = "x".repeat(n);
             let mut text = format!(
@@ -576,9 +576,9 @@ fn repeated_long_concatenated_selectors_stay_unknown() {
             elapsed
         })
     });
-    eprintln!("computed selectors: 2000 {small:?}, 16000 {large:?}");
+    eprintln!("computed selectors: 4000 {small:?}, 16000 {large:?}");
     assert!(
-        large < small * 8 + Duration::from_millis(25),
+        large < small * 6 + Duration::from_millis(25),
         "{small:?} {large:?}"
     );
 }
@@ -672,7 +672,7 @@ fn repeated_const_reads_with_an_unrelated_with_scale_linearly() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let [small, large] = [1_250, 10_000].map(|n| best_of_three(|| {
+            let [small, large] = [2_500, 10_000].map(|n| best_of_three(|| {
                 // Local bindings keep Oxc from walking outward to resolve each read.
                 let text = format!(
                     "with (o) {{ f(); }}\n{}const prefix = 'userShape'; const consume = () => {{}};\n{}{}",
@@ -687,9 +687,9 @@ fn repeated_const_reads_with_an_unrelated_with_scale_linearly() {
                 assert!(hits.iter().all(|h| h.rule == "ts/no-shape-in-symbol-names"));
                 elapsed
             }));
-            eprintln!("nested const reads with an unrelated with: 1250 {small:?}, 10000 {large:?}");
+            eprintln!("nested const reads with an unrelated with: 2500 {small:?}, 10000 {large:?}");
             assert!(
-                large < small * 8 + Duration::from_millis(25),
+                large < small * 6 + Duration::from_millis(25),
                 "{small:?} {large:?}"
             );
         })
