@@ -768,3 +768,71 @@ fn early_alias_reads_in_nested_immediate_calls_scale_linearly() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn function_call_member_chains_scale_linearly() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let rule = registry()
+                .iter()
+                .find(|r| r.id == "ts/no-conditional-empty-object-spread")
+                .unwrap();
+            let [small, large] = [500, 2_000].map(|n| {
+                let source = format!(
+                    "(() => ({{ ...(c ? empty : x) }})){}(); const empty = {{}};",
+                    ".call".repeat(n)
+                );
+                best_of_three(|| {
+                    let start = Instant::now();
+                    let hits = run(
+                        std::slice::from_ref(rule),
+                        [("spread.ts", source.as_bytes())],
+                    );
+                    let elapsed = start.elapsed();
+                    assert_eq!(hits.len(), 0);
+                    elapsed
+                })
+            });
+            eprintln!("call member chain: 500 {small:?}, 2000 {large:?}");
+            assert!(
+                large < small * 6 + Duration::from_millis(25),
+                "{small:?} {large:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn wrapped_const_selectors_scale_linearly() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let [small, large] = [2_000, 8_000].map(|n| {
+                let text = format!(
+                    "const key = {}'label'{}; const names = {{ label: 'userShape' }};\n{}",
+                    "(".repeat(n),
+                    ")".repeat(n),
+                    "consume({ [names[key]]: 0 });\n".repeat(n),
+                );
+                best_of_three(|| {
+                    let start = Instant::now();
+                    let hits = run(registry(), [("computed.ts", text.as_bytes())]);
+                    let elapsed = start.elapsed();
+                    assert_eq!(hits.len(), n);
+                    assert!(hits.iter().all(|h| h.rule == "ts/no-shape-in-symbol-names"));
+                    elapsed
+                })
+            });
+            eprintln!("wrapped const selectors: 2000 {small:?}, 8000 {large:?}");
+            assert!(
+                large < small * 6 + Duration::from_millis(25),
+                "{small:?} {large:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -577,6 +577,11 @@ fn documented_slop_rule_limits() {
             "const empty = {}; (empty, log()); consume({ ...(flag ? empty : payload) });",
         ),
         (
+            "empty object read as the final operand of a comma expression",
+            "no-conditional-empty-object-spread",
+            "const empty = {}; void (log(), empty); consume({ ...(flag ? empty : payload) });",
+        ),
+        (
             "S118 empty spread alias sharing a type name",
             "no-conditional-empty-object-spread",
             "declare const ok: boolean; type Empty = {}; const Empty = {}; const value = { ...(ok ? { a: 1 } : Empty) };",
@@ -1291,7 +1296,7 @@ fn slop_spellings() {
                 "const empty={};consume({...(c ? VALUE : x)});",
                 "empty",
                 "no-conditional-empty-object-spread",
-                true,
+                label != "comma",
             ),
         ] {
             let source = source.replace("VALUE", &wrapper.replace("VALUE", value));

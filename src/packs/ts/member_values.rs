@@ -33,24 +33,19 @@ impl<'a> MemberValues<'a> {
     }
 
     fn selector(&self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<usize> {
-        let expr = match unwrapped(expr) {
-            Expression::Identifier(id) => {
-                let init = unwrapped(const_initializer(ctx, id)?);
-                if !matches!(
-                    init,
-                    Expression::StringLiteral(_) | Expression::TemplateLiteral(_)
-                ) {
-                    return None;
-                }
-                init
+        let expr = unwrapped(expr);
+        let literal = match expr {
+            Expression::NumericLiteral(number) => {
+                return plain_decimal_key(number).map(|key| self.key_id(key));
             }
-            expr => expr,
+            Expression::Identifier(id) => const_initializer(ctx, id)?,
+            _ => expr,
         };
         *self
             .selectors
             .borrow_mut()
-            .entry(expr.node_id())
-            .or_insert_with(|| direct_selector_key(expr).map(|key| self.key_id(key)))
+            .entry(literal.node_id())
+            .or_insert_with(|| literal_key(unwrapped(literal)).map(|key| self.key_id(key)))
     }
 }
 

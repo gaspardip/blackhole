@@ -45,10 +45,11 @@ fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option
         let span = nodes.kind(node).span();
         match outer(ctx, node) {
             Some(AstKind::SequenceExpression(seq))
-                if seq
-                    .expressions
-                    .last()
-                    .is_some_and(|last| last.get_inner_expression().span() == span) =>
+                if !matches!(nodes.kind(node), AstKind::IdentifierReference(_))
+                    && seq
+                        .expressions
+                        .last()
+                        .is_some_and(|last| last.get_inner_expression().span() == span) =>
             {
                 node = seq.node_id.get();
                 path.push(node);
@@ -102,6 +103,10 @@ fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) ->
                 {
                     return true;
                 }
+            }
+            AstKind::NewExpression(call) => return unwrapped(&call.callee).span() == callee,
+            AstKind::TaggedTemplateExpression(call) => {
+                return unwrapped(&call.tag).span() == callee;
             }
             AstKind::SequenceExpression(_)
             | AstKind::StaticMemberExpression(_)

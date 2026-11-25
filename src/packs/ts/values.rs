@@ -179,24 +179,10 @@ pub(super) fn declaration<'a>(
     {
         return None;
     }
-    let redeclarations = scope.symbol_redeclarations(symbol);
-    if redeclarations.is_empty() {
-        return Some(ctx.semantic.symbol_declaration(symbol).kind());
-    }
-    if !ctx.resolution.conservative {
-        return None;
-    }
-    let mut implementation = None;
-    for redeclaration in redeclarations {
-        let kind = ctx.semantic.nodes().kind(redeclaration.declaration);
-        let AstKind::Function(function) = kind else {
-            return None;
-        };
-        if function.body.is_some() && implementation.replace(kind).is_some() {
-            return None;
-        }
-    }
-    implementation
+    scope
+        .symbol_redeclarations(symbol)
+        .is_empty()
+        .then(|| ctx.semantic.symbol_declaration(symbol).kind())
 }
 
 pub(super) fn initializer<'a>(
@@ -608,6 +594,14 @@ pub(super) fn origin_path<'a>(
     ctx: &TsCtx<'a>,
     expr: &'a Expression<'a>,
 ) -> Option<(Origin, Vec<&'a str>)> {
+    bounded_origin_path(ctx, expr, usize::MAX)
+}
+
+fn bounded_origin_path<'a>(
+    ctx: &TsCtx<'a>,
+    expr: &'a Expression<'a>,
+    max_members: usize,
+) -> Option<(Origin, Vec<&'a str>)> {
     let mut origin = Origin::Global;
     let mut parts = Vec::new();
     let mut seen = HashSet::new();
@@ -618,6 +612,9 @@ pub(super) fn origin_path<'a>(
             return None;
         }
         if let Some((object, key)) = receiver(ctx, expr) {
+            if parts.len() == max_members {
+                return None;
+            }
             parts.push(key);
             expr = object;
             continue;
@@ -893,14 +890,15 @@ fn invocation<'a>(
     let mut args = args();
     let mut intrinsic_targets = Vec::new();
     let mut seen = HashSet::new();
-    let path = loop {
-        let parts = path(ctx, callee);
-
+    loop {
         if !seen.insert(callee.span()) {
-            break parts;
+            break;
         }
-        if parts.as_deref() == Some(&["Function", "prototype", "call", "call"])
-            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
+        // Intrinsic names are short, so each call or apply peels only a bounded prefix.
+        let intrinsic = bounded_origin_path(ctx, callee, 4)
+            .filter(|(origin, _)| *origin == Origin::Global)
+            .map(|(_, parts)| parts);
+        if intrinsic.as_deref() == Some(&["Function", "prototype", "call", "call"])
             && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
         {
             intrinsic_targets.push(target.span());
@@ -914,7 +912,7 @@ fn invocation<'a>(
         {
             args.prepend(&c.arguments);
             let bound_this = args.next(ctx, false).and_then(|slot| slot.0);
-            if origin_path(ctx, m.object()).is_some_and(|(origin, path)| {
+            if bounded_origin_path(ctx, m.object(), 3).is_some_and(|(origin, path)| {
                 origin == Origin::Global && path == ["Function", "prototype", "call"]
             }) && let Some(target) = bound_this
             {
@@ -926,8 +924,7 @@ fn invocation<'a>(
             }
             continue;
         }
-        if parts.as_deref() == Some(&["Reflect", "apply"])
-            && origin_path(ctx, callee).is_some_and(|(origin, _)| origin == Origin::Global)
+        if intrinsic.as_deref() == Some(&["Reflect", "apply"])
             && let Some(target) = args.next(ctx, false).and_then(|slot| slot.0)
         {
             args.next(ctx, false);
@@ -937,7 +934,7 @@ fn invocation<'a>(
             continue;
         }
         let Some(m) = callee.get_member_expr() else {
-            break parts;
+            break;
         };
         match MemberKeys(ctx).read(m) {
             Some("call") => {
@@ -947,14 +944,14 @@ fn invocation<'a>(
                 args.next(ctx, false);
                 args = Arguments::array(args.next(ctx, false).and_then(|slot| slot.0));
             }
-            _ => break parts,
+            _ => break,
         }
         callee = resolve(ctx, m.object());
-    };
+    }
     let (args, unreadable_args) = args.finish(ctx);
     let result = Rc::new(Invocation {
         callee,
-        path,
+        path: path(ctx, callee),
         unreadable_args,
         template_arg,
         intrinsic_targets,
