@@ -318,7 +318,7 @@ fn codex_patch_boundaries_and_hunks() {
         "*** Begin Patch\n*** Update File: new.py\n@@\n+x\n*** End of File\n@@ next\n+y\n*** End Patch",
         "*** Begin Patch\n*** Update File: new.py\n*** End of File\n+x\n*** End Patch",
         "*** Begin Patch\n*** Update File: new.py\n\n*** End Patch",
-        "*** Begin Patch\n*** Delete File: new.py\n\n*** End Patch",
+        "*** Begin Patch\n*** Delete File: new.py\n*** End Patch",
     ] {
         check_patch(text, &["new.py"]);
     }
