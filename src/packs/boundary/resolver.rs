@@ -378,6 +378,7 @@ impl Conditions {
         } else {
             (TS_EXTENSIONS, TS_ALIASES)
         };
+        options.builtin_modules = !self.is_type();
         options.extensions = strings(extensions);
         options.extension_alias = aliases
             .iter()
@@ -532,7 +533,8 @@ fn resolve(
             repository_name(&tree.follow(module.path())?)?.to_owned(),
         )),
         Err(
-            ResolveError::NotFound(_)
+            ResolveError::Builtin { .. }
+            | ResolveError::NotFound(_)
             | ResolveError::ExtensionAlias(..)
             | ResolveError::MatchedAliasNotFound(..)
             | ResolveError::PackageImportNotDefined(..)

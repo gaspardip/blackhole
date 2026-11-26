@@ -811,6 +811,32 @@ fn module_sync_is_available_to_both_runtime_loaders() {
 }
 
 #[test]
+fn runtime_builtins_have_no_repository_target() {
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['path']\n[[boundaries.folders]]\nfrom='ui/**'\ndeny=['node_modules/path/**']",
+            ),
+            ("ui/importer.mjs", "import 'path';"),
+            ("ui/loader.cjs", "require('node:path'); require('path');"),
+            ("node_modules/path/package.json", r#"{"main":"./index.js"}"#),
+            ("node_modules/path/index.js", ""),
+        ],
+        &[],
+        0,
+    );
+    assert_eq!(
+        lines_for(&out, "ui/"),
+        [
+            "ui/importer.mjs:1:8 boundary/banned-imports [advisory] path",
+            "ui/loader.cjs:1:9 boundary/banned-imports [advisory] node:path",
+            "ui/loader.cjs:1:31 boundary/banned-imports [advisory] path",
+        ]
+    );
+}
+
+#[test]
 fn javascript_folder_checks_follow_the_javascript_reexport() {
     let out = judge(
         &[
