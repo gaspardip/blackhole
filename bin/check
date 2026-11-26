@@ -12,6 +12,40 @@ if [ "${have}" != "${want}" ]; then
 fi
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+if [ "${BLACKHOLE_SHARED_CPU:-}" = 1 ] && [ "${GITHUB_ACTIONS:-}" != true ]; then
+  echo "bin/check: timing tests left to local and CI runs"
+  python3 -I -c '
+import json
+import os
+import subprocess
+import sys
+
+metadata = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"]
+))
+# Same selection as plain `cargo test`: every target whose manifest leaves `test` on.
+flags = {"bin": "--bin", "test": "--test", "example": "--example", "bench": "--bench"}
+command = ["cargo", "test", "--locked"]
+integration_tests = 0
+for package in metadata["packages"]:
+    for target in package["targets"]:
+        kind = target["kind"][0]
+        if not target["test"] or kind == "custom-build":
+            continue
+        if kind == "test" and target["name"] == "resolution_time":
+            continue
+        if kind in flags:
+            command.extend([flags[kind], target["name"]])
+            integration_tests += kind == "test"
+        elif "--lib" not in command:
+            command.append("--lib")
+if not integration_tests:
+    sys.exit("bin/check: no integration test targets selected")
+os.execvp(command[0], command)
+'
+  cargo test --locked --doc
+else
+  cargo test --locked
+fi
 python3 -I -m unittest discover -s tools
 cargo run --locked --quiet -- check
