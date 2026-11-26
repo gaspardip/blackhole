@@ -26,7 +26,7 @@ fn check(ctx: &mut DiffCtx<'_>, findings: &mut DiffFindings) -> io::Result<()> {
     for old in ctx
         .base
         .paths()
-        .filter(|p| test_file_path(p) && !ctx.excludes.is_match(p))
+        .filter(|p| test_file_path(p) && !ctx.base_excludes.is_match(p))
     {
         let new = ctx.renames.get(old).copied().unwrap_or(old);
         let old_kind = engine::source_type(old);
@@ -38,12 +38,12 @@ fn check(ctx: &mut DiffCtx<'_>, findings: &mut DiffFindings) -> io::Result<()> {
         let before = if ctx.approved {
             None
         } else {
-            ctx.base.blob(old, ctx.batch)?
+            ctx.base.historical_blob(old, ctx.batch)?
         };
         if before.is_none() && !diagnose {
             continue;
         }
-        let after = if ctx.excludes.is_match(new) {
+        let after = if ctx.head_excludes.is_match(new) {
             None
         } else {
             ctx.head.blob(new, ctx.batch)?

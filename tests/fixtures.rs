@@ -1,16 +1,13 @@
 mod common;
 mod trees;
 
-use blackhole_check::{
-    ci,
-    engine::{Rule, Run, registry, run},
-};
+use blackhole_check::engine::{Rule, Run, registry, run};
 use std::{
     collections::BTreeSet,
-    env,
     fmt::Write,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 fn entries(path: &Path) -> BTreeSet<PathBuf> {
@@ -101,6 +98,10 @@ fn verify_locations(
         }
         writeln!(actual, "{line}:{col}").unwrap();
     }
+    verify_snapshot(expected, path, &actual);
+}
+
+fn verify_snapshot(expected: Option<&Path>, path: &Path, actual: &str) {
     let Some(expected) = expected else {
         assert!(actual.is_empty(), "{}: {actual}", path.display());
         return;
@@ -126,25 +127,36 @@ fn diff_case(path: &Path, side: &str, rule: &Rule) -> common::Result<()> {
 
     let temp = tempfile::tempdir()?;
     let (base, head) = trees::revisions(path, temp.path())?;
-    let original = env::current_dir()?;
-    env::set_current_dir(temp.path())?;
-    let findings = ci::diff_findings(&base, &head);
-    env::set_current_dir(original)?;
-    let hits: Vec<_> = findings?
-        .into_iter()
-        .filter(|hit| hit.rule == rule.id)
-        .collect();
-    if path.ends_with("rename-fewer-cases") {
-        assert_eq!(
-            hits.first().and_then(|hit| hit.note.as_deref()),
-            Some("test cases 3 -> 2, assertions 3 -> 2")
-        );
-    }
-    verify_locations(
-        expected.as_deref(),
-        path,
-        hits.into_iter().map(|hit| (hit.path, hit.line, hit.col)),
+    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(temp.path())
+        .args([
+            "ci",
+            "--base",
+            &base,
+            "--head",
+            &head,
+            "--today",
+            "2026-11-18",
+        ])
+        .output()?;
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(expected.is_some())),
+        "{}: {out:?}",
+        path.display()
     );
+    assert!(out.stderr.is_empty(), "{}: {out:?}", path.display());
+
+    let stdout = String::from_utf8(out.stdout)?;
+    let marker = format!(" {} ", rule.id);
+    let mut actual = String::new();
+    for (location, note) in stdout.lines().filter_map(|line| line.split_once(&marker)) {
+        if path.ends_with("rename-fewer-cases") {
+            assert_eq!(note, "test cases 3 -> 2, assertions 3 -> 2");
+        }
+        writeln!(actual, "{location}")?;
+    }
+    verify_snapshot(expected.as_deref(), path, &actual);
     Ok(())
 }
 

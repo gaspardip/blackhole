@@ -58,7 +58,8 @@ pub struct DiffCtx<'a> {
     pub(crate) head: &'a Tree,
     pub(crate) changes: &'a [Change],
     pub(crate) renames: &'a BTreeMap<&'a str, &'a str>,
-    pub(crate) excludes: &'a GlobSet,
+    pub(crate) base_excludes: &'a GlobSet,
+    pub(crate) head_excludes: &'a GlobSet,
     pub(crate) approved: bool,
     pub(crate) batch: &'a mut Batch,
 }

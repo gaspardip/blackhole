@@ -1235,3 +1235,20 @@ fn a_directory_link_under_tests_is_not_a_removed_test_file() {
     commit(root);
     run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn ci_accepts_a_repaired_test_symlink() {
+    let dir = repo();
+    let root = dir.path();
+    std::os::unix::fs::symlink("cases.ts", root.join("cases.test.ts")).unwrap();
+    commit(root);
+    fs::write(
+        root.join("cases.ts"),
+        "test(\"first\", () => expect(first()).toBe(true));\n",
+    )
+    .unwrap();
+    commit(root);
+    let out = run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 0);
+    assert_eq!(out.stdout, b"");
+}

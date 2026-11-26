@@ -59,5 +59,7 @@ are judged separately.
 - A test or assertion replaced, moved, or offset by another counted site
   while both counts stay level in each judged file. Moving a test between
   judged files still requires approval if the source file loses a count.
+- A count-preserving rename to a path that no longer qualifies as a test
+  file leaves that file outside later comparisons.
 - Test execution, runtime case totals, and custom runners or assertions
   outside the recognized forms above.

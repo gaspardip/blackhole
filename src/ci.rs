@@ -1,6 +1,6 @@
 use crate::{
     config,
-    engine::{self, DiffCtx, DiffFindings, Finding, Run},
+    engine::{self, DiffCtx, DiffFindings, Run},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
@@ -42,30 +42,6 @@ fn diff_rules(ctx: &mut DiffCtx<'_>) -> io::Result<DiffFindings> {
     Ok(findings)
 }
 
-/// Runs the registered diff rules on two commits in the current repository.
-/// # Errors
-/// Returns an error when Git, base policy or a diff rule fails.
-pub fn diff_findings(base: &str, head: &str) -> io::Result<Vec<Finding>> {
-    let base = git::commit(base)?;
-    let head = git::commit(head)?;
-    let base_tree = Tree::load(&base)?;
-    let changes = git::changes(&base, &head)?;
-    let mut batch = Batch::start()?;
-    let mut diff = diff_rules(&mut DiffCtx {
-        base: &base_tree,
-        head: &Tree::load(&head)?,
-        changes: &changes,
-        renames: &verdict::renames(&changes),
-        excludes: &configuration(&base_tree, &mut batch)?.exclude,
-        approved: false,
-        batch: &mut batch,
-    })?;
-    batch.finish()?;
-    diff.removals.append(&mut diff.diagnostics);
-    engine::sort_findings(&mut diff.removals);
-    Ok(diff.removals)
-}
-
 fn evaluate(
     base: &str,
     head: &str,
@@ -97,7 +73,8 @@ fn evaluate(
         head: &head_tree,
         changes: &changes,
         renames: &verdict::renames(&changes),
-        excludes,
+        base_excludes: &base_config.exclude,
+        head_excludes: excludes,
         approved,
         batch: &mut batch,
     };
