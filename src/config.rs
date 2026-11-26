@@ -1,3 +1,4 @@
+use crate::engine;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 use std::{io, num::NonZeroUsize};
@@ -34,7 +35,14 @@ pub struct Config {
     pub(crate) lcov: Option<String>,
     pub(crate) exclude: GlobSet,
     pub(crate) guard: GlobSet,
-    pub(crate) max_lines: Option<NonZeroUsize>,
+    engine_settings: engine::Settings,
+}
+
+impl Config {
+    #[must_use]
+    pub fn engine_settings(&self) -> engine::Settings {
+        self.engine_settings
+    }
 }
 
 fn globs(patterns: Vec<String>) -> io::Result<GlobSet> {
@@ -66,6 +74,8 @@ pub fn parse(bytes: &[u8]) -> io::Result<Config> {
         lcov,
         exclude: globs(settings.exclude)?,
         guard: globs(settings.guard.paths)?,
-        max_lines: settings.boundaries.max_lines,
+        engine_settings: engine::Settings {
+            max_lines: settings.boundaries.max_lines,
+        },
     })
 }

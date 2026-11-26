@@ -70,19 +70,15 @@ impl Case {
         } else {
             registry()
         };
-        let config = if self.directory {
-            let policy = self
-                .files
-                .iter()
-                .find(|(path, _)| path == "blackhole.toml")
-                .map_or(&[][..], |(_, bytes)| bytes.as_slice());
-            config::parse(policy).unwrap()
-        } else {
-            config::Config::default()
-        };
+        let policy = self
+            .files
+            .iter()
+            .find(|(path, _)| path == "blackhole.toml")
+            .map_or(&[][..], |(_, bytes)| bytes.as_slice());
+        let config = config::parse(policy).unwrap();
         let hits = run_configured(
             rules,
-            &config,
+            config.engine_settings(),
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
         verify_locations(

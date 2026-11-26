@@ -169,7 +169,7 @@ struct Scan {
 
 fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
     // The selection is resolved before the working directory moves.
-    let (mut names, selection) = files::list(root, paths)?;
+    let (names, selection) = files::list(root, paths)?;
     let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
     let entered = enter(root)?;
     let ledger_bytes = policy(entered, "ledger")?;
@@ -185,7 +185,6 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
             )));
         }
     }
-    names.retain(|name| !config.exclude.is_match(name));
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
     let findings = scan_files(
@@ -219,12 +218,12 @@ fn scan_files<'a>(
     names: impl Iterator<Item = &'a str>,
     mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Vec<engine::Finding>> {
-    for name in names {
+    for name in names.filter(|name| !config.exclude.is_match(name)) {
         let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
         if let Some(bytes) = bytes {
             findings.extend(engine::run_configured(
                 engine::registry(),
-                config,
+                config.engine_settings(),
                 [(name, bytes.as_slice())],
             ));
         }
