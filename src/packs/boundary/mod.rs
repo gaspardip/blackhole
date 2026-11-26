@@ -25,6 +25,7 @@ fn check(path: &str, text: &str, limit: usize, findings: &mut Findings) {
 
 mod bases;
 mod folder;
+mod importer;
 mod imports;
 mod links;
 mod module_object;
@@ -34,16 +35,15 @@ mod values;
 
 use crate::{config::ImportPolicy, engine::TsCtx};
 pub use folder::FOLDER;
-use imports::Kind;
-pub(crate) use imports::{Import, collect as collect_imports};
-use oxc_resolver::PackageType;
+use importer::{Importer, ReadingMode};
+pub(crate) use imports::Import;
+use imports::{Kind, collect as collect_imports};
 pub(crate) use resolver::Reader;
-use resolver::{Charge, Conditions, Loaders, Tree, TypeImportTarget};
+use resolver::{Charge, Loaders, Tree};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
 };
 
 pub const BANNED: Rule = Rule {
@@ -71,7 +71,7 @@ struct Resolution<'a, 'source> {
 pub struct RepoCtx<'a, 'source> {
     resolution: Result<Resolution<'a, 'source>, String>,
     policy: ImportPolicy<'a>,
-    exports: Mutex<BTreeMap<String, Arc<folder::ExportSource>>>,
+    exports: folder::ExportCache,
 }
 
 impl<'a, 'source> RepoCtx<'a, 'source> {
@@ -82,122 +82,15 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
     ) -> Self {
         let resolution = paths.map(|paths| {
             let tree = Tree::from_paths(paths, reader);
-            let loaders = tree.loaders(!policy.folders.is_empty());
+            let loaders = tree.loaders();
             Resolution { tree, loaders }
         });
         Self {
             resolution,
             policy,
-            exports: Mutex::default(),
+            exports: folder::ExportCache::default(),
         }
     }
-
-    fn package_target(
-        &self,
-        importer: Result<&Path, &String>,
-        mode: Conditions,
-        name: &str,
-        charge: &Charge<'_>,
-    ) -> Result<Option<String>, String> {
-        if !name.starts_with('#') {
-            return Ok(None);
-        }
-        let path = importer.map_err(Clone::clone)?;
-        let Resolution { tree, loaders } = self.resolution.as_ref().map_err(Clone::clone)?;
-        let reader = tree.reader.expect("repository context has a reader");
-        if let Some(loader) = loaders.types(mode)
-            && let Some(target) =
-                reader.type_import_target(loader, tree, mode, path, name, charge)?
-        {
-            return Ok(match target {
-                TypeImportTarget::Blocked | TypeImportTarget::Local(_) => None,
-                TypeImportTarget::Package { name, .. } => Some(name),
-            });
-        }
-        reader.package_target(tree, mode, path, name, charge)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ModuleFormat {
-    kind: PackageType,
-    declared: bool,
-}
-
-impl ModuleFormat {
-    fn has_filename_base(self, required: PackageType, extension: Option<&str>) -> bool {
-        // Without a declared format, TypeScript tooling can change which loader runs the file.
-        self.kind == required
-            && (self.declared
-                || match required {
-                    PackageType::CommonJs => extension == Some("js"),
-                    PackageType::Module => !matches!(extension, Some("ts" | "tsx")),
-                })
-    }
-}
-
-fn module_format(
-    extension: Option<&str>,
-    has_module_syntax: bool,
-    package_type: impl FnOnce() -> Result<Option<PackageType>, String>,
-) -> Result<ModuleFormat, String> {
-    let explicit = match extension {
-        Some("cjs" | "cts") => Some(PackageType::CommonJs),
-        Some("mjs" | "mts") => Some(PackageType::Module),
-        _ => None,
-    };
-    let declared = if explicit.is_some() {
-        explicit
-    } else {
-        package_type()?
-    };
-    let implicit = if has_module_syntax {
-        PackageType::Module
-    } else {
-        PackageType::CommonJs
-    };
-    Ok(ModuleFormat {
-        kind: declared.unwrap_or(implicit),
-        declared: declared.is_some(),
-    })
-}
-
-fn loader_readings(
-    kind: Kind,
-    ts_extension: bool,
-    module: Option<ModuleFormat>,
-    name: &str,
-) -> impl Iterator<Item = (Result<String, &'static str>, Conditions)> {
-    use Conditions::{Import, Require, TypeImport, TypeRequire};
-    let commonjs = module.is_some_and(|m| m.declared && m.kind == PackageType::CommonJs);
-    let conditions = match (kind, commonjs) {
-        (Kind::StaticRequire | Kind::Require, _) | (Kind::Static, true) => Require,
-        (Kind::TypeRequire, _) | (Kind::TypeDeclaration, true) => TypeRequire,
-        (Kind::TypeImport | Kind::TypeDeclaration, _) => TypeImport,
-        _ => Import,
-    };
-    let dual = kind.implicit_mode()
-        && !module.is_some_and(|m| m.declared)
-        && ts_extension
-        && specifier::bare(name)
-        && (kind == Kind::TypeDeclaration || name.starts_with('#') || !name.contains('?'));
-    specifier::readings(name, kind)
-        .into_iter()
-        .enumerate()
-        .flat_map(move |(index, text)| {
-            let other = (dual && text.is_ok() && (kind == Kind::TypeDeclaration || index == 0))
-                .then(|| {
-                    (
-                        text.clone(),
-                        if kind == Kind::TypeDeclaration {
-                            TypeRequire
-                        } else {
-                            Require
-                        },
-                    )
-                });
-            std::iter::once((text, conditions)).chain(other)
-        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -228,38 +121,24 @@ fn denied(name: &str, bans: &[String]) -> bool {
     })
 }
 
-fn note(
-    repo: &RepoCtx<'_, '_>,
+fn banned_note(
+    site: &Importer<'_, '_, '_>,
     import: &Import,
-    path: Result<&Path, &String>,
-    module: Result<ModuleFormat, &String>,
-    extension: Option<&str>,
-    ts_extension: bool,
+    bans: &[String],
     charge: &Charge<'_>,
 ) -> Result<Option<String>, String> {
-    let Some(name) = import.name.as_deref() else {
-        return Ok(Some(NON_LITERAL.into()));
-    };
-    if let Some(required) = import.filename_base
-        && module.is_ok_and(|m| !m.has_filename_base(required, extension))
-    {
-        return Ok(Some(NON_LITERAL.into()));
-    }
-    let needs_format = import.needs_format(ts_extension);
-    for (reading, mode) in loader_readings(import.kind, ts_extension, module.ok(), name) {
-        let name = reading?;
-        if needs_format {
-            module.map_err(Clone::clone)?;
-        }
-        let target = repo.package_target(path, mode, &name, charge)?;
-        if denied(&name, repo.policy.bans) {
+    for reading in site.readings(import, ReadingMode::Banned)? {
+        let (name, mode) = reading?;
+        let target = site.package_target(&name, mode, charge, || Ok(None))?;
+        if denied(&name, bans) {
             return Ok(Some(name));
         }
         if target
+            .package
             .as_deref()
-            .is_some_and(|name| denied(name, repo.policy.bans))
+            .is_some_and(|name| denied(name, bans))
         {
-            return Ok(target);
+            return Ok(target.package);
         }
     }
     Ok(None)
@@ -274,56 +153,30 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
         return;
     }
     let rooted = Path::new("/").join(ts.path);
-    let resolution = repo.resolution.as_ref();
-    let importer = resolution
-        .map_err(Clone::clone)
-        .and_then(|resolution| resolution.tree.follow(&rooted));
-    let extension = ts
-        .path
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.rsplit_once('.'))
-        .map(|(_, ext)| ext.to_ascii_lowercase());
-    let extension = extension.as_deref();
-    let ts_extension = matches!(extension, Some("ts" | "tsx"));
-    let module = module_format(extension, ts.has_module_syntax, || {
-        if imports.iter().any(|i| i.needs_format(ts_extension)) {
-            let path = importer.as_deref().map_err(Clone::clone)?;
-            resolution.map_err(Clone::clone)?.tree.package_scope(path)
-        } else {
-            Ok(None)
-        }
-    });
+    let site = Importer::new(
+        &repo.resolution,
+        &rooted,
+        ts.has_module_syntax,
+        ts.program.source_type.is_javascript(),
+    );
+    site.prepare_banned(imports);
     let charge = work_budget(ts);
-    let mut verbatim = None;
     let mut last = None;
     for import in imports {
         ts.take_work(1);
         if last == Some(import.offset) {
             continue;
         }
-        let Some(mut note) = note(
-            repo,
-            import,
-            importer.as_deref(),
-            module.as_ref().copied(),
-            extension,
-            ts_extension,
-            &charge,
-        )
-        .unwrap_or_else(Some) else {
+        let Some(mut note) =
+            banned_note(&site, import, repo.policy.bans, &charge).unwrap_or_else(Some)
+        else {
             continue;
         };
         if import.verbatim_only {
-            match verbatim.get_or_insert_with(|| {
-                let path = importer.as_deref().map_err(Clone::clone)?;
-                let Resolution { tree, loaders } = resolution.map_err(Clone::clone)?;
-                let reader = tree.reader.expect("repository context has a reader");
-                reader.verbatim_module_syntax(loaders, path)
-            }) {
+            match site.verbatim() {
                 Ok(true) => {}
                 Ok(false) => continue,
-                Err(error) => note.clone_from(error),
+                Err(error) => note = error,
             }
         }
         findings.report(import.offset as usize, Some(&note));

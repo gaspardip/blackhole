@@ -11,7 +11,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -228,7 +228,7 @@ impl<'a, 'source> Tree<'a, 'source> {
             .map_err(|link| link_error(link).to_string())
     }
 
-    pub(super) fn loaders(&self, folders: bool) -> Loaders<'a, 'source> {
+    pub(super) fn loaders(&self) -> Loaders<'a, 'source> {
         let resolver = self.resolver();
         let types = [Conditions::TypeImport, Conditions::TypeRequire].map(|mode| {
             let resolver = mode.resolver(&resolver, false);
@@ -240,16 +240,11 @@ impl<'a, 'source> Tree<'a, 'source> {
             let aliases = resolver.clone_with_options(options);
             SourceLoader { resolver, aliases }
         });
-        let runtime = folders.then(|| {
-            [
-                (Conditions::Import, false),
-                (Conditions::Require, false),
-                (Conditions::Import, true),
-                (Conditions::Require, true),
-            ]
-            .map(|(mode, javascript)| mode.resolver(&resolver, javascript))
-        });
-        Loaders { types, runtime }
+        Loaders {
+            root: resolver,
+            types,
+            runtime: OnceLock::new(),
+        }
     }
     pub(super) fn source_target(
         &self,
@@ -307,7 +302,8 @@ impl SourceLoader<'_, '_> {
 
 pub(super) struct Loaders<'tree, 'source> {
     types: [SourceLoader<'tree, 'source>; 2],
-    runtime: Option<[Loader<'tree, 'source>; 4]>,
+    root: Loader<'tree, 'source>,
+    runtime: OnceLock<[Loader<'tree, 'source>; 4]>,
 }
 
 impl<'tree, 'source> Loaders<'tree, 'source> {
@@ -320,10 +316,15 @@ impl<'tree, 'source> Loaders<'tree, 'source> {
     }
     pub(super) fn runtime(&self, mode: Conditions, javascript: bool) -> &Loader<'tree, 'source> {
         let index = usize::from(matches!(mode, Conditions::Require)) + 2 * usize::from(javascript);
-        &self
-            .runtime
-            .as_ref()
-            .expect("folder rule has runtime loaders")[index]
+        &self.runtime.get_or_init(|| {
+            [
+                (Conditions::Import, false),
+                (Conditions::Require, false),
+                (Conditions::Import, true),
+                (Conditions::Require, true),
+            ]
+            .map(|(mode, javascript)| mode.resolver(&self.root, javascript))
+        })[index]
     }
 }
 
@@ -347,7 +348,7 @@ const TYPE_ALIASES: &[(&str, &[&str])] = &[
     (".cjs", &[".cts", ".d.cts", ".cjs"]),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Conditions {
     Import,
     Require,
@@ -484,23 +485,29 @@ fn exact_target(
     if name.ends_with('/') || name.ends_with("/.") {
         return Ok(None);
     }
-    let absolute = name.starts_with('/');
-    let relative = super::specifier::relative(name);
-    for dir in file.ancestors().skip(1) {
+    let Some(parent) = file.parent() else {
+        return Ok(None);
+    };
+    let target = |candidate: &Path| {
+        let real = tree.follow(candidate)?;
+        tree.files
+            .contains(real.as_ref())
+            .then(|| repository_name(&real).map(str::to_owned))
+            .transpose()
+    };
+    if name.starts_with('/') {
         charge()?;
-        let candidate = if absolute {
-            PathBuf::from(name)
-        } else if relative {
-            Path::new("/").join(super::specifier::unresolved(repository_name(file)?, name).as_ref())
-        } else {
-            dir.join("node_modules").join(name)
-        };
-        let real = tree.follow(&candidate)?;
-        if tree.files.contains(real.as_ref()) {
-            return Ok(Some(repository_name(&real)?.to_owned()));
-        }
-        if absolute || relative {
-            break;
+        return target(Path::new(name));
+    }
+    if super::specifier::relative(name) {
+        charge()?;
+        let relative = super::specifier::unresolved(repository_name(file)?, name);
+        return target(&Path::new("/").join(relative.as_ref()));
+    }
+    for dir in parent.ancestors() {
+        charge()?;
+        if let Some(found) = target(&dir.join("node_modules").join(name))? {
+            return Ok(Some(found));
         }
     }
     Ok(None)

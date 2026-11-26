@@ -77,7 +77,7 @@ pub(crate) struct Import {
 }
 
 impl Import {
-    pub(crate) fn is_reexport(&self) -> bool {
+    pub(super) fn is_reexport(&self) -> bool {
         self.reexport
     }
 
@@ -331,7 +331,7 @@ fn unread_binding<'a>(kinds: &Kinds<'_, 'a>, node: AstKind<'a>) -> Option<u32> {
     }
 }
 
-pub(crate) fn collect(ctx: &TsCtx<'_>) -> Vec<Import> {
+pub(super) fn collect(ctx: &TsCtx<'_>) -> Vec<Import> {
     let in_declaration = ctx.program.source_type.is_typescript_definition();
     let mut imports = Vec::new();
     let kinds = Kinds::new(ctx);

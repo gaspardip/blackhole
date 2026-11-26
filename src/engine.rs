@@ -327,27 +327,22 @@ fn parse<'a>(
     })
 }
 
-pub(crate) fn dependency_imports(
+pub(crate) fn parse_dependency<T>(
     parent: &TsCtx<'_>,
     path: &str,
     bytes: &[u8],
     kind: SourceType,
-) -> Result<(bool, Vec<Import>), String> {
+    inspect: impl FnOnce(&TsCtx<'_>) -> T,
+) -> Result<T, String> {
     let source = Source::new(bytes);
     let arena = Allocator::default();
     let ts = source
         .encoding()
         .and_then(|()| parse(&arena, path, source.text(), kind))
         .map_err(|(_, note)| format!("{path}: {note}"))?;
-    let mut imports = crate::packs::boundary::collect_imports(&ts);
-    imports.retain(|import| {
-        ts.record_work(1);
-        import.is_reexport()
-    });
-    parent
-        .work
-        .set(parent.work.get().saturating_add(ts.work.get()));
-    Ok((ts.has_module_syntax, imports))
+    let result = inspect(&ts);
+    parent.take_work(usize::try_from(ts.work.get()).unwrap_or(usize::MAX));
+    Ok(result)
 }
 
 pub(crate) fn source_type(path: &str) -> Option<SourceType> {
@@ -577,7 +572,7 @@ pub(crate) fn scan<'source, S, T>(
     prepare: impl FnOnce(bool) -> (Option<Result<RepositoryPaths, String>>, Reader<'source>, S),
     check: impl FnOnce(Scanner<'_, 'source>, &Reader<'source>, S) -> T,
 ) -> T {
-    let enabled = (!policy.bans.is_empty() || !policy.folders.is_empty())
+    let enabled = (!policy.bans.is_empty() || !policy.folder_denies.is_empty())
         && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)));
     let (paths, reader, state) = prepare(enabled);
     let repository = paths.map(|paths| RepoCtx::new(paths, &reader, policy));
@@ -598,7 +593,7 @@ pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
-    run_configured(rules, Settings::default(), &[], files)
+    run_with_work(rules, &Config::default(), files).0
 }
 
 /// Applies configured rules to files already selected by the caller.
@@ -611,61 +606,24 @@ pub fn run_configured<'a>(
     bans: &[String],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
-    run_with_work(rules, settings, bans, files).0
+    run_with_work(rules, &Config::for_banned_imports(settings, bans), files).0
 }
 
 /// Runs configured rules and returns findings and counted work across the supplied files.
 ///
 /// # Panics
 /// Panics if a rule reports an offset past the end of its input.
-#[doc(hidden)]
 #[must_use]
 pub fn run_with_work<'a>(
     rules: &[Rule],
-    settings: Settings,
-    bans: &[String],
-    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> (Vec<Finding>, u64) {
-    run_memory(
-        rules,
-        settings,
-        ImportPolicy {
-            bans,
-            ..ImportPolicy::default()
-        },
-        files,
-    )
-}
-
-/// Applies repository policy to files already selected by the caller.
-///
-/// # Panics
-/// Panics if a rule reports an offset past the end of its input.
-pub fn run_with_config<'a>(
-    rules: &[Rule],
     config: &Config,
-    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> Vec<Finding> {
-    run_memory(
-        rules,
-        config.engine_settings(),
-        config.import_policy(),
-        files,
-    )
-    .0
-}
-
-fn run_memory<'a>(
-    rules: &[Rule],
-    settings: Settings,
-    policy: ImportPolicy<'_>,
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
     scan(
         rules,
-        settings,
-        policy,
+        config.engine_settings(),
+        config.import_policy(),
         |enabled| {
             let mut pending = files.into_iter();
             let mut inventory = Vec::new();
