@@ -858,7 +858,7 @@ fn reducer_resolution_scales_with_repeated_reads() {
                     for i in 0..n {
                         writeln!(text, "const copy{i} = [...alias{n}];").unwrap();
                     }
-                    text.push_str("return acc; } rows.reduce(fold, []);");
+                    text.push_str("return acc; } [1].reduce(fold, []);");
                     (text, n)
                 }
                 "callbacks" => {
@@ -868,12 +868,12 @@ fn reducer_resolution_scales_with_repeated_reads() {
                     }
                     text.push_str("return copy; }");
                     for _ in 0..n {
-                        text.push_str("rows.reduce(fold, []);");
+                        text.push_str("[1].reduce(fold, []);");
                     }
                     (text, 1)
                 }
                 _ => (
-                    "rows.reduce(acc => { var next = {}; return Object.assign(next, acc); }, {});"
+                    "[1].reduce(acc => { var next = {}; return Object.assign(next, acc); }, {});"
                         .repeat(n),
                     n,
                 ),

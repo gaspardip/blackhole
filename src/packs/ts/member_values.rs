@@ -218,7 +218,7 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
         let ObjectPropertyKind::ObjectProperty(field) = field else {
             return None;
         };
-        if field.kind != PropertyKind::Init || (ctx.resolution.conservative && field.computed) {
+        if field.kind != PropertyKind::Init {
             return None;
         }
         let key = if field.computed {

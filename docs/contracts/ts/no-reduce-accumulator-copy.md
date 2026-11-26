@@ -4,6 +4,8 @@
 
 This list is complete: the rule reports these shapes and nothing else.
 
+The receiver must be proven to be an array.
+
 In a `reduce` or `reduceRight` callback, written inline or as a declared,
 overloaded or aliased function (`declared-reducer.ts`,
 `overloaded-reducer.ts`), one of these copies of the incoming accumulator,
@@ -25,11 +27,12 @@ the callback's first parameter `acc`:
 The copy:
 
 - is in the callback's body, or in a function called where it is written
-  inside it, through `.call`, `Reflect.apply` or an immediately called
-  `.bind`, unless that function is a generator
+  inside it, through `.call`, `Reflect.apply` with a literal argument array
+  or an immediately called `.bind`, unless that function is a generator
   (`immediate-reducer-copy.ts`, `immediate-invocation-wrappers.ts`);
 - has no `await`, `yield`, `for await` or `await using` written between
-  the start of the callback and the copy;
+  the start of the callback and the copy, including arguments evaluated
+  before the copying call runs;
 - reads the incoming value: `acc` is written only by plain `acc = ...`
   statements in the callback's own body, outside any loop, and the copy
   comes before the first of them or inside its right-hand side.
@@ -46,6 +49,7 @@ Anything outside the list above. In particular:
 - A callback that writes `acc` any other way: destructuring, `++`,
   `for (acc of ...)`, a target wrapped in `as` or `!`, or a write in a
   nested function or a loop. The rule reports nothing in that callback.
+- An immediate call through a spread, such as `Reflect.apply(...[() => [...acc], null, []])`.
 - An `Object.assign` source after a spread argument, such as
   `Object.assign({}, ...layers, acc)`.
 - Copies in deferred callbacks, generators, functions run with `new`, or

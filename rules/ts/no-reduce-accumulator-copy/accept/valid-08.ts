@@ -1,1 +1,2 @@
+declare const items: number[];
 items.reduce((acc, item) => acc.concat(item), customCollection);

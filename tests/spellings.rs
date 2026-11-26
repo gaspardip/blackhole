@@ -727,7 +727,7 @@ fn written_selectors_are_unknown_at_immediate_calls() {
         (
             "bound writer leaves reducer unchanged",
             "no-reduce-accumulator-copy",
-            "const box={cb:other}; const names={method:'call'}; const alias=names; alias.method='bind'; (()=>{box.cb=(acc,x)=>({...acc,x});})[names.method](null); arr.reduce(box.cb,{});",
+            "const arr = [1]; const box={cb:other}; const names={method:'call'}; const alias=names; alias.method='bind'; (()=>{box.cb=(acc,x)=>({...acc,x});})[names.method](null); arr.reduce(box.cb,{});",
         ),
         (
             "bound writer leaves computed name unchanged",
@@ -757,7 +757,7 @@ fn accessor_assignments_do_not_supply_member_values() {
         (
             "callback through an alias of the owner",
             "no-reduce-accumulator-copy",
-            "const box={get cb(){return other;},set cb(value){}}; const alias=box; alias.cb=(acc,x)=>({...acc,x}); arr.reduce(box.cb,{});",
+            "const arr = [1]; const box={get cb(){return other;},set cb(value){}}; const alias=box; alias.cb=(acc,x)=>({...acc,x}); arr.reduce(box.cb,{});",
         ),
         (
             "name with a bracket accessor",
@@ -1470,52 +1470,52 @@ fn explicit_pipeline_receivers() {
         ),
         (
             "no-reduce-accumulator-copy",
-            "import {assign} from 'Object'; xs.reduce(acc=>assign({},acc),{});",
+            "const xs = [1]; import {assign} from 'Object'; xs.reduce(acc=>assign({},acc),{});",
             None,
         ),
         (
             "no-reduce-accumulator-copy",
-            "import * as other from 'Array'; xs.reduce(acc=>other.from(acc),[]);",
+            "const xs = [1]; import * as other from 'Array'; xs.reduce(acc=>other.from(acc),[]);",
             None,
         ),
         (
             "no-reduce-accumulator-copy",
-            "page.rows.reduce.call(page.other, acc => [...acc], []);",
+            "const page = { rows: [1], other: {} }; page.rows.reduce.call(page.other, acc => [...acc], []);",
             None,
         ),
         (
             "no-reduce-accumulator-copy",
-            "xs.reduce(acc=>acc.concat.call(other,n),[]);",
+            "const xs = [1]; xs.reduce(acc=>acc.concat.call(other,n),[]);",
             None,
         ),
         (
             "no-reduce-accumulator-copy",
-            "xs.reduce(acc=>Array.prototype.concat.call(acc,n),[]);",
+            "const xs = [1]; xs.reduce(acc=>Array.prototype.concat.call(acc,n),[]);",
             Some("Array.prototype"),
         ),
         (
             "no-reduce-accumulator-copy",
-            "xs.reduce(acc=>acc.concat.call(acc,n),[]);",
+            "const xs = [1]; xs.reduce(acc=>acc.concat.call(acc,n),[]);",
             Some("acc.concat"),
         ),
         (
             "no-reduce-accumulator-copy",
-            "xs.reduce.bind(xs,acc=>Object.assign({},acc),{})();",
+            "const xs = [1]; xs.reduce.bind(xs,acc=>Object.assign({},acc),{})();",
             Some("Object.assign"),
         ),
         (
             "no-reduce-accumulator-copy",
-            "xs.reduce.bind(xs,acc=>Object.assign({},acc),{});",
+            "const xs = [1]; xs.reduce.bind(xs,acc=>Object.assign({},acc),{});",
             None,
         ),
         (
             "no-reduce-accumulator-copy",
-            "const Array=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
+            "const xs = [1]; const Array=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
             Some("globalThis"),
         ),
         (
             "no-reduce-accumulator-copy",
-            "const globalThis=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
+            "const xs = [1]; const globalThis=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
             None,
         ),
     ] {
@@ -1648,7 +1648,7 @@ fn generator_bodies_and_async_disposal_split_regions() {
 #[test]
 fn array_evidence_follows_with() {
     let mut missing = Vec::new();
-    let source = "xs.reduce((acc, n) => acc.concat(n), [0].with(0, 1));";
+    let source = "const xs = [1]; xs.reduce((acc, n) => acc.concat(n), [0].with(0, 1));";
     check_spelling(
         &mut missing,
         "S79 reducer seeded with with",
@@ -1721,7 +1721,7 @@ const REDUCER_CALLS: &[Row] = &[
         path: "Object.assign",
         args: "{},acc",
         prelude: "",
-        context: "items.reduce(acc=>{DECL return (\nCALL)}, {})",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, {})",
         module: "",
         options: "",
         callback: "",
@@ -1731,7 +1731,7 @@ const REDUCER_CALLS: &[Row] = &[
         path: "Array.from",
         args: "acc",
         prelude: "",
-        context: "items.reduce(acc=>{DECL return (\nCALL)}, [])",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, [])",
         module: "",
         options: "",
         callback: "",
@@ -1741,7 +1741,7 @@ const REDUCER_CALLS: &[Row] = &[
         path: "acc.concat",
         args: "n",
         prelude: "const n=1;",
-        context: "items.reduce(acc=>{DECL return (\nCALL)}, [])",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, [])",
         module: "",
         options: "",
         callback: "",
@@ -1771,14 +1771,14 @@ fn reducer_spellings() {
         for (slot, source, value, rule, report) in [
             (
                 "object spread",
-                "items.reduce(acc=>({...VALUE}),{});",
+                "const items = [1]; items.reduce(acc=>({...VALUE}),{});",
                 "acc",
                 "no-reduce-accumulator-copy",
                 true,
             ),
             (
                 "array spread",
-                "items.reduce(acc=>[...VALUE],[]);",
+                "const items = [1]; items.reduce(acc=>[...VALUE],[]);",
                 "acc",
                 "no-reduce-accumulator-copy",
                 true,
@@ -2335,32 +2335,32 @@ fn member_writes_hide_reducer_callbacks_and_targets() {
         (
             "overwritten reducer callback",
             "no-reduce-accumulator-copy",
-            "const h={cb:(acc,x)=>({...acc,x})}; h.cb=other; arr.reduce(h.cb,{});",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; h.cb=other; arr.reduce(h.cb,{});",
         ),
         (
             "reducer callback overwritten through a bracket",
             "no-reduce-accumulator-copy",
-            "const h={cb:(acc,x)=>({...acc,x})}; h['cb']=other; arr.reduce(h['cb'],{});",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; h['cb']=other; arr.reduce(h['cb'],{});",
         ),
         (
             "reducer callback overwritten through an alias",
             "no-reduce-accumulator-copy",
-            "const h={cb:(acc,x)=>({...acc,x})}; const alias=h; alias.cb=other; arr.reduce(h.cb,{});",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; const alias=h; alias.cb=other; arr.reduce(h.cb,{});",
         ),
         (
             "reducer target written by nested callback",
             "no-reduce-accumulator-copy",
-            "xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o.t=acc;}); return Object.assign(o.t,acc);},{});",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o.t=acc;}); return Object.assign(o.t,acc);},{});",
         ),
         (
             "reducer target aliased in nested callback",
             "no-reduce-accumulator-copy",
-            "xs.reduce((acc,x)=>{const o={t:{}}; const alias=o; x.forEach(()=>{alias.t=acc;}); return Object.assign(o.t,acc);},{});",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; const alias=o; x.forEach(()=>{alias.t=acc;}); return Object.assign(o.t,acc);},{});",
         ),
         (
             "reducer target written with a bracket in nested callback",
             "no-reduce-accumulator-copy",
-            "xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o['t']=acc;}); return Object.assign(o['t'],acc);},{});",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o['t']=acc;}); return Object.assign(o['t'],acc);},{});",
         ),
     ] {
         check_spelling(&mut missing, label, rule, source, None);
@@ -2421,15 +2421,15 @@ fn a_spread_consumed_as_the_receiver_does_not_hide_assign_sources() {
     let mut missing = Vec::new();
     for (source, marker) in [
         (
-            "rows.reduce(acc => Object.assign.call(...[Object], {}, acc), {});",
+            "const rows = [1]; rows.reduce(acc => Object.assign.call(...[Object], {}, acc), {});",
             Some("Object.assign"),
         ),
         (
-            "rows.reduce(acc => Object.assign.call(...[Object, {}], acc), {});",
+            "const rows = [1]; rows.reduce(acc => Object.assign.call(...[Object, {}], acc), {});",
             None,
         ),
         (
-            "rows.reduce(acc => Object.assign({}, ...[], acc), {});",
+            "const rows = [1]; rows.reduce(acc => Object.assign({}, ...[], acc), {});",
             None,
         ),
     ] {
@@ -2449,15 +2449,15 @@ fn indirect_eval_and_alias_cycles_leave_incoming_accumulator_reads_visible() {
     let mut missing = Vec::new();
     for (source, marker) in [
         (
-            "rows.reduce(acc => { let next = {}; (0, eval)('next = shared'); return Object.assign(next, acc); }, {});",
+            "const rows = [1]; rows.reduce(acc => { let next = {}; (0, eval)('next = shared'); return Object.assign(next, acc); }, {});",
             "Object.assign",
         ),
         (
-            "rows.reduce(acc => { let next = {}; globalThis.eval('next = shared'); return Object.assign(next, acc); }, {});",
+            "const rows = [1]; rows.reduce(acc => { let next = {}; globalThis.eval('next = shared'); return Object.assign(next, acc); }, {});",
             "Object.assign",
         ),
         (
-            "rows.reduce(acc => { const a = b; const b = a; return [...a, ...b, ...acc]; }, []);",
+            "const rows = [1]; rows.reduce(acc => { const a = b; const b = a; return [...a, ...b, ...acc]; }, []);",
             "...acc",
         ),
     ] {
@@ -2467,6 +2467,102 @@ fn indirect_eval_and_alias_cycles_leave_incoming_accumulator_reads_visible() {
             "no-reduce-accumulator-copy",
             source,
             source.find(marker),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn reducer_review_regressions() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "R1 custom reduce method",
+            "const rows = { reduce(_step, seed) { return seed; } }; rows.reduce(acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 unproven receiver",
+            "rows.reduce(acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 custom method borrowed by an array",
+            "const rows = { reduce(_step, seed) { return seed; } }; rows.reduce.call([1], acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 native prototype method borrowed by an array",
+            "Array.prototype.reduce.call([1], acc => [...acc], []);",
+            Some("...acc"),
+        ),
+        (
+            "R2 suspension in an assign argument",
+            "[1].reduce(async acc => Object.assign({}, await ready, acc), {});",
+            None,
+        ),
+        (
+            "R2 suspension in an argument after the accumulator",
+            "[1].reduce(async acc => Object.assign({}, acc, await ready), {});",
+            None,
+        ),
+        (
+            "R2 suspension before an immediate function runs",
+            "[1].reduce(async acc => (() => [...acc])(await ready), []);",
+            None,
+        ),
+        (
+            "R2 suspension before Reflect.apply invokes its target",
+            "[1].reduce(async acc => Reflect.apply(() => [...acc], null, [await ready]), []);",
+            None,
+        ),
+        (
+            "R2 immediate copy before an unrelated argument suspends",
+            "[1].reduce(async acc => consume((() => [...acc])(), await ready), []);",
+            Some("...acc"),
+        ),
+        (
+            "R3 parenthesized assignment statement",
+            "[1].reduce((acc, n) => { ((acc = [...acc, n])); return acc; }, []);",
+            Some("...acc"),
+        ),
+        (
+            "R4 computed string target",
+            "[1].reduce(acc => { const box = { ['next']: {} }; return Object.assign(box.next, acc); }, {});",
+            Some("Object.assign"),
+        ),
+        (
+            "R4 computed template target",
+            "[1].reduce(acc => { const box = { [`next`]: {} }; return Object.assign(box.next, acc); }, {});",
+            Some("Object.assign"),
+        ),
+        (
+            "R4 computed target written by a nested callback",
+            "[1].reduce(acc => { const box = { ['next']: {} }; defer(() => { box.next = shared; }); return Object.assign(box.next, acc); }, {});",
+            None,
+        ),
+        (
+            "R5 Reflect.apply without an argument array",
+            "[1].reduce(acc => Reflect.apply(() => [...acc], null, null), []);",
+            None,
+        ),
+        (
+            "R5 Reflect.apply with a named argument array",
+            "[1].reduce(acc => { const args = []; return Reflect.apply(() => [...acc], null, args); }, []);",
+            None,
+        ),
+        (
+            "R7 trailing reduce argument",
+            "[1, 2].reduce((acc, n) => [...acc, n], [], null);",
+            Some("...acc"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
         );
     }
     assert!(missing.is_empty(), "{}", missing.join("\n"));

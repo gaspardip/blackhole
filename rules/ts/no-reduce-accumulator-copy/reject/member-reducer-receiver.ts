@@ -1,4 +1,4 @@
-declare const page: { rows: number[] };
+const page = { rows: [1] };
 function copy(acc: number[], row: number) {
   return [...acc, row];
 }

@@ -1,7 +1,7 @@
 use super::{
     array_methods::{ArrayEvidence, ArrayType, sole_declaration},
     function_types::direct_binding,
-    regions::{region, suspension_starts},
+    regions::{Regions, region},
     test_context::{callback_body, callback_kind},
     values::{
         binding_value_until, enclosing_functions, has_with, invocation_target, path_is, resolve,
@@ -74,10 +74,12 @@ fn incoming_until(ctx: &TsCtx<'_>, callback: NodeId, accumulator: SymbolId) -> O
             .take_while(|_| ctx.resolution.take_work(1))
             .find_map(|n| n.kind().as_assignment_expression())
             .filter(|e| e.operator == AssignmentOperator::Assign && e.left.span() == target)?;
-        let statement = matches!(
-            nodes.parent_kind(assignment.node_id.get()),
-            AstKind::ExpressionStatement(_)
-        );
+        let statement = nodes
+            .ancestors(assignment.node_id.get())
+            .take_while(|_| ctx.resolution.take_work(1))
+            .map(AstNode::kind)
+            .find(|kind| !matches!(kind, AstKind::ParenthesizedExpression(_)));
+        let statement = matches!(statement, Some(AstKind::ExpressionStatement(_)));
         let nested = nodes
             .ancestors(at)
             .take_while(|n| n.id() != callback && ctx.resolution.take_work(1))
@@ -103,15 +105,10 @@ fn reducer<'a>(
     incoming: &mut HashMap<SymbolId, Option<u32>>,
 ) -> Option<(NodeId, Reducer)> {
     let target = invocation_target(ctx, node)?;
-    target.method(
-        ctx,
-        |name| same_key(ctx, name, "reduce") || same_key(ctx, name, "reduceRight"),
-        |e| evidence.known(ctx, e),
-    )?;
-    let call = target.expand(ctx, false);
-    if call.args.len() > 2 {
+    if !evidence.native_reduce(ctx, &target) {
         return None;
     }
+    let call = target.expand(ctx, false);
     let callback = callback_kind(ctx, resolve(ctx, call.arg(0)?))?;
     let params = match callback {
         AstKind::Function(f) if !f.generator => &f.params,
@@ -315,7 +312,7 @@ fn fresh_target<'a>(
     expr: &'a Expression<'a>,
     callback: NodeId,
     targets: &FreshTargets<'a>,
-    regions: &mut HashMap<NodeId, Option<NodeId>>,
+    regions: &mut Regions,
 ) -> bool {
     // Only the target as written may name a fresh local; one reached through a member is an alias.
     let target = match unwrapped(ctx, expr) {
@@ -338,7 +335,7 @@ fn copies<'a>(
     reducer: Reducer,
     evidence: &mut ArrayEvidence,
     targets: &FreshTargets<'a>,
-    regions: &mut HashMap<NodeId, Option<NodeId>>,
+    regions: &mut Regions,
 ) -> bool {
     let Some(target) = invocation_target(ctx, node) else {
         return false;
@@ -421,14 +418,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if reducers.is_empty() {
         return;
     }
-    let suspensions = suspension_starts(ctx);
-    let mut regions = HashMap::new();
+    let mut regions = Regions::new(ctx);
     let body_span = reducers
         .values()
         .map(|reducer| reducer.body)
         .reduce(|left, right| Span::new(left.start.min(right.start), left.end.max(right.end)))
         .expect("at least one reducer");
-    let reducer_of = |id, regions: &mut HashMap<_, _>| {
+    let reducer_of = |id, regions: &mut Regions| {
         let copy = nodes.kind(id).span();
         if !body_span.contains_inclusive(copy) {
             return None;
@@ -438,18 +434,10 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         if !reducer.body.contains_inclusive(copy) || copy.end > reducer.incoming_until {
             return None;
         }
-        if !ctx
-            .resolution
-            .take_work(suspensions.len().bit_width() as usize)
-        {
-            return None;
-        }
         // A copy after a suspension may run after the callback returned.
         let start = nodes.kind(callback).span().start;
-        let first = suspensions.partition_point(|&at| at < start);
-        suspensions
-            .get(first)
-            .is_none_or(|&at| at >= copy.start)
+        regions
+            .uninterrupted(ctx, start, copy.end)
             .then_some((callback, reducer))
     };
     for (id, node) in nodes.iter_enumerated() {

@@ -1,3 +1,4 @@
+declare const items: number[];
 function copy(acc: object, item: object): object;
 function copy(acc: object, item: object) {
   return Object.assign({}, acc, item);

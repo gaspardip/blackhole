@@ -3,6 +3,7 @@ use blackhole_check::engine::{registry, run};
 const RULE_ID: &str = "ts/no-reduce-accumulator-copy";
 
 fn check(path: &str, source: &str, expected: usize) {
+    let source = format!("const rows = [1]; {source}");
     let hits = run(registry(), [(path, source.as_bytes())]);
     assert_eq!(
         hits.iter()
@@ -309,14 +310,14 @@ fn suspension_missing_evidence_and_ambiguity_keep_copies_silent() {
 fn work_exhaustion_stops_one_file_without_affecting_the_next() {
     let key = "a".repeat(8192);
     let bounded = format!(
-        "rows.reduce(acc => {{
+        "const rows = [1]; rows.reduce(acc => {{
 const early = [...acc];
 const box = {{'{key}': acc}};
 const copy = [...box['{key}']];
 return [...acc];
 }}, []);"
     );
-    let after = "rows.reduce(acc => [...acc], []);";
+    let after = "const rows = [1]; rows.reduce(acc => [...acc], []);";
     let hits = run(
         registry(),
         [("a.ts", bounded.as_bytes()), ("b.ts", after.as_bytes())],

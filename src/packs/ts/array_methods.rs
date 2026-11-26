@@ -74,6 +74,30 @@ impl ArrayEvidence {
         result
     }
 
+    pub(super) fn native_reduce<'a>(
+        &mut self,
+        ctx: &TsCtx<'a>,
+        target: &InvocationTarget<'a>,
+    ) -> bool {
+        let Some((owner, key)) = receiver(ctx, target.callee) else {
+            return false;
+        };
+        if !same_key(ctx, key, "reduce") && !same_key(ctx, key, "reduceRight") {
+            return false;
+        }
+        match target.this_arg {
+            ThisArg::Member => self.known(ctx, owner),
+            ThisArg::Explicit(Some(arg)) => {
+                (target
+                    .global_path()
+                    .is_some_and(|path| path_is(ctx, path, &["Array", "prototype", key]))
+                    || self.known(ctx, owner))
+                    && self.known(ctx, arg)
+            }
+            ThisArg::Explicit(None) => false,
+        }
+    }
+
     pub(super) fn known<'a>(&mut self, ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> bool {
         let mut path = Vec::new();
         let result = loop {

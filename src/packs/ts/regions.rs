@@ -1,11 +1,11 @@
 use super::values::{
-    MemberKeys, Origin, origin_path, outer, path_is, same_key, site_target, unwrapped,
+    MemberKeys, Origin, inner, origin_path, outer, path_is, same_key, site_target, unwrapped,
 };
 use crate::engine::TsCtx;
 use oxc::{
     ast::{
         AstKind,
-        ast::{CallExpression, VariableDeclarationKind},
+        ast::{Argument, CallExpression, Expression, VariableDeclarationKind},
     },
     span::{GetSpan, Span},
     syntax::node::NodeId,
@@ -19,7 +19,11 @@ fn forwards_bind_argument(ctx: &TsCtx<'_>, call: &CallExpression<'_>, function: 
         .is_some_and(|arg| unwrapped(ctx, arg).span() == function)
 }
 
-fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) -> bool {
+fn immediate_call<'a>(
+    ctx: &TsCtx<'a>,
+    regions: &Regions,
+    function: &oxc::semantic::AstNode<'a>,
+) -> bool {
     let mut id = function.id();
     let callee = function.span();
     while let Some(parent) = outer(ctx, id) {
@@ -32,11 +36,19 @@ fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) ->
                 if target.callee.span() == callee
                     && !target.function_apply
                     && (in_callee
-                        || origin_path(ctx, written).is_some_and(|(origin, path)| {
-                            origin == Origin::Global && path_is(ctx, &path, &["Reflect", "apply"])
-                        }))
+                        || (call
+                            .arguments
+                            .get(2)
+                            .and_then(Argument::as_expression)
+                            .is_some_and(|args| {
+                                matches!(inner(ctx, args), Expression::ArrayExpression(_))
+                            })
+                            && origin_path(ctx, written).is_some_and(|(origin, path)| {
+                                origin == Origin::Global
+                                    && path_is(ctx, &path, &["Reflect", "apply"])
+                            })))
                 {
-                    return true;
+                    return regions.uninterrupted(ctx, callee.end, call.span.end);
                 }
                 if let Some(member) = target.callee.get_member_expr()
                     && MemberKeys(ctx)
@@ -64,7 +76,7 @@ fn immediate_call<'a>(ctx: &TsCtx<'a>, function: &oxc::semantic::AstNode<'a>) ->
     false
 }
 
-pub(super) fn suspension_starts(ctx: &TsCtx<'_>) -> Vec<u32> {
+fn suspension_starts(ctx: &TsCtx<'_>) -> Vec<u32> {
     let mut starts: Vec<_> = ctx
         .semantic
         .nodes()
@@ -93,18 +105,37 @@ pub(super) fn suspension_starts(ctx: &TsCtx<'_>) -> Vec<u32> {
     starts
 }
 
-pub(super) fn region(
-    ctx: &TsCtx<'_>,
-    regions: &mut HashMap<NodeId, Option<NodeId>>,
-    mut id: NodeId,
-) -> Option<NodeId> {
+pub(super) struct Regions {
+    boundaries: HashMap<NodeId, Option<NodeId>>,
+    suspensions: Vec<u32>,
+}
+
+impl Regions {
+    pub(super) fn new(ctx: &TsCtx<'_>) -> Self {
+        Self {
+            boundaries: HashMap::new(),
+            suspensions: suspension_starts(ctx),
+        }
+    }
+
+    pub(super) fn uninterrupted(&self, ctx: &TsCtx<'_>, start: u32, end: u32) -> bool {
+        ctx.resolution
+            .take_work(self.suspensions.len().bit_width() as usize)
+            && self
+                .suspensions
+                .get(self.suspensions.partition_point(|&at| at < start))
+                .is_none_or(|&at| at >= end)
+    }
+}
+
+pub(super) fn region(ctx: &TsCtx<'_>, regions: &mut Regions, mut id: NodeId) -> Option<NodeId> {
     let nodes = ctx.semantic.nodes();
     let mut path = Vec::new();
     let inherited = loop {
         if !ctx.resolution.take_work(1) {
             return None;
         }
-        if let Some(&region) = regions.get(&id) {
+        if let Some(&region) = regions.boundaries.get(&id) {
             break region;
         }
         if id == NodeId::ROOT {
@@ -127,7 +158,7 @@ pub(super) fn region(
             }
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
                 matches!(node.kind(), AstKind::Function(f) if f.generator)
-                    || !immediate_call(ctx, node)
+                    || !immediate_call(ctx, regions, node)
             }
             AstKind::PropertyDefinition(p) => {
                 !p.r#static
@@ -148,6 +179,8 @@ pub(super) fn region(
         }
         id = node.id();
     };
-    regions.extend(path.into_iter().map(|id| (id, inherited)));
+    regions
+        .boundaries
+        .extend(path.into_iter().map(|id| (id, inherited)));
     inherited
 }
