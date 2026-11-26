@@ -79,9 +79,14 @@ fn evaluate(
         batch: &mut batch,
     };
     let diff = diff_rules(&mut ctx)?;
-    let findings = crate::scan_files(scan_config, diff.diagnostics, head_tree.paths(), |path| {
-        head_tree.read(path, ctx.batch)
-    })?;
+    let findings = crate::scan_files(
+        scan_config,
+        diff.diagnostics,
+        head_tree.paths(),
+        &mut *ctx.batch,
+        |batch| head_tree.repository_paths(batch),
+        |batch, path| head_tree.read(path, batch),
+    )?;
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,

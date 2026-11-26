@@ -1,0 +1,5 @@
+app.cjs:1:9 boundary/banned-imports [advisory] @scope/restricted
+app.mjs:1:8 boundary/banned-imports [advisory] restricted/tool
+app.mjs:2:8 boundary/banned-imports [advisory] restricted/tool
+app.mjs:5:8 boundary/banned-imports [advisory] present/tool
+boundary/banned-imports Remove the dependency and implement the operation with an allowed module.

@@ -1,0 +1,551 @@
+mod versions;
+
+use super::{Charge, Conditions, Manifest, Tree, repository_name};
+use oxc::span::SourceType;
+use oxc_resolver::PathUtil;
+use serde_json::Value;
+use std::path::Path;
+
+type Lookup = Result<bool, String>;
+type TargetLookup<T> = Result<Option<T>, TargetError>;
+
+enum Target<T> {
+    Matched(T),
+    Blocked,
+    Unmatched,
+}
+
+pub(super) enum TargetError {
+    InvalidTarget(String),
+    Resolution(String),
+}
+
+pub(super) fn versioned_type_condition(name: &str) -> bool {
+    name.strip_prefix("types@").is_some_and(versions::matches)
+}
+
+pub(super) fn is_package(name: &str) -> bool {
+    super::super::specifier::bare(name)
+        && !name.starts_with('#')
+        && !super::super::specifier::external_url(name)
+}
+
+pub(super) fn import_target(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+    charge: &Charge<'_>,
+) -> Result<Option<super::TypeImportTarget>, String> {
+    let declarations = PackageLookup {
+        tree,
+        mode,
+        charge,
+        javascript: false,
+    };
+    let javascript = PackageLookup {
+        javascript: true,
+        ..declarations
+    };
+    let resolve = |root: &Path, target: &str, capture: Capture<'_>| {
+        let Some(target) = capture.apply(target) else {
+            return Ok(None);
+        };
+        if let Some(path) = target.strip_prefix("./") {
+            if invalid_relative(path) {
+                return Err(TargetError::InvalidTarget(format!(
+                    "invalid package import target {target:?} in {}",
+                    root.display()
+                )));
+            }
+            let path = root.join(path);
+            let found = declarations
+                .file(&path, false)
+                .map_err(TargetError::Resolution)?
+                || (!is_typescript(&path)
+                    && javascript
+                        .file(&path, false)
+                        .map_err(TargetError::Resolution)?);
+            return Ok(found.then_some(super::TypeImportTarget::Local));
+        }
+        if target.is_empty() || !is_package(&target) {
+            return Ok(None);
+        }
+        lookup(tree, &root.join("package.json"), &target, mode, charge)
+            .map(|found| found.then_some(super::TypeImportTarget::Package(target)))
+    };
+    match walk_import(tree, importer, name, mode, charge, resolve) {
+        Ok(Target::Matched(target)) => Ok(Some(target)),
+        Ok(Target::Blocked) => Ok(Some(super::TypeImportTarget::Blocked)),
+        Ok(Target::Unmatched) => Ok(None),
+        Err(error) => Err(error.message()),
+    }
+}
+
+pub(super) fn package_target(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+    charge: &Charge<'_>,
+) -> Result<Option<String>, String> {
+    match walk_import(tree, importer, name, mode, charge, |_, target, capture| {
+        let end = super::super::specifier::path_end(target);
+        let Some(target) = capture.apply(&target[..end]) else {
+            return Ok(None);
+        };
+        if target.is_empty()
+            || target.starts_with(['/', '\0'])
+            || target.starts_with("../")
+            || (target.starts_with("./") && Path::new(&target).is_invalid_exports_target())
+        {
+            return Err(TargetError::InvalidTarget(target));
+        }
+        Ok(Some((!target.starts_with("./")).then_some(target)))
+    }) {
+        Ok(Target::Matched(target)) => Ok(target),
+        Ok(Target::Blocked | Target::Unmatched) | Err(TargetError::InvalidTarget(_)) => Ok(None),
+        Err(TargetError::Resolution(error)) => Err(error),
+    }
+}
+
+fn walk_import<T>(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+    charge: &Charge<'_>,
+    mut resolve: impl FnMut(&Path, &str, Capture<'_>) -> TargetLookup<T>,
+) -> Result<Target<T>, TargetError> {
+    if name == "#" {
+        return Ok(Target::Unmatched);
+    }
+    let Some((root, manifest)) = Tree::nearest_manifest(importer, |path| tree.manifest(path))
+        .map_err(TargetError::Resolution)?
+    else {
+        return Ok(Target::Unmatched);
+    };
+    let Some(paths) = manifest.get("imports").and_then(Value::as_object) else {
+        return Ok(Target::Unmatched);
+    };
+    let Some((target, capture)) =
+        select_path(paths, name, true, charge).map_err(TargetError::Resolution)?
+    else {
+        return Ok(Target::Unmatched);
+    };
+    walk_target(target, mode, charge, &mut |target| {
+        resolve(root, target, capture)
+    })
+}
+
+fn lookup(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+    charge: &Charge<'_>,
+) -> Result<bool, TargetError> {
+    let package_end = name
+        .match_indices('/')
+        .nth(usize::from(name.starts_with('@')))
+        .map_or(name.len(), |(index, _)| index);
+    let (package, subpath) = name.split_at(package_end);
+    let subpath = subpath.strip_prefix('/').unwrap_or(subpath);
+    let package_lookup = PackageLookup {
+        tree,
+        mode,
+        charge,
+        javascript: false,
+    };
+    let mut candidates = Vec::new();
+    let mut invalid = None;
+    if let Some((dir, manifest)) = Tree::nearest_manifest(importer, |path| tree.manifest(path))
+        .map_err(TargetError::Resolution)?
+        && manifest.get("name").and_then(Value::as_str) == Some(package)
+        && let Some(exports) = exports_field(&manifest)
+    {
+        if remember_invalid(package_lookup.exports(dir, exports, subpath), &mut invalid)? {
+            return Ok(true);
+        }
+        candidates.push((dir.to_owned(), Some(manifest)));
+    }
+    let empty = Manifest::new();
+    for dir in importer.ancestors().skip(1) {
+        if dir.file_name().is_some_and(|name| name == "node_modules") {
+            continue;
+        }
+        let root = dir.join("node_modules").join(package);
+        let real = tree.follow(&root).map_err(TargetError::Resolution)?;
+        if !tree.dirs.contains(real.as_ref()) {
+            continue;
+        }
+        let manifest = tree
+            .manifest(&root.join("package.json"))
+            .map_err(TargetError::Resolution)?;
+        if remember_invalid(
+            package_lookup.target(&root, manifest.as_deref().unwrap_or(&empty), subpath),
+            &mut invalid,
+        )? {
+            return Ok(true);
+        }
+        candidates.push((root, manifest));
+    }
+
+    let javascript = PackageLookup {
+        javascript: true,
+        ..package_lookup
+    };
+    for (root, manifest) in candidates {
+        if remember_invalid(
+            javascript.target(&root, manifest.as_deref().unwrap_or(&empty), subpath),
+            &mut invalid,
+        )? {
+            return Ok(true);
+        }
+    }
+    invalid.map_or(Ok(false), Err)
+}
+
+fn exports_field(manifest: &Manifest) -> Option<&Value> {
+    manifest.get("exports").filter(|value| !value.is_null())
+}
+
+struct PackageLookup<'a, 'tree, 'source> {
+    tree: &'a Tree<'tree, 'source>,
+    mode: Conditions,
+    charge: &'a Charge<'a>,
+    javascript: bool,
+}
+
+impl PackageLookup<'_, '_, '_> {
+    fn target(&self, root: &Path, manifest: &Manifest, subpath: &str) -> Result<bool, TargetError> {
+        if let Some(exports) = exports_field(manifest) {
+            self.exports(root, exports, subpath)
+        } else {
+            self.legacy(root, manifest, subpath)
+                .map_err(TargetError::Resolution)
+        }
+    }
+
+    fn exports(&self, root: &Path, exports: &Value, subpath: &str) -> Result<bool, TargetError> {
+        let mut paths = None;
+        if let Some(map) = exports.as_object() {
+            for key in map.keys() {
+                (self.charge)().map_err(TargetError::Resolution)?;
+                if key.starts_with('.') {
+                    paths = Some(map);
+                    break;
+                }
+            }
+        }
+        let key = if subpath.is_empty() {
+            ".".to_owned()
+        } else {
+            format!("./{subpath}")
+        };
+        let selected = if let Some(paths) = paths {
+            select_path(paths, &key, true, self.charge).map_err(TargetError::Resolution)?
+        } else {
+            subpath.is_empty().then_some((exports, Capture::Exact))
+        };
+        let Some((target, capture)) = selected else {
+            return Ok(false);
+        };
+        walk_target(target, self.mode, self.charge, &mut |target| {
+            let invalid = |target: &str| {
+                TargetError::InvalidTarget(format!(
+                    "invalid package export target {target:?} in {}",
+                    root.display()
+                ))
+            };
+            let target = target.strip_prefix("./").ok_or_else(|| invalid(target))?;
+            let Some(target) = capture.apply(target) else {
+                return Ok(None);
+            };
+            if invalid_relative(&target) {
+                return Err(invalid(&target));
+            }
+            self.file(&root.join(target), false)
+                .map(|found| found.then_some(()))
+                .map_err(TargetError::Resolution)
+        })
+        .map(|target| matches!(target, Target::Matched(())))
+    }
+
+    fn legacy(&self, root: &Path, manifest: &Manifest, subpath: &str) -> Lookup {
+        let fields: &[&str] = if self.javascript {
+            &["main"]
+        } else {
+            &["typings", "types", "main"]
+        };
+        let rooted = |target: &str| root.join(target.replace('\\', "/")).normalize();
+        let entry = fields
+            .iter()
+            .copied()
+            .find_map(|field| {
+                manifest
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.is_empty())
+            })
+            .map(rooted);
+        let candidate = if subpath.is_empty() {
+            entry.clone().unwrap_or_else(|| root.join("index"))
+        } else {
+            rooted(subpath)
+        };
+        let module = manifest.get("type").and_then(Value::as_str) == Some("module");
+        let implicit =
+            !matches!(self.mode, Conditions::TypeImport) || (subpath.is_empty() && !module);
+        let selected = if let Some(path) = candidate.strip_prefix(root).ok().and_then(Path::to_str)
+            && let Some(paths) = versions::paths(manifest, self.charge)?
+        {
+            select_path(paths, path, false, self.charge)?
+        } else {
+            None
+        };
+        if let Some((targets, capture)) = selected {
+            for target in targets.as_array().into_iter().flatten() {
+                (self.charge)()?;
+                let Some(target) = target.as_str() else {
+                    continue;
+                };
+                let target = match capture {
+                    Capture::Star(text) => target.replacen('*', text, 1),
+                    _ => target.to_owned(),
+                };
+                if self.entry(&rooted(&target), implicit)? {
+                    return Ok(true);
+                }
+            }
+            if !matches!(self.mode, Conditions::TypeImport) || !subpath.is_empty() {
+                return Ok(false);
+            }
+        } else if !subpath.is_empty() {
+            return self.entry(&candidate, implicit);
+        } else if entry.is_some() && self.entry(&candidate, implicit)? {
+            return Ok(true);
+        }
+        self.file(&root.join("index.js"), false)
+    }
+
+    fn entry(&self, path: &Path, implicit: bool) -> Lookup {
+        match self.file(path, implicit)? {
+            false if implicit => self.file(&path.join("index"), true),
+            found => Ok(found),
+        }
+    }
+
+    fn suffixes(&self, extension: &str) -> &'static [&'static str] {
+        let (declarations, javascript): (&[&str], &[&str]) = match (extension, self.javascript) {
+            ("js", _) | ("ts", true) => (&[".ts", ".tsx", ".d.ts"], &[".js", ".jsx"]),
+            ("jsx", _) | ("tsx", true) => (&[".tsx", ".ts", ".d.ts"], &[".jsx", ".js"]),
+            ("mjs", _) | ("mts", true) => (&[".mts", ".d.mts"], &[".mjs"]),
+            ("cjs", _) | ("cts", true) => (&[".cts", ".d.cts"], &[".cjs"]),
+            _ => (&[], &[]),
+        };
+        if self.javascript {
+            javascript
+        } else {
+            declarations
+        }
+    }
+
+    fn file(&self, path: &Path, implicit: bool) -> Lookup {
+        let name = repository_name(path)?;
+        if name.ends_with('/') {
+            return Ok(false);
+        }
+        if !self.javascript && is_typescript(path) && self.existing(path)? {
+            return Ok(true);
+        }
+        let filename = path
+            .file_name()
+            .and_then(|file| file.to_str())
+            .unwrap_or_default();
+        if let Some((stem, extension)) = filename.rsplit_once('.') {
+            let stem = match extension {
+                "ts" | "mts" | "cts" if self.javascript => stem.strip_suffix(".d").unwrap_or(stem),
+                _ => stem,
+            };
+            let suffixes = self.suffixes(extension);
+            for suffix in suffixes {
+                if self.existing(&path.with_file_name(format!("{stem}{suffix}")))? {
+                    return Ok(true);
+                }
+            }
+            if !self.javascript
+                && !is_typescript(path)
+                && suffixes.is_empty()
+                && self.existing(&path.with_file_name(format!("{stem}.d.{extension}.ts")))?
+            {
+                return Ok(true);
+            }
+        }
+        if implicit {
+            for suffix in self.suffixes("js") {
+                let mut candidate = path.as_os_str().to_os_string();
+                candidate.push(suffix);
+                if self.existing(Path::new(&candidate))? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn existing(&self, path: &Path) -> Lookup {
+        let real = self.tree.follow(path)?;
+        let supported = if self.javascript {
+            SourceType::from_path(&real).is_ok_and(SourceType::is_javascript)
+        } else {
+            is_typescript(&real)
+        };
+        if self.tree.files.contains(real.as_ref()) && supported {
+            repository_name(&real)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+impl TargetError {
+    pub(super) fn message(self) -> String {
+        match self {
+            Self::InvalidTarget(message) | Self::Resolution(message) => message,
+        }
+    }
+}
+
+fn remember_invalid(
+    result: Result<bool, TargetError>,
+    invalid: &mut Option<TargetError>,
+) -> Result<bool, TargetError> {
+    if let Err(error @ TargetError::InvalidTarget(_)) = result {
+        invalid.get_or_insert(error);
+        Ok(false)
+    } else {
+        result
+    }
+}
+
+fn walk_target<T>(
+    target: &Value,
+    mode: Conditions,
+    charge: &Charge<'_>,
+    resolve: &mut impl FnMut(&str) -> TargetLookup<T>,
+) -> Result<Target<T>, TargetError> {
+    charge().map_err(TargetError::Resolution)?;
+    let mut fallback = Ok(Target::Unmatched);
+    let array = target.is_array();
+    let mut try_target = |target| match walk_target(target, mode, charge, resolve) {
+        Err(error @ TargetError::InvalidTarget(_)) if array || mode.is_type() => {
+            if array || matches!(fallback, Ok(Target::Unmatched)) {
+                fallback = Err(error);
+            }
+            None
+        }
+        Ok(Target::Blocked) if array => {
+            fallback = Ok(Target::Blocked);
+            None
+        }
+        Ok(Target::Unmatched) => None,
+        result => Some(result),
+    };
+    let result = match target {
+        Value::String(target) => {
+            return resolve(target).map(|target| target.map_or(Target::Unmatched, Target::Matched));
+        }
+        Value::Object(conditions) => conditions.iter().find_map(|(key, target)| {
+            if let Err(error) = charge() {
+                Some(Err(TargetError::Resolution(error)))
+            } else if mode.names().contains(&key.as_str())
+                || (mode.is_type() && versioned_type_condition(key))
+            {
+                try_target(target)
+            } else {
+                None
+            }
+        }),
+        Value::Array(targets) if !targets.is_empty() => targets.iter().find_map(try_target),
+        Value::Null if mode.is_type() => return Ok(Target::Unmatched),
+        Value::Array(_) | Value::Null => return Ok(Target::Blocked),
+        _ => None,
+    };
+    result.unwrap_or(fallback)
+}
+
+fn invalid_relative(target: &str) -> bool {
+    target.starts_with('/')
+        || target
+            .split(['/', '\\'])
+            .any(|part| matches!(part, "." | "..") || part.eq_ignore_ascii_case("node_modules"))
+}
+
+fn is_typescript(path: &Path) -> bool {
+    SourceType::from_path(path).is_ok_and(SourceType::is_typescript)
+}
+
+#[derive(Clone, Copy)]
+enum Capture<'a> {
+    Exact,
+    Star(&'a str),
+    Tail(&'a str),
+}
+
+impl Capture<'_> {
+    fn apply(self, target: &str) -> Option<String> {
+        match self {
+            Self::Exact => Some(target.to_owned()),
+            Self::Star(text) => Some(target.replace('*', text)),
+            Self::Tail(text) if target.ends_with('/') => Some(format!("{target}{text}")),
+            Self::Tail(_) => None,
+        }
+    }
+}
+
+fn select_path<'a, 'b>(
+    paths: &'a Manifest,
+    name: &'b str,
+    exports: bool,
+    charge: &Charge<'_>,
+) -> Result<Option<(&'a Value, Capture<'b>)>, String> {
+    if (!exports || (!name.contains('*') && !name.ends_with('/')))
+        && let Some(target) = paths.get(name)
+    {
+        return Ok(Some((target, Capture::Exact)));
+    }
+    let mut best = None;
+    let mut rank = None;
+    for (key, target) in paths {
+        charge()?;
+        let matched = if let Some((prefix, suffix)) = key.split_once('*') {
+            if suffix.contains('*') {
+                continue;
+            }
+            name.strip_prefix(prefix)
+                .and_then(|text| text.strip_suffix(suffix))
+                .map(|text| {
+                    (
+                        (
+                            prefix.len() + usize::from(exports),
+                            if exports { key.len() } else { 0 },
+                        ),
+                        Capture::Star(text),
+                    )
+                })
+        } else if exports && key.ends_with('/') {
+            name.strip_prefix(key)
+                .map(|text| ((key.len(), 0), Capture::Tail(text)))
+        } else {
+            None
+        };
+        if let Some((priority, capture)) = matched
+            && rank.is_none_or(|rank| priority > rank)
+        {
+            rank = Some(priority);
+            best = Some((target, capture));
+        }
+    }
+    Ok(best)
+}

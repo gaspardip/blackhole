@@ -115,6 +115,27 @@ impl Tree {
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
         self.0.keys().map(String::as_str)
     }
+    pub(crate) fn repository_paths(
+        &self,
+        batch: &mut Batch,
+    ) -> io::Result<crate::packs::boundary::RepositoryPaths> {
+        let mut paths = crate::packs::boundary::RepositoryPaths::default();
+        for (name, entry) in &self.0 {
+            let path = std::path::Path::new("/").join(name);
+            match entry {
+                Entry::File(_) => {
+                    paths.files.insert(path);
+                }
+                Entry::Link(id) => {
+                    let target = String::from_utf8(batch.read(id)?).map_err(io::Error::other)?;
+                    paths.links.insert(path, target.into());
+                }
+                Entry::Other => (),
+            }
+        }
+        Ok(paths)
+    }
+
     // A link to a file is read under the link's name, as a checkout reads it. A directory has nothing to read.
     pub(crate) fn read(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
         self.blob(path, batch)?.map(|id| batch.read(id)).transpose()

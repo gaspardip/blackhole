@@ -136,18 +136,51 @@ pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, V
         .iter()
         .map(|p| resolve(&cwd.join(p)))
         .collect::<io::Result<Vec<_>>>()?;
-    let mut selected = Vec::new();
+    let mut listed = Vec::new();
     let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
     for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
         let name = std::str::from_utf8(bytes).map_err(|_| {
             io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
         })?;
-        let file = root.join(name);
-        if paths.is_empty() || paths.iter().any(|path| file.starts_with(path)) {
-            selected.push(name.to_owned());
+        listed.push(name.to_owned());
+    }
+    listed.sort_unstable();
+    listed.dedup();
+    Ok((listed, paths))
+}
+
+pub(crate) fn repository_paths<'a>(
+    root: &Path,
+    names: impl Iterator<Item = &'a str>,
+) -> io::Result<crate::packs::boundary::RepositoryPaths> {
+    let mut paths = crate::packs::boundary::RepositoryPaths::default();
+    for name in names {
+        let real = root.join(name);
+        let virtual_path = Path::new("/").join(name);
+        match fs::symlink_metadata(&real) {
+            Ok(meta) if meta.is_symlink() => {
+                let target = fs::read_link(&real)?;
+                let target = match target.strip_prefix(root) {
+                    Ok(local) => {
+                        let up: PathBuf =
+                            Path::new(name).components().skip(1).map(|_| "..").collect();
+                        up.join(local)
+                    }
+                    Err(_) => target,
+                };
+                paths.links.insert(virtual_path, target);
+            }
+            Ok(meta) if meta.is_file() => {
+                paths.files.insert(virtual_path);
+            }
+            Ok(_) => (),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{name:?}: {e}"))),
         }
     }
-    selected.sort_unstable();
-    selected.dedup();
-    Ok((selected, paths))
+    Ok(paths)
 }

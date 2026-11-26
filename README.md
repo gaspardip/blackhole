@@ -106,6 +106,22 @@ independently approved head supplies a new limit. See the
 [file-size contract](docs/contracts/boundary/file-size.md) for counting and
 selection details.
 
+`boundary/banned-imports` reports configured module names and their slash
+subpaths in TypeScript and JavaScript as advisory findings that do not change
+the verdict. Use the same `[boundaries]` table for both boundary settings.
+
+```toml
+[boundaries]
+banned-imports = ["lodash", "node:fs"]
+```
+
+Builtins match with or without `node:`. The rule also checks supported
+`package.json` imports aliases and reports loader uses whose specifier it cannot
+read. An empty list leaves the rule inactive. In CI, the base list applies
+until an independently approved head supplies a new list. See the
+[banned-imports contract](docs/contracts/boundary/banned-imports.md) for the
+supported forms.
+
 `blackhole ci` requires the existing independent head approval for changes to
 conventional TypeScript, lint, formatter, test, coverage and Git hook configs,
 including `package.json` and conventional local ESLint rule directories. For

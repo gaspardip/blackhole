@@ -187,11 +187,16 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     }
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
+    let all = || names.iter().map(String::as_str);
+    let selected = all()
+        .filter(|name| selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)));
     let findings = scan_files(
         &config,
         Vec::new(),
-        names.iter().map(String::as_str),
-        |name| files::read(&root.join(name)),
+        selected,
+        (),
+        |()| files::repository_paths(root, all()),
+        |(), name| files::read(&root.join(name)),
     )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
@@ -212,22 +217,32 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     })
 }
 
-fn scan_files<'a>(
+fn scan_files<'a, S: Send>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
-    mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
+    mut source: S,
+    inventory: impl FnOnce(&mut S) -> io::Result<packs::boundary::RepositoryPaths>,
+    mut read: impl FnMut(&mut S, &str) -> io::Result<Option<Vec<u8>>> + Send,
 ) -> io::Result<Vec<engine::Finding>> {
-    for name in names.filter(|name| !config.exclude.is_match(name)) {
-        let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
-        if let Some(bytes) = bytes {
-            findings.extend(engine::run_configured(
-                engine::registry(),
-                config.engine_settings(),
-                [(name, bytes.as_slice())],
-            ));
-        }
-    }
+    engine::scan(
+        engine::registry(),
+        config.engine_settings(),
+        config.banned_imports(),
+        |enabled| {
+            let paths = enabled.then(|| inventory(&mut source).map_err(|error| error.to_string()));
+            let reader = packs::boundary::Reader::new(move |name| read(&mut source, name));
+            (paths, reader, ())
+        },
+        |scanner, reader, ()| -> io::Result<()> {
+            for name in names.filter(|name| !config.exclude.is_match(name)) {
+                if let Some(bytes) = reader.read(name)? {
+                    scanner.file(name, &bytes, &mut findings);
+                }
+            }
+            Ok(())
+        },
+    )?;
     engine::sort_findings(&mut findings);
     Ok(findings)
 }

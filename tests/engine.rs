@@ -588,8 +588,7 @@ fn alias_verdicts_follow_original_reversed_and_rotated_declarations() {
 
 #[track_caller]
 fn bounded_findings(path: &str, source: &str) -> Vec<Finding> {
-    let (findings, work) =
-        blackhole_check::engine::run_with_work(registry(), path, source.as_bytes());
+    let (findings, work) = work::run_with_work(registry(), path, source.as_bytes());
     work::assert_work(work, source.len(), 16, path);
     findings
 }
