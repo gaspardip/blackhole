@@ -33,8 +33,8 @@ fn installs_and_merges_once() {
             "Stop":[
                 {"hooks":[{"type":"command","command":"first"}]},
                 {"hooks":[
-                    {"type":"command","command":"blackhole hook stop","timeout":30},
-                    {"type":"command","command":previous_launcher("stop"),"timeout":20},
+                    {"type":"command","command":"blackhole hook stop"},
+                    {"type":"command","command":previous_launcher("stop")},
                     {"type":"command","command":"second"}
                 ]}
             ],
@@ -208,44 +208,6 @@ fn invalid_settings_are_preserved() {
         }
     }
 }
-#[test]
-fn installed_guards_run_synchronously() {
-    let dir = repo();
-    let root = dir.path();
-    let legacy = json!({"hooks":{"Stop":[{"hooks":[
-        {"type":"command","command":"blackhole hook stop","async":true,"asyncRewake":true}
-    ]}]}});
-    for name in HOOK_FILES {
-        let p = root.join(name);
-        fs::create_dir(p.parent().unwrap()).unwrap();
-        fs::write(p, legacy.to_string()).unwrap();
-    }
-    let guards = |root: &Path| {
-        HOOK_FILES.map(|name| {
-            let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
-            doc["hooks"]["Stop"][0]["hooks"].clone()
-        })
-    };
-    init(root, true);
-    for hooks in guards(root) {
-        assert_eq!(hooks.as_array().unwrap().len(), 1);
-        assert_eq!(hooks[0].get("async"), None, "{hooks}");
-        assert_eq!(hooks[0].get("asyncRewake"), None, "{hooks}");
-    }
-    for (name, mut hooks) in HOOK_FILES.into_iter().zip(guards(root)) {
-        hooks[0]["async"] = json!(true);
-        hooks[0]["asyncRewake"] = json!(true);
-        let doc = json!({"hooks":{"Stop":[{"hooks":hooks}]}});
-        fs::write(root.join(name), doc.to_string()).unwrap();
-    }
-    init(root, true);
-    for hooks in guards(root) {
-        assert_eq!(hooks.as_array().unwrap().len(), 1);
-        assert_eq!(hooks[0].get("async"), None, "{hooks}");
-        assert_eq!(hooks[0].get("asyncRewake"), None, "{hooks}");
-    }
-}
-
 #[test]
 fn malformed_ledger_stops_init_before_any_write() {
     let dir = repo();
@@ -696,17 +658,33 @@ fn guard_added_beside(existing_group: impl Fn(&str, &Value) -> Option<Value>) {
             expected.push(fresh["hooks"][event][0].clone());
             assert_eq!(doc["hooks"][event], json!(expected), "{name} {event}");
         }
+        let bytes = fs::read(&p).unwrap();
+        init(root, true);
+        assert_eq!(fs::read(&p).unwrap(), bytes, "{name} rerun");
     }
 }
 
 #[test]
-fn conditional_guards_get_an_unconditional_one_beside_them() {
-    guard_added_beside(|cmd, guard| {
-        let mut group = guard.clone();
-        group["hooks"][0]["if"] = json!("Edit(*.ts)");
-        group["hooks"][0]["command"] = json!(previous_launcher(cmd));
-        Some(group)
-    });
+fn guards_with_extra_keys_get_a_plain_one_beside_them() {
+    for (key, value) in [
+        ("if", json!("Edit(*.ts)")),
+        ("args", json!(["hook"])),
+        ("async", json!(true)),
+        ("asyncRewake", json!(true)),
+        ("timeout", json!(30)),
+        ("shell", json!("bash")),
+    ] {
+        for legacy in [false, true] {
+            guard_added_beside(|cmd, guard| {
+                let mut group = guard.clone();
+                group["hooks"][0][key] = value.clone();
+                if legacy {
+                    group["hooks"][0]["command"] = json!(format!("blackhole hook {cmd}"));
+                }
+                Some(group)
+            });
+        }
+    }
 }
 
 #[test]

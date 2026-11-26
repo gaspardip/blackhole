@@ -274,25 +274,24 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                 continue;
             };
             for hook in commands.iter_mut().filter_map(Json::as_object_mut) {
-                // A handler with an `if` condition skips the events it does not match.
-                if hook.get("type").and_then(Json::as_str) != Some("command")
-                    || hook.get("if").is_some()
+                // Any other key (`if`, `args`, `async`, `timeout`, ...) can keep a hook from blocking.
+                if hook
+                    .entries()
+                    .any(|(key, _)| key != "type" && key != "command")
+                    || hook.get("type").and_then(Json::as_str) != Some("command")
                 {
                     continue;
                 }
-                let installed = hook.entry("command", || Json::string(""));
-                let Some(current) = installed.as_str().filter(|current| {
-                    *current == legacy || *current == previous || *current == command
+                let Some(installed) = hook.get_mut("command").filter(|installed| {
+                    installed.as_str().is_some_and(|current| {
+                        current == legacy || current == previous || current == command
+                    })
                 }) else {
                     continue;
                 };
-                if current != command {
+                if installed.as_str() != Some(command.as_str()) {
                     *installed = Json::string(&command);
                     changed = true;
-                }
-                // Codex and Claude run an async handler in the background, where it cannot block.
-                for flag in ["async", "asyncRewake"] {
-                    changed |= hook.remove(flag).is_some();
                 }
                 found = true;
             }

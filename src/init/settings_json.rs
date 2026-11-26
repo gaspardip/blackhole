@@ -39,11 +39,6 @@ impl Object {
         });
         &mut self.0[index].1
     }
-
-    pub(super) fn remove(&mut self, key: &str) -> Option<Json> {
-        let index = self.0.iter().position(|(name, _)| name == key)?;
-        Some(self.0.remove(index).1)
-    }
 }
 
 impl Json {
