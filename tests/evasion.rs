@@ -62,11 +62,14 @@ fn run(case: &Path) -> Result<()> {
     };
     let out = cmd.output()?;
     let stdout = String::from_utf8(out.stdout)?;
-    let matches_verdict = if gates == "green" && !stdout.is_empty() {
-        stdout.lines().any(|line| line.contains(" [advisory]"))
-            && !stdout
-                .lines()
-                .any(|line| line.starts_with("blackhole ci: red ("))
+    let matches_verdict = if gates == "green" {
+        let advisory = case.join("advisory");
+        let expected_stdout = if advisory.try_exists()? {
+            fs::read_to_string(advisory)?
+        } else {
+            String::new()
+        };
+        stdout == expected_stdout
     } else {
         stdout.lines().last().unwrap_or("") == summary
     };
