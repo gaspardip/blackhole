@@ -91,7 +91,6 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
         let path = importer.map_err(Clone::clone)?;
         let reader = self.tree.reader.expect("repository context has a reader");
         if let Some(loader) = self.loaders.types(mode)
-            && !name.contains('?')
             && let Some(target) = reader.type_import_target(loader, &self.tree, mode, path, name)?
         {
             return Ok(match target {
@@ -99,7 +98,7 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
                 TypeImportTarget::Package(package) => Some(package),
             });
         }
-        reader.package_target(self.loaders.package(mode), &self.tree, mode, path, name)
+        reader.package_target(&self.tree, mode, path, name)
     }
 }
 
@@ -165,7 +164,7 @@ fn loader_readings(
         && !module.is_some_and(|m| m.declared)
         && ts_extension
         && specifier::bare(name)
-        && (kind == Kind::TypeDeclaration || !name.contains('?'));
+        && (kind == Kind::TypeDeclaration || name.starts_with('#') || !name.contains('?'));
     specifier::readings(name, kind)
         .into_iter()
         .enumerate()

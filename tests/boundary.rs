@@ -92,6 +92,42 @@ fn banned_package_subpath_with_suffix() {
 }
 
 #[test]
+fn package_import_keys_keep_query_suffixes() {
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            (
+                "package.json",
+                r##"{"imports":{"#banned":"allowed","#banned?variant":"restricted","#clean":"restricted","#clean?variant":"allowed"}}"##,
+            ),
+            (
+                "a.mjs",
+                "import '#clean?variant';\nimport '#banned?variant';",
+            ),
+            (
+                "b.cjs",
+                "require('#clean?variant');\nrequire('#banned?variant');",
+            ),
+        ],
+        &[],
+        1,
+    );
+    assert_eq!(
+        lines_for(&out, "a.mjs:")
+            .into_iter()
+            .chain(lines_for(&out, "b.cjs:"))
+            .collect::<Vec<_>>(),
+        [
+            "a.mjs:2:8 boundary/banned-imports restricted",
+            "b.cjs:2:9 boundary/banned-imports restricted",
+        ]
+    );
+}
+
+#[test]
 fn loader_sources_share_the_base_check() {
     for (file, declaration, callee, own_base) in [
         ("a.cjs", "", "require.main.require", false),

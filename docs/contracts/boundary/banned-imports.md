@@ -10,9 +10,10 @@
   and re-exports (`forms`, `import-types`,
   `mixed_reexports_follow_the_exported_type_and_value_readings`).
 - A banned package name or subpath behind a `package.json` imports
-  alias. Exact and wildcard aliases and the applicable `import`,
-  `require`, `node-addons` or `module-sync` condition can supply
-  the name. Type-only aliases also try the selected declaration target
+  alias. Exact and wildcard aliases match the full specifier, including
+  any query or fragment. The applicable `import`, `require`,
+  `node-addons` or `module-sync` condition can supply the name. Type-only
+  aliases also try the selected declaration target
   (`package-aliases`, `node-addons`, `boundary-module-sync`,
   `type_package_imports_banned_rule_uses_resolved_condition`).
 - Calls through aliases of `require`, `module.require`, loaders

@@ -30,20 +30,6 @@ pub(super) fn import_target(
     name: &str,
     mode: Conditions,
 ) -> Result<Option<super::TypeImportTarget>, String> {
-    if name == "#" || name.starts_with("#/") {
-        return Ok(None);
-    }
-    let Some((root, manifest)) = Tree::nearest_manifest(importer, |path| tree.manifest(path))?
-    else {
-        return Ok(None);
-    };
-    let Some((target, capture)) = manifest
-        .get("imports")
-        .and_then(Value::as_object)
-        .and_then(|paths| select_path(paths, name, true))
-    else {
-        return Ok(None);
-    };
     let declarations = PackageLookup {
         tree,
         mode,
@@ -53,7 +39,7 @@ pub(super) fn import_target(
         javascript: true,
         ..declarations
     };
-    walk_target(target, mode, &mut |target| {
+    walk_import(tree, importer, name, mode, |root, target, capture| {
         let Some(target) = capture.apply(target) else {
             return Ok(None);
         };
@@ -81,6 +67,57 @@ pub(super) fn import_target(
             .map(|found| found.then_some(super::TypeImportTarget::Package(target)))
     })
     .map_err(TargetError::message)
+}
+
+pub(super) fn package_target(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+) -> Result<Option<String>, String> {
+    match walk_import(tree, importer, name, mode, |_, target, capture| {
+        let end = super::super::specifier::path_end(target);
+        let Some(target) = capture.apply(&target[..end]) else {
+            return Ok(None);
+        };
+        if target.is_empty()
+            || target.starts_with(['/', '\0'])
+            || target.starts_with("../")
+            || (target.starts_with("./") && Path::new(&target).is_invalid_exports_target())
+        {
+            return Err(TargetError::InvalidTarget(target));
+        }
+        Ok(Some((!target.starts_with("./")).then_some(target)))
+    }) {
+        Ok(target) => Ok(target.flatten()),
+        Err(TargetError::InvalidTarget(_)) => Ok(None),
+        Err(TargetError::Resolution(error)) => Err(error),
+    }
+}
+
+fn walk_import<T>(
+    tree: &Tree<'_, '_>,
+    importer: &Path,
+    name: &str,
+    mode: Conditions,
+    mut resolve: impl FnMut(&Path, &str, Capture<'_>) -> TargetLookup<T>,
+) -> TargetLookup<T> {
+    if name == "#" {
+        return Ok(None);
+    }
+    let Some((root, manifest)) = Tree::nearest_manifest(importer, |path| tree.manifest(path))
+        .map_err(TargetError::Resolution)?
+    else {
+        return Ok(None);
+    };
+    let Some((target, capture)) = manifest
+        .get("imports")
+        .and_then(Value::as_object)
+        .and_then(|paths| select_path(paths, name, true))
+    else {
+        return Ok(None);
+    };
+    walk_target(target, mode, &mut |target| resolve(root, target, capture))
 }
 
 fn lookup(
@@ -384,7 +421,8 @@ fn walk_target<T>(
         Value::Object(conditions) => conditions
             .iter()
             .filter(|(key, _)| {
-                mode.names().contains(&key.as_str()) || versioned_type_condition(key)
+                mode.names().contains(&key.as_str())
+                    || (mode.is_type() && versioned_type_condition(key))
             })
             .find_map(|(_, target)| try_target(target)),
         Value::Array(targets) => targets.iter().find_map(try_target),

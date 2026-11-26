@@ -54,7 +54,7 @@ pub(super) fn readings(name: &str, kind: super::Kind) -> Vec<Result<String, &'st
             return vec![Ok(name.to_owned())];
         }
     }
-    if !name.is_empty() && !name.contains(['\\', '%', '?', '#']) {
+    if name.starts_with('#') || !name.contains(['\\', '%', '?', '#']) {
         return vec![Ok(name.to_owned())];
     }
     let mut readings = vec![Ok(name.to_owned())];

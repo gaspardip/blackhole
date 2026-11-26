@@ -17,8 +17,6 @@ use std::{
 };
 
 const MAX_READS: usize = 64;
-// A Git path cannot collide with the virtual directory used to expose package specifiers.
-const PACKAGE_TARGETS: &str = "/\0";
 type ReadFile<'a> = Box<dyn FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a>;
 pub(crate) struct Reader<'a> {
     read: Mutex<ReadFile<'a>>,
@@ -61,26 +59,14 @@ impl<'a> Reader<'a> {
     fn limit() -> String {
         format!("resolution exceeded {MAX_READS} configuration reads")
     }
-    pub(super) fn package_target<'tree>(
+    pub(super) fn package_target(
         &self,
-        resolver: &Loader<'tree, 'a>,
-        tree: &Tree<'tree, 'a>,
+        tree: &Tree<'_, 'a>,
         mode: Conditions,
         file: &Path,
         name: &str,
     ) -> Result<Option<String>, String> {
-        self.bounded(|| {
-            let versioned = tree.versioned_imports_loader(resolver, mode, file, name)?;
-            let resolver = versioned.as_ref().unwrap_or(resolver);
-            Ok(resolver.resolve_file(file, name).ok().and_then(|target| {
-                target
-                    .path()
-                    .strip_prefix(PACKAGE_TARGETS)
-                    .ok()?
-                    .to_str()
-                    .map(str::to_owned)
-            }))
-        })
+        self.bounded(|| declarations::package_target(tree, file, name, mode))
     }
     pub(super) fn type_import_target(
         &self,
@@ -91,7 +77,7 @@ impl<'a> Reader<'a> {
         name: &str,
     ) -> Result<Option<TypeImportTarget>, String> {
         self.bounded(|| {
-            if Self::type_paths_target(loader, tree, file, name)? {
+            if !name.contains('?') && Self::type_paths_target(loader, tree, file, name)? {
                 return Ok(Some(TypeImportTarget::Local));
             }
             declarations::import_target(tree, file, name, mode)
@@ -146,7 +132,6 @@ pub(super) struct Tree<'a, 'source> {
     pub(super) links: Arc<super::links::Links>,
     dirs: Arc<BTreeSet<PathBuf>>,
     pub(super) reader: Option<&'a Reader<'source>>,
-    package_targets: bool,
     manifest_bytes: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
     manifests: Arc<ManifestCache<Arc<Manifest>>>,
     package_types: Arc<ManifestCache<Option<PackageType>>>,
@@ -226,44 +211,6 @@ impl<'a, 'source> Tree<'a, 'source> {
             .map_or_else(lookup, |reader| reader.bounded(lookup))
     }
 
-    fn versioned_imports_loader(
-        &self,
-        resolver: &Loader<'a, 'source>,
-        mode: Conditions,
-        file: &Path,
-        name: &str,
-    ) -> Result<Option<Loader<'a, 'source>>, String> {
-        if !mode.is_type() || !name.starts_with('#') {
-            return Ok(None);
-        }
-        let Some((_, manifest)) = Self::nearest_manifest(file, |path| self.manifest(path))? else {
-            return Ok(None);
-        };
-        let mut names = Vec::new();
-        if let Some(imports) = manifest.get("imports") {
-            collect_versioned_conditions(imports, &mut names);
-        }
-        Ok((!names.is_empty()).then(|| {
-            let mut options = resolver.options().clone();
-            options.condition_names.extend(names);
-            resolver.clone_with_options(options)
-        }))
-    }
-
-    fn package_resolver(&self, options: &ResolveOptions) -> ResolverGeneric<Self> {
-        ResolverGeneric::new_with_file_system(
-            Self {
-                package_targets: true,
-                ..self.clone()
-            },
-            ResolveOptions {
-                modules: vec![PACKAGE_TARGETS.to_owned()],
-                resolve_to_context: true,
-                tsconfig: None,
-                ..options.clone()
-            },
-        )
-    }
     pub(super) fn follow<'p>(&self, path: &'p Path) -> Result<std::borrow::Cow<'p, Path>, String> {
         self.links
             .follow(path)
@@ -282,9 +229,7 @@ impl<'a, 'source> Tree<'a, 'source> {
             let aliases = resolver.clone_with_options(options);
             SourceLoader { resolver, aliases }
         });
-        let packages = self.package_resolver(resolver.options());
-        let packages = Conditions::ALL.map(|mode| mode.resolver(&packages));
-        Loaders { types, packages }
+        Loaders { types }
     }
     fn resolver(&self) -> ResolverGeneric<Self> {
         ResolverGeneric::new_with_file_system(
@@ -299,25 +244,6 @@ impl<'a, 'source> Tree<'a, 'source> {
     }
 }
 
-fn collect_versioned_conditions(target: &Value, names: &mut Vec<String>) {
-    match target {
-        Value::Object(entries) => {
-            for (name, target) in entries {
-                if declarations::versioned_type_condition(name) {
-                    names.push(name.clone());
-                }
-                collect_versioned_conditions(target, names);
-            }
-        }
-        Value::Array(targets) => {
-            for target in targets {
-                collect_versioned_conditions(target, names);
-            }
-        }
-        _ => {}
-    }
-}
-
 type Loader<'tree, 'source> = ResolverGeneric<Tree<'tree, 'source>>;
 
 pub(super) struct SourceLoader<'tree, 'source> {
@@ -327,7 +253,6 @@ pub(super) struct SourceLoader<'tree, 'source> {
 
 pub(super) struct Loaders<'tree, 'source> {
     types: [SourceLoader<'tree, 'source>; 2],
-    packages: [Loader<'tree, 'source>; 4],
 }
 
 impl<'tree, 'source> Loaders<'tree, 'source> {
@@ -337,10 +262,6 @@ impl<'tree, 'source> Loaders<'tree, 'source> {
             Conditions::TypeRequire => Some(&self.types[1]),
             _ => None,
         }
-    }
-
-    pub fn package(&self, mode: Conditions) -> &Loader<'tree, 'source> {
-        &self.packages[mode as usize]
     }
 }
 
@@ -362,13 +283,6 @@ pub(super) enum Conditions {
 }
 
 impl Conditions {
-    const ALL: [Self; 4] = [
-        Self::Import,
-        Self::Require,
-        Self::TypeImport,
-        Self::TypeRequire,
-    ];
-
     pub(super) fn is_type(self) -> bool {
         matches!(self, Self::TypeImport | Self::TypeRequire)
     }
@@ -408,9 +322,6 @@ impl FileSystem for Tree<'_, '_> {
         Self::default()
     }
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        if self.package_targets && path.starts_with(PACKAGE_TARGETS) {
-            return Err(io::ErrorKind::NotFound.into());
-        }
         let unreadable = |entry: &Path, reason: &str| {
             let entry = entry.strip_prefix("/").unwrap_or(entry);
             let message = format!("{:?}: {reason}", entry.display().to_string());
@@ -449,9 +360,6 @@ impl FileSystem for Tree<'_, '_> {
         String::from_utf8(self.read(path)?).map_err(io::Error::other)
     }
     fn metadata(&self, path: &Path) -> io::Result<FileMetadata> {
-        if self.package_targets && path.starts_with(PACKAGE_TARGETS) {
-            return Ok(FileMetadata::new(false, true, false));
-        }
         let Ok(path) = self.links.follow(path) else {
             return Ok(FileMetadata::new(true, false, false));
         };
