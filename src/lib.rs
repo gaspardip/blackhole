@@ -187,7 +187,7 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     names.retain(|name| !config.exclude.is_match(name));
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
-    let findings = scan_files(names.iter().map(String::as_str), |name| {
+    let findings = scan_files(Vec::new(), names.iter().map(String::as_str), |name| {
         files::read(&root.join(name))
     })?;
     let actual = ledger::counts(&findings);
@@ -210,16 +210,17 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
 }
 
 fn scan_files<'a>(
+    mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
     mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Vec<engine::Finding>> {
-    let mut findings = Vec::new();
     for name in names {
         let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
         if let Some(bytes) = bytes {
             findings.extend(engine::run(engine::registry(), [(name, bytes.as_slice())]));
         }
     }
+    engine::sort_findings(&mut findings);
     Ok(findings)
 }
 
@@ -228,19 +229,20 @@ fn report(
     over: &ledger::Counts,
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let findings: Vec<_> = findings
-        .iter()
-        .filter(|f| {
-            // Advisory findings need output even when there is no overage.
-            f.gate == engine::Gate::Advisory
-                || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
-        })
-        .collect();
-    print_findings(&findings, output)
+    let findings = findings.iter().filter(|f| {
+        // Advisory findings need output even when there is no overage.
+        f.gate == engine::Gate::Advisory || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
+    });
+    print_findings(findings, output)
 }
 
-fn print_findings(findings: &[&engine::Finding], output: &mut impl Write) -> io::Result<()> {
+fn print_findings<'a>(
+    findings: impl IntoIterator<Item = &'a engine::Finding>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut matched = std::collections::BTreeSet::new();
     for f in findings {
+        matched.insert(f.rule);
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
         if f.gate == engine::Gate::Advisory {
             write!(output, " [advisory]")?;
@@ -251,7 +253,7 @@ fn print_findings(findings: &[&engine::Finding], output: &mut impl Write) -> io:
         writeln!(output)?;
     }
     for rule in engine::registry() {
-        if findings.iter().any(|f| f.rule == rule.id) {
+        if matched.contains(rule.id) {
             writeln!(output, "{} {}", rule.id, rule.fix)?;
         }
     }

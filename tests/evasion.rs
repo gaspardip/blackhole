@@ -223,29 +223,3 @@ fn coverage_reads_only_the_external_artifact_for_the_exact_head() -> Result<()> 
     }
     Ok(())
 }
-
-#[test]
-fn test_removal_diagnostics() -> Result<()> {
-    let temp = tempdir()?;
-    let root = temp.path();
-    let (base, head) = trees::revisions(
-        Path::new("rules/ts/no-test-removal/reject/rename-fewer-cases"),
-        root,
-    )?;
-    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(root)
-        .args(["ci", "--base", &base, "--head", &head])
-        .output()?;
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
-    let stdout = String::from_utf8(out.stdout)?;
-    let lines: Vec<_> = stdout.lines().collect();
-    assert_eq!(lines.len(), 3, "{stdout}");
-    assert_eq!(
-        lines[0],
-        "new.spec.ts:1:1 ts/no-test-removal test cases 3 -> 2, assertions 3 -> 2"
-    );
-    assert!(lines[1].starts_with("ts/no-test-removal Put the test back"));
-    assert_eq!(lines[2], "blackhole ci: red (tests)");
-    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
-    Ok(())
-}

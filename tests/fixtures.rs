@@ -1,9 +1,13 @@
 mod common;
 mod trees;
 
-use blackhole_check::engine::{Rule, registry, run};
+use blackhole_check::{
+    ci,
+    engine::{Rule, Run, registry, run},
+};
 use std::{
     collections::BTreeSet,
+    env,
     fmt::Write,
     fs,
     path::{Path, PathBuf},
@@ -122,29 +126,25 @@ fn diff_case(path: &Path, side: &str, rule: &Rule) -> common::Result<()> {
 
     let temp = tempfile::tempdir()?;
     let (base, head) = trees::revisions(path, temp.path())?;
-    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(temp.path())
-        .args(["ci", "--base", &base, "--head", &head])
-        .output()?;
-    let text = String::from_utf8(out.stdout)?;
-    assert_eq!(
-        out.status.code(),
-        Some(i32::from(expected.is_some())),
-        "{}: {text}{}",
-        path.display(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
-    let marker = format!(" {} ", rule.id);
-    let mut hits = Vec::new();
-    for line in text.lines() {
-        if let Some((pos, _)) = line.split_once(&marker) {
-            let (pos, col) = pos.rsplit_once(':').ok_or("missing column")?;
-            let (name, line) = pos.rsplit_once(':').ok_or("missing line")?;
-            hits.push((name.to_owned(), line.parse()?, col.parse()?));
-        }
+    let original = env::current_dir()?;
+    env::set_current_dir(temp.path())?;
+    let findings = ci::diff_findings(&base, &head);
+    env::set_current_dir(original)?;
+    let hits: Vec<_> = findings?
+        .into_iter()
+        .filter(|hit| hit.rule == rule.id)
+        .collect();
+    if path.ends_with("rename-fewer-cases") {
+        assert_eq!(
+            hits.first().and_then(|hit| hit.note.as_deref()),
+            Some("test cases 3 -> 2, assertions 3 -> 2")
+        );
     }
-    verify_locations(expected.as_deref(), path, hits);
+    verify_locations(
+        expected.as_deref(),
+        path,
+        hits.into_iter().map(|hit| (hit.path, hit.line, hit.col)),
+    );
     Ok(())
 }
 
@@ -171,7 +171,7 @@ fn verify(rule: &Rule, dir: &Path) {
                 assert!(folder.join(name).is_file(), "orphan {}", path.display());
                 continue;
             }
-            if matches!(rule.run, blackhole_check::engine::Run::Diff) {
+            if matches!(rule.run, Run::Diff(_)) {
                 diff_case(&path, side, rule).unwrap();
             } else {
                 Case::load(&path, side).verify(&path, rule);

@@ -1,5 +1,8 @@
-use std::cell::Cell;
-
+use crate::{
+    git::{Batch, Tree},
+    verdict::Change,
+};
+use globset::GlobSet;
 use oxc::{
     allocator::Allocator,
     ast::ast::{Comment, Program},
@@ -9,6 +12,7 @@ use oxc::{
     span::SourceType,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
+use std::{cell::Cell, collections::BTreeMap, io};
 
 pub enum Family {
     Judge,
@@ -39,14 +43,30 @@ pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
-    Diff,
+    Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
     ParseError,
 }
 
 impl Run {
     pub(crate) const fn can_allow(&self) -> bool {
-        !matches!(self, Self::ParseError | Self::Diff)
+        !matches!(self, Self::ParseError | Self::Diff(_))
     }
+}
+
+pub struct DiffCtx<'a> {
+    pub(crate) base: &'a Tree,
+    pub(crate) head: &'a Tree,
+    pub(crate) changes: &'a [Change],
+    pub(crate) renames: &'a BTreeMap<&'a str, &'a str>,
+    pub(crate) excludes: &'a GlobSet,
+    pub(crate) approved: bool,
+    pub(crate) batch: &'a mut Batch,
+}
+
+#[derive(Default)]
+pub struct DiffFindings {
+    pub(crate) removals: Vec<Finding>,
+    pub(crate) diagnostics: Vec<Finding>,
 }
 
 pub struct FileCtx<'a> {
@@ -292,34 +312,6 @@ pub(crate) fn source_type(path: &str) -> Option<SourceType> {
     Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
 }
 
-pub(crate) fn parse_diagnostics(original: &str, path: &str, bytes: &[u8]) -> Vec<Finding> {
-    let mut diagnostics = run(&[UNPARSEABLE], [(original, bytes)]);
-    for finding in &mut diagnostics {
-        path.clone_into(&mut finding.path);
-    }
-    diagnostics
-}
-
-pub(crate) fn with_parsed<T: Default + Send>(
-    path: &str,
-    original: &str,
-    bytes: &[u8],
-    visit: fn(&TsCtx<'_>) -> T,
-) -> std::io::Result<T> {
-    let Some(kind) = source_type(path).or_else(|| source_type(original)) else {
-        return Ok(T::default());
-    };
-    let (text, malformed) = decode(bytes);
-    if malformed.is_some() || text.contains('\0') {
-        return Ok(T::default());
-    }
-    parser_thread(|| {
-        let arena = Allocator::default();
-        parse(&arena, path, &text, kind).map_or_else(|_| T::default(), |ts| visit(&ts))
-    })?
-    .map_err(|_| std::io::Error::other(format!("Parser panicked while counting tests in {path:?}")))
-}
-
 type Hit<'a> = (usize, &'a Rule, Option<String>);
 
 fn collect<'r>(
@@ -360,14 +352,16 @@ fn collect<'r>(
                     findings.report(*at, Some(message));
                 }
             }
-            Run::Diff => (),
+            Run::Diff(_) => (),
         }
         hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule, note)));
     }
     hits
 }
 
-fn parser_thread<T: Send>(f: impl FnOnce() -> T + Send) -> std::io::Result<std::thread::Result<T>> {
+pub(crate) fn parser_thread<T: Send>(
+    f: impl FnOnce() -> T + Send,
+) -> std::io::Result<std::thread::Result<T>> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
     std::thread::scope(|scope| {
@@ -378,20 +372,119 @@ fn parser_thread<T: Send>(f: impl FnOnce() -> T + Send) -> std::io::Result<std::
     })
 }
 
+struct Source {
+    decoded: String,
+    malformed: Option<usize>,
+    nul: Option<usize>,
+    stripped: Option<String>,
+}
+
+impl Source {
+    fn new(bytes: &[u8]) -> Self {
+        let (decoded, malformed) = decode(bytes);
+        let nul = decoded.find('\0');
+        let stripped = nul.map(|_| decoded.replace('\0', ""));
+        Self {
+            decoded,
+            malformed,
+            nul,
+            stripped,
+        }
+    }
+
+    fn text(&self) -> &str {
+        self.stripped.as_deref().unwrap_or(&self.decoded)
+    }
+
+    fn encoding(&self) -> Result<(), (usize, String)> {
+        if let Some(at) = self.malformed {
+            let nuls = self.decoded[..at].bytes().filter(|&b| b == 0).count();
+            return Err((at - nuls, "Malformed source encoding".to_owned()));
+        }
+        if let Some(at) = self.nul {
+            return Err((at, "NUL in source text".to_owned()));
+        }
+        Ok(())
+    }
+
+    fn locate(&self, path: &str, mut hits: Vec<Hit<'_>>, result: &mut Vec<Finding>) {
+        let Self {
+            decoded,
+            malformed,
+            nul,
+            ..
+        } = self;
+        // A parse failure at the first NUL precedes matches at the same stripped offset.
+        hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
+        let mut chars = decoded.chars().peekable();
+        let (mut matched, mut line, mut col) = (0, 1, 1);
+        for (offset, rule, note) in hits {
+            let at_nul =
+                malformed.is_none() && matches!(rule.run, Run::ParseError) && *nul == Some(offset);
+            while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
+                let ch = chars.next().expect("finding offset exceeds decoded text");
+                if ch != '\0' {
+                    matched += ch.len_utf8();
+                }
+                if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
+                    line += 1;
+                    col = 1;
+                } else {
+                    col += 1;
+                }
+            }
+            result.push(Finding {
+                rule: rule.id,
+                gate: rule.gate,
+                path: path.to_owned(),
+                line,
+                col,
+                note,
+            });
+        }
+    }
+}
+
+pub(crate) fn test_counts(
+    path: &str,
+    bytes: &[u8],
+    kind: SourceType,
+    count: impl FnOnce(&TsCtx<'_>) -> (usize, usize),
+) -> ((usize, usize), Vec<Finding>) {
+    let source = Source::new(bytes);
+    let arena = Allocator::default();
+    match source
+        .encoding()
+        .and_then(|()| parse(&arena, path, source.text(), kind))
+    {
+        Ok(ts) => (count(&ts), Vec::new()),
+        Err((at, note)) => {
+            let mut diagnostics = Vec::new();
+            source.locate(path, vec![(at, &UNPARSEABLE, Some(note))], &mut diagnostics);
+            ((0, 0), diagnostics)
+        }
+    }
+}
+
 fn parsed_hits<'r>(
     rules: &'r [Rule],
     path: &str,
-    text: &str,
+    source: &Source,
     kind: SourceType,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
+    source.encoding()?;
     parser_thread(|| {
         let arena = Allocator::default();
-        let mut ts = parse(&arena, path, text, kind)?;
-        let hits = collect(rules, path, text, Ok(Some(&mut ts)));
+        let mut ts = parse(&arena, path, source.text(), kind)?;
+        let hits = collect(rules, path, source.text(), Ok(Some(&mut ts)));
         Ok((hits, ts.work.get()))
     })
     .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
     .map_err(|_| (0, "Parser panicked".to_owned()))?
+}
+
+pub(crate) fn sort_findings(result: &mut [Finding]) {
+    result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
 }
 
 /// # Panics
@@ -418,54 +511,14 @@ pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>,
     (findings, work)
 }
 
-fn sort_findings(findings: &mut [Finding]) {
-    findings
-        .sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
-}
-
 fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
-    let (decoded, malformed) = decode(bytes);
-    let nul = decoded.find('\0');
-    let stripped = nul.map(|_| decoded.replace('\0', ""));
-    let text = stripped.as_deref().unwrap_or(&decoded);
-    let (mut hits, work) = match (source_type(path), malformed, nul) {
-        (Some(_), Some(at), _) => {
-            let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
-            Err((at - nuls, "Malformed source encoding".to_owned()))
-        }
-        (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
-        (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
-        (None, _, _) => Ok((collect(rules, path, text, Ok(None)), 0)),
-    }
-    .unwrap_or_else(|error| (collect(rules, path, text, Err(&error)), 0));
-    // A parse failure at the first NUL precedes matches at the same stripped offset.
-    hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
-    let mut chars = decoded.chars().peekable();
-    let (mut matched, mut line, mut col) = (0, 1, 1);
-    for (offset, rule, note) in hits {
-        let at_nul =
-            malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
-        while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
-            let ch = chars.next().expect("finding offset exceeds decoded text");
-            if ch != '\0' {
-                matched += ch.len_utf8();
-            }
-            if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
-                line += 1;
-                col = 1;
-            } else {
-                col += 1;
-            }
-        }
-        result.push(Finding {
-            rule: rule.id,
-            gate: rule.gate,
-            path: path.to_owned(),
-            line,
-            col,
-            note,
-        });
-    }
+    let source = Source::new(bytes);
+    let (hits, work) = match source_type(path) {
+        Some(kind) => parsed_hits(rules, path, &source, kind)
+            .unwrap_or_else(|error| (collect(rules, path, source.text(), Err(&error)), 0)),
+        None => (collect(rules, path, source.text(), Ok(None)), 0),
+    };
+    source.locate(path, hits, result);
     work
 }
 

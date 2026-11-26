@@ -1,15 +1,12 @@
 use crate::{
     config,
-    engine::{self, Finding},
+    engine::{self, DiffCtx, DiffFindings, Finding, Run},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
-    packs::ts::{no_test_removal, test_context::test_file_path},
-    verdict::{self, Approvals, Change, Inputs, Verdict},
+    verdict::{self, Approvals, Inputs, Verdict},
 };
-use globset::GlobSet;
 use std::{
-    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::Path,
@@ -34,65 +31,39 @@ fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
     )
 }
 
-fn renamed_test_diagnostics(
-    head: &Tree,
-    changes: &[Change],
-    excludes: &GlobSet,
-    batch: &mut Batch,
-) -> io::Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-    for change in changes {
-        if let Some(old) = change.old()
-            && test_file_path(old)
-            && !excludes.is_match(old)
-            && !excludes.is_match(&change.path)
-            && engine::source_type(old).is_some()
-            && engine::source_type(&change.path).is_none()
-            && let Some(bytes) = head.read(&change.path, batch)?
-        {
-            findings.extend(engine::parse_diagnostics(old, &change.path, &bytes));
+fn diff_rules(ctx: &mut DiffCtx<'_>) -> io::Result<DiffFindings> {
+    let mut findings = DiffFindings::default();
+    for rule in engine::registry() {
+        if let Run::Diff(check) = rule.run {
+            check(ctx, &mut findings)?;
         }
     }
+    engine::sort_findings(&mut findings.removals);
     Ok(findings)
 }
 
-fn test_removals(
-    base: &Tree,
-    head: &Tree,
-    changes: &[Change],
-    excludes: &GlobSet,
-    batch: &mut Batch,
-) -> io::Result<Vec<Finding>> {
-    let renames: BTreeMap<_, _> = changes
-        .iter()
-        .filter_map(|c| Some((c.old()?, c.path.as_str())))
-        .collect();
-    let mut findings = Vec::new();
-    for old in base
-        .paths()
-        .filter(|p| test_file_path(p) && !excludes.is_match(p))
-    {
-        let Some(before) = base.blob(old, batch)? else {
-            continue;
-        };
-        let new = renames.get(old).copied().unwrap_or(old);
-        let after = if excludes.is_match(new) {
-            None
-        } else {
-            head.blob(new, batch)?
-        };
-        let Some(after) = after else {
-            findings.push(no_test_removal::deleted(old));
-            continue;
-        };
-        if before != after || old != new {
-            let before = batch.read(before)?;
-            let after = batch.read(after)?;
-            findings.extend(no_test_removal::compare(old, new, &before, &after)?);
-        }
-    }
-    findings.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(findings)
+/// Runs the registered diff rules on two commits in the current repository.
+/// # Errors
+/// Returns an error when Git, base policy or a diff rule fails.
+pub fn diff_findings(base: &str, head: &str) -> io::Result<Vec<Finding>> {
+    let base = git::commit(base)?;
+    let head = git::commit(head)?;
+    let base_tree = Tree::load(&base)?;
+    let changes = git::changes(&base, &head)?;
+    let mut batch = Batch::start()?;
+    let mut diff = diff_rules(&mut DiffCtx {
+        base: &base_tree,
+        head: &Tree::load(&head)?,
+        changes: &changes,
+        renames: &verdict::renames(&changes),
+        excludes: &configuration(&base_tree, &mut batch)?.exclude,
+        approved: false,
+        batch: &mut batch,
+    })?;
+    batch.finish()?;
+    diff.removals.append(&mut diff.diagnostics);
+    engine::sort_findings(&mut diff.removals);
+    Ok(diff.removals)
 }
 
 fn evaluate(
@@ -121,34 +92,37 @@ fn evaluate(
     let head_ledger = ledger(&head_tree, &mut batch);
     let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
-    let mut findings = crate::scan_files(
+    let mut ctx = DiffCtx {
+        base: &base_tree,
+        head: &head_tree,
+        changes: &changes,
+        renames: &verdict::renames(&changes),
+        excludes,
+        approved,
+        batch: &mut batch,
+    };
+    let diff = diff_rules(&mut ctx)?;
+    let findings = crate::scan_files(
+        diff.diagnostics,
         head_tree.paths().filter(|p| !excludes.is_match(p)),
-        |path| head_tree.read(path, &mut batch),
+        |path| head_tree.read(path, ctx.batch),
     )?;
-    let rename_findings = renamed_test_diagnostics(&head_tree, &changes, excludes, &mut batch)?;
-    if !rename_findings.is_empty() {
-        findings.extend(rename_findings);
-        findings.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
-    }
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,
             today,
             excludes,
-            changes: &changes,
+            changes: ctx.changes,
             base_ledger: &base_ledger,
             head_ledger: head_ledger.as_ref(),
             base_rows: &base_rows,
             head_rows: head_rows.as_ref(),
             findings: &findings,
+            test_removals: &diff.removals,
         },
         &base_config.guard,
+        ctx.renames,
     )?;
-    if !approved {
-        verdict.test_removals(&test_removals(
-            &base_tree, &head_tree, &changes, excludes, &mut batch,
-        )?)?;
-    }
     if let Some(lcov) = &base_config.lcov {
         let delta = crate::coverage::changed(
             &changes,
