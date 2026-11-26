@@ -120,7 +120,10 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
     };
     let same_file =
         |path: &Path| identity.is_some_and(|id| crate::files::identity(path) == Some(id));
-    let matches_protected = |p: &Path| p == ledger || protected.as_deref() == Some(p);
+    // Case-insensitive filesystems reach an absent ledger through any case variant, and no inode exists yet to compare.
+    let fold = |p: &Path| p.to_string_lossy().to_lowercase();
+    let folded = [Some(fold(&ledger)), protected.as_deref().map(fold)];
+    let matches_protected = |p: &Path| folded.contains(&Some(fold(p)));
     let mut alternate = None;
     for name in &names {
         let path = cwd.join(name);

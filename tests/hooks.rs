@@ -98,19 +98,9 @@ fn a_direct_write_cannot_create_the_ledger() {
 }
 
 #[test]
-fn ledger_case_matches_filesystem() {
+fn ledger_case_variants_are_refused_on_every_filesystem() {
     let dir = ledger_repo();
-    let path = dir.path().join(".BLACKHOLE/LEDGER");
-    if path.exists() {
-        refuses(dir.path(), &path);
-    } else {
-        hook(
-            dir.path(),
-            "pre-edit",
-            &edit("Write", path.to_str().unwrap()),
-            0,
-        );
-    }
+    refuses(dir.path(), &dir.path().join(".BLACKHOLE/LEDGER"));
 }
 
 #[test]
@@ -205,6 +195,20 @@ fn absent_ledger_cannot_be_created_through_a_normalized_path() {
     let root = dir.path();
     fs::create_dir(root.join(".blackhole")).unwrap();
     refuses(root, Path::new("missing/../.blackhole/ledger"));
+}
+
+#[test]
+fn absent_ledger_cannot_be_created_through_a_case_variant() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    for path in [
+        ".blackhole/LEDGER",
+        ".BlackHole/Ledger",
+        ".blac\u{212a}hole/ledger",
+    ] {
+        refuses(root, Path::new(path));
+    }
 }
 
 #[cfg(unix)]
