@@ -201,7 +201,7 @@ pub(crate) fn judge_with_guard(
         protected(i, &moved, guard, &mut v)?;
         if !i.test_removals.is_empty() {
             v.gates.insert("tests");
-            crate::print_findings(i.test_removals, &mut removal_lines)?;
+            crate::print_findings(i.test_removals, false, &mut removal_lines)?;
         }
         // A count that grew without an approval would otherwise excuse its own findings.
         for (key, n) in &mut allowed {
@@ -217,13 +217,13 @@ pub(crate) fn judge_with_guard(
     let stale = ledger::excess(head, &actual);
     if !stale.is_empty() {
         v.gates.insert("ledger");
-        crate::report_stale(&stale, &actual, &mut v.lines)?;
+        crate::report_stale(&stale, &actual, false, &mut v.lines)?;
     }
     let over = ledger::excess(&actual, &objections::allowances(&allowed, &rows, i.today));
     if !over.is_empty() {
         v.gates.insert("findings");
     }
-    crate::report(i.findings, &over, &mut v.lines)?;
+    crate::report(i.findings, &over, false, &mut v.lines)?;
     v.lines.append(&mut removal_lines);
     Ok(v)
 }

@@ -8,6 +8,22 @@ that can be switched off, and a judge the agent cannot edit.
 
 Status: pre-release. Nothing is published yet.
 
+## Agent hooks
+
+Run `blackhole init` from anywhere in the checkout. It creates a root
+`blackhole.toml` if needed, records existing allowable findings in the first
+ledger, and installs project hooks for Claude Code and Codex. Rerunning it
+keeps the existing ledger. Trust the project hooks in your agent to activate
+them.
+
+Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
+`blackhole hook post-edit` reports findings in the edited files. At the end of
+a turn, `blackhole hook stop` checks the whole repository. The launchers use the
+checkout's executable `node_modules/.bin/blackhole` when available and use
+`blackhole` from PATH otherwise.
+
+Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
+
 ## Working on this repo
 
 ```sh

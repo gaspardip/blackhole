@@ -8,13 +8,16 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
     crate::git::output(crate::git::command().args(args).current_dir(dir))
 }
 
+// Cache one parent so a batch stays bounded even under a long directory path.
+pub(crate) type Seen = Option<(PathBuf, PathBuf)>;
+
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
 // Directories that are gone stay as written too, so the ledger rows under them can still be selected.
-fn resolve(path: &Path) -> io::Result<PathBuf> {
-    existing(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+pub(crate) fn resolve(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
+    existing(path, seen).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 
-fn existing(path: &Path) -> io::Result<PathBuf> {
+fn existing(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
     let absent = |e: &io::Error| {
         matches!(
             e.kind(),
@@ -28,12 +31,21 @@ fn existing(path: &Path) -> io::Result<PathBuf> {
             break fs::canonicalize(at)?;
         };
         gone.push(name);
+        if let Some((dir, real)) = seen
+            && dir == parent
+        {
+            break real.clone();
+        }
         match fs::canonicalize(parent) {
             // A link that points nowhere is an entry, and a name that cannot be looked at is an error: neither is a directory that is gone.
             Err(e) if absent(&e) && fs::symlink_metadata(parent).is_err_and(|e| absent(&e)) => {
                 at = parent;
             }
-            dir => break dir?,
+            dir => {
+                let real = dir?;
+                *seen = Some((parent.to_owned(), real.clone()));
+                break real;
+            }
         }
     };
     found.extend(gone.into_iter().rev());
@@ -93,8 +105,26 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+// What two names of one file share, wherever a link or a second name leads to it.
 #[cfg(unix)]
-fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+pub(crate) fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map(|m| (m.dev(), m.ino()))
+}
+
+// shortcut: std gives no file identity elsewhere, so there a second hard link is a different file; compare volume and file index when Windows is supported
+#[cfg(not(unix))]
+pub(crate) fn identity(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path)
+        .ok()
+        .filter(|target| target.is_file())
+}
+
+#[cfg(unix)]
+pub(crate) fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     (a.dev(), a.ino()) == (b.dev(), b.ino())
 }
@@ -110,31 +140,38 @@ pub(crate) const OBJECTIONS_PATH: &str = ".blackhole/objections";
 
 // A policy file is read only as a regular file: a link would point it outside the repository.
 pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let named = match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        other => other?,
+    let Some(named) = regular(path)? else {
+        return Ok(None);
     };
-    if named.is_file() {
-        // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
-        let mut file = fs::File::open(path)?;
-        // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
-        if same(&named, &file.metadata()?) {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            return Ok(Some(bytes));
-        }
+    // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
+    let mut file = fs::File::open(path)?;
+    // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
+    if same(&named, &file.metadata()?) {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        return Ok(Some(bytes));
     }
-    Err(io::Error::other(format!(
-        "{} must be a regular file",
-        path.display()
-    )))
+    Err(not_regular(path))
+}
+
+fn not_regular(path: &Path) -> io::Error {
+    io::Error::other(format!("{} must be a regular file", path.display()))
+}
+
+pub(crate) fn regular(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(meta)),
+        Ok(_) => Err(not_regular(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, Vec<PathBuf>)> {
     let cwd = env::current_dir()?;
     let paths = paths
         .iter()
-        .map(|p| resolve(&cwd.join(p)))
+        .map(|p| resolve(&cwd.join(p), &mut None))
         .collect::<io::Result<Vec<_>>>()?;
     let mut selected = Vec::new();
     let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;

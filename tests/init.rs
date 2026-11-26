@@ -1,0 +1,536 @@
+#[path = "common/agent.rs"]
+mod agent;
+pub mod common;
+use agent::{repo, run};
+use serde_json::{Value, json};
+use std::{fs, path::Path};
+use tempfile::tempdir;
+
+const HOOK_FILES: [&str; 2] = [".claude/settings.json", ".codex/hooks.json"];
+
+fn previous_launcher(event: &str) -> String {
+    format!(
+        r#"if root=$(git --no-lazy-fetch rev-parse --show-toplevel 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {event}; fi; exec blackhole hook {event}"#
+    )
+}
+
+fn init(root: &Path, success: bool) -> String {
+    let out = run(root, &["init"], "", if success { 0 } else { 2 });
+    assert_eq!(out.status.success(), success, "{out:?}");
+    // A run that fails reports no file as written.
+    assert!(success || out.stdout.is_empty(), "{out:?}");
+    String::from_utf8(if success { out.stdout } else { out.stderr }).unwrap()
+}
+#[test]
+fn installs_and_merges_once() {
+    let dir = repo();
+    let root = dir.path();
+    let original = json!({
+        "other":42,
+        "hooks":{
+            "Stop":[
+                {"hooks":[{"type":"command","command":"first"}]},
+                {"hooks":[
+                    {"type":"command","command":"blackhole hook stop","timeout":30},
+                    {"type":"command","command":previous_launcher("stop"),"timeout":20},
+                    {"type":"command","command":"second"}
+                ]}
+            ],
+            "SessionStart":[{"hooks":[{"type":"command","command":"session"}]}]
+        }
+    });
+    fs::write(root.join("blackhole.toml"), "exclude=[]").unwrap();
+    for name in HOOK_FILES {
+        let p = root.join(name);
+        fs::create_dir(p.parent().unwrap()).unwrap();
+        fs::write(p, original.to_string()).unwrap();
+    }
+    assert!(init(root, true).contains("CI"));
+    assert_eq!(
+        fs::read(root.join("blackhole.toml")).unwrap(),
+        b"exclude=[]"
+    );
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        b"blackhole-ledger 1\n"
+    );
+    for (name, matcher) in HOOK_FILES
+        .into_iter()
+        .zip(["^(Edit|Write|MultiEdit|NotebookEdit)$", "^apply_patch$"])
+    {
+        let p = root.join(name);
+        let bytes = fs::read(&p).unwrap();
+        let doc: Value = serde_json::from_slice(&bytes).unwrap();
+        let stop = &doc["hooks"]["Stop"][1]["hooks"][0]["command"];
+        assert_ne!(stop, "blackhole hook stop");
+        assert_ne!(stop, &Value::String(previous_launcher("stop")));
+        let mut upgraded = original.clone();
+        for index in [0, 1] {
+            upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
+        }
+        for event in ["PreToolUse", "PostToolUse"] {
+            let groups = doc["hooks"][event].as_array().unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0]["matcher"], matcher);
+            assert_eq!(groups[0]["hooks"][0]["type"], "command");
+            upgraded["hooks"][event] = doc["hooks"][event].clone();
+        }
+        assert_eq!(doc, upgraded);
+        init(root, true);
+        assert_eq!(fs::read(p).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn generated_hooks_use_the_checkout_install_or_the_global_binary() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let root = &dir.path().join("checkout with spaces");
+    let subdir = root.join("nested directory");
+    fs::create_dir_all(&subdir).unwrap();
+    common::git(root, &["init", "-q"]).unwrap();
+    fs::write(root.join(".gitignore"), "/node_modules/\n").unwrap();
+    init(root, true);
+    fs::write(root.join("red.py"), "# noqa").unwrap();
+    let red = run(root, &["check", "red.py"], "", 1).stdout;
+    assert!(red.starts_with(b"red.py:1:1 "));
+
+    let other = repo();
+    let other_git = other.path().join(".git");
+    let other_bin = other.path().join("node_modules/.bin/blackhole");
+    fs::create_dir_all(other_bin.parent().unwrap()).unwrap();
+    symlink("/bin/true", other_bin).unwrap();
+    let git_env = [
+        ("GIT_DIR", other_git.as_path()),
+        ("GIT_WORK_TREE", other.path()),
+        ("GIT_CEILING_DIRECTORIES", root.as_path()),
+    ];
+    let direct = agent::run_input(
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .args(["hook", "stop"])
+            .current_dir(&subdir)
+            .envs(git_env),
+        b"{}",
+        2,
+        false,
+    );
+    assert!(direct.stderr.starts_with(&red));
+
+    let ambient = tempdir().unwrap();
+    let git = common::command("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(git.status.success());
+    symlink(
+        String::from_utf8(git.stdout).unwrap().trim_end(),
+        ambient.path().join("git"),
+    )
+    .unwrap();
+
+    let local = root.join("node_modules/.bin/blackhole");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    for bin in [&local, &ambient.path().join("blackhole")] {
+        symlink(env!("CARGO_BIN_EXE_blackhole"), bin).unwrap();
+        for (name, tool) in HOOK_FILES.into_iter().zip(["Write", "apply_patch"]) {
+            let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+            let payload = |path: &str| {
+                if tool == "Write" {
+                    json!({"tool_name":tool,"cwd":root,"tool_input":{"file_path":path}})
+                } else {
+                    json!({"tool_name":tool,"cwd":root,"tool_input":{"command":format!(
+                        "*** Begin Patch\n*** Update File: {path}\n+x\n*** End Patch"
+                    )}})
+                }
+            };
+            for (event, input, expected) in [
+                ("Stop", json!({}), red.as_slice()),
+                (
+                    "PreToolUse",
+                    payload(".blackhole/ledger"),
+                    b"blackhole: The ledger".as_slice(),
+                ),
+                ("PostToolUse", payload("red.py"), red.as_slice()),
+            ] {
+                let command = doc["hooks"][event][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap();
+                assert!(!command.contains(root.to_str().unwrap()));
+                let output = agent::run_input(
+                    common::command("/bin/sh")
+                        .args(["-c", command])
+                        .current_dir(&subdir)
+                        .env("PATH", ambient.path())
+                        .envs(git_env),
+                    input.to_string().as_bytes(),
+                    2,
+                    false,
+                );
+                assert!(
+                    output.stderr.starts_with(expected),
+                    "{name} {event}: {output:?}"
+                );
+            }
+        }
+        fs::remove_file(bin).unwrap();
+    }
+}
+#[test]
+fn invalid_settings_are_preserved() {
+    for (file, other) in [
+        (".codex/hooks.json", ".claude/settings.json"),
+        (".claude/settings.json", ".codex/hooks.json"),
+    ] {
+        let dir = repo();
+        let root = dir.path();
+        fs::create_dir(root.join(file).parent().unwrap()).unwrap();
+        for (bad, reason) in [
+            ("{", "EOF"),
+            (
+                r#"{"$serde_json::private::Number":"1.25"}"#,
+                "unexpected hooks configuration",
+            ),
+            (
+                r#"{"other":{"\u0024serde_json::private::Number":"1.25"}}"#,
+                "unexpected hooks configuration",
+            ),
+            (
+                r#"{"other":[{"$serde_json::private::RawValue":"hi"}]}"#,
+                "unexpected hooks configuration",
+            ),
+            (r#"{"hooks":[]}"#, "unexpected hooks configuration"),
+            (r#"{"hooks":{"Stop":{}}}"#, "unexpected hooks configuration"),
+            (
+                r#"{"extra":[{"x":1,"\u0078":2}]}"#,
+                "unexpected hooks configuration",
+            ),
+            (
+                r#"{"hooks":{"Stop":[{"hooks":[{"type":"command"}]}]}}"#,
+                "unexpected hooks configuration",
+            ),
+        ] {
+            let p = root.join(file);
+            fs::write(&p, bad).unwrap();
+            let message = init(root, false);
+            assert!(message.contains(file));
+            assert!(message.contains(reason), "{message}");
+            assert_eq!(fs::read_to_string(p).unwrap(), bad);
+            assert!(!root.join(other).exists());
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn outside_settings_directory() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir(&root).unwrap();
+    common::git(&root, &["init", "-q"]).unwrap();
+    std::os::unix::fs::symlink(dir.path(), root.join(".claude")).unwrap();
+    assert!(init(&root, false).contains(".claude"));
+    assert!(!dir.path().join("settings.json").exists());
+}
+
+#[test]
+fn initializes_empty_repository_and_keeps_first_ledger() {
+    let dir = repo();
+    let root = dir.path();
+    let report = init(root, true);
+    for path in [
+        "blackhole.toml",
+        ".blackhole/ledger",
+        ".claude/settings.json",
+        ".codex/hooks.json",
+    ] {
+        assert_eq!(
+            report.lines().filter(|line| line.ends_with(path)).count(),
+            1
+        );
+    }
+    assert_eq!(fs::read(root.join("blackhole.toml")).unwrap(), b"");
+    fs::write(root.join("new.py"), "# noqa").unwrap();
+    init(root, true);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        b"blackhole-ledger 1\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_internal_settings_directory_links() {
+    for name in [".claude", ".codex"] {
+        let dir = repo();
+        let root = dir.path();
+        fs::create_dir(root.join("settings")).unwrap();
+        std::os::unix::fs::symlink("settings", root.join(name)).unwrap();
+        assert!(init(root, false).contains(name));
+        assert_eq!(fs::read_dir(root.join("settings")).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn initializes_from_subdirectory() {
+    let dir = repo();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    init(&sub, true);
+    assert!(root.join(".blackhole/ledger").is_file());
+    assert_eq!(fs::read_dir(sub).unwrap().count(), 0);
+}
+
+#[test]
+fn separate_git_directory_is_untouched() {
+    fn entries(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                paths.extend(entries(&path));
+            }
+            paths.push(path);
+        }
+        paths.sort();
+        paths
+    }
+    let temp = tempdir().unwrap();
+    let external = temp.path().join("git");
+    common::git(temp.path(), &["init", "--separate-git-dir", "git", "tree"]).unwrap();
+    let before = entries(&external);
+    init(&temp.path().join("tree"), true);
+    assert_eq!(entries(&external), before);
+}
+
+#[test]
+fn initial_ledger_banks_only_allowable_findings() {
+    let temp = repo();
+    let root = temp.path();
+    fs::write(root.join("ordinary.py"), "# noqa").unwrap();
+    fs::write(root.join("broken.ts"), "const = ;").unwrap();
+    let message = init(root, true);
+    assert!(
+        message
+            .lines()
+            .any(|l| l.contains("1 finding") && l.contains("blackhole check"))
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
+        "blackhole-ledger 1\ncore/no-suppression\t1\tordinary.py\n"
+    );
+    let out = run(root, &["check"], "", 1);
+    assert_eq!(out.status.code(), Some(1));
+    let findings = String::from_utf8(out.stdout).unwrap();
+    assert!(findings.contains("core/unparseable"));
+    assert!(!findings.contains("ordinary.py"));
+    let stop = run(root, &["hook", "stop"], "{}", 2);
+    assert_eq!(stop.status.code(), Some(2));
+    assert!(stop.stderr.starts_with(findings.as_bytes()));
+}
+
+#[test]
+fn settings_keep_number_precision_and_key_order() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".claude")).unwrap();
+    let file = root.join(".claude/settings.json");
+    fs::write(
+        &file,
+        r#"{"z":{"y":0.12345678901234567890123456789,"b":true},"a":1}"#,
+    )
+    .unwrap();
+    init(root, true);
+    let text = fs::read_to_string(file).unwrap();
+    assert!(text.starts_with("{\n  \"z\": {\n    \"y\": 0.12345678901234567890123456789,\n    \"b\": true\n  },\n  \"a\": 1,\n  \"hooks\":"));
+    let doc: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(doc["hooks"].as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn unrepresentable_names_remain_red() {
+    let dir = repo();
+    let root = dir.path();
+    for name in ["a\\b.py", "a\tb.py", "ordinary.py"] {
+        fs::write(root.join(name), "# noqa").unwrap();
+    }
+    assert!(
+        init(root, true)
+            .lines()
+            .any(|l| l.starts_with("2 finding") && l.contains("blackhole check"))
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
+        "blackhole-ledger 1\ncore/no-suppression\t1\tordinary.py\n"
+    );
+}
+
+fn invalidate_objections(root: &Path) {
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    fs::write(root.join(".blackhole/objections"), "invalid").unwrap();
+}
+
+#[test]
+fn late_init_error_preserves_settings() {
+    let dir = repo();
+    let root = dir.path();
+    invalidate_objections(root);
+    fs::create_dir(root.join(".codex")).unwrap();
+    let original = b"{ \"other\": true }";
+    fs::write(root.join(".codex/hooks.json"), original).unwrap();
+    init(root, false);
+    assert!(!root.join(".claude/settings.json").exists());
+    assert_eq!(fs::read(root.join(".codex/hooks.json")).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn settings_modes_survive_install_and_rollback() {
+    use std::os::unix::fs::PermissionsExt;
+    for codex_mode in [0o640, 0o660] {
+        let files = [
+            (".claude/settings.json", 0o600),
+            (".codex/hooks.json", codex_mode),
+        ];
+        for failure in [false, true] {
+            let dir = repo();
+            let root = dir.path();
+            for (file, mode) in files {
+                let p = root.join(file);
+                fs::create_dir(p.parent().unwrap()).unwrap();
+                fs::write(&p, b"{}").unwrap();
+                fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            if failure {
+                invalidate_objections(root);
+            }
+            let out = common::command("sh")
+                .args([
+                    "-c",
+                    r#"umask 022 && exec "$1" init"#,
+                    "init-test",
+                    env!("CARGO_BIN_EXE_blackhole"),
+                ])
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.success(), !failure);
+            for (file, mode) in files {
+                let p = root.join(file);
+                assert_eq!(
+                    fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+                    mode
+                );
+                if failure {
+                    assert_eq!(fs::read(p).unwrap(), b"{}");
+                }
+            }
+            assert_eq!(
+                fs::metadata(root.join("blackhole.toml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o644
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_status_write_leaves_complete_install() {
+    let dir = repo();
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(dir.path())
+        .arg("init")
+        .stdout(
+            fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(!err.contains("panicked"));
+    assert!(err.contains("No space left"));
+    assert_eq!(
+        fs::read(dir.path().join(".blackhole/ledger")).unwrap(),
+        b"blackhole-ledger 1\n"
+    );
+    let report = init(dir.path(), true);
+    for path in [
+        ".claude/settings.json",
+        ".codex/hooks.json",
+        ".blackhole/ledger",
+    ] {
+        assert!(report.lines().any(|line| line == format!("Kept {path}")));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_settings_write_removes_temporary() {
+    let dir = repo();
+    let root = dir.path();
+    let large = json!({"data":"x".repeat(4096)}).to_string();
+    let files = [
+        (".claude", "settings.json", "{}"),
+        (".codex", "hooks.json", large.as_str()),
+    ];
+    for (folder, name, bytes) in files {
+        fs::create_dir(root.join(folder)).unwrap();
+        fs::write(root.join(folder).join(name), bytes).unwrap();
+    }
+    let out = common::command("sh")
+        .current_dir(root)
+        .args([
+            "-c",
+            r#"ulimit -f 2 && trap "" XFSZ && exec "$1" init"#,
+            "init-test",
+            env!("CARGO_BIN_EXE_blackhole"),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("File too large")
+    );
+    for (folder, name, bytes) in files {
+        assert_eq!(
+            fs::read(root.join(folder).join(name)).unwrap(),
+            bytes.as_bytes()
+        );
+        assert!(
+            fs::read_dir(root.join(folder)).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp"))
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unwritable_stderr_keeps_the_exit_code() {
+    let dir = repo();
+    let full = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap()
+    };
+    let status = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(dir.path())
+        .arg("init")
+        .stdout(full())
+        .stderr(full())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}
