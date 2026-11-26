@@ -30,7 +30,7 @@ use std::{
 pub(crate) const RULE: Rule = Rule {
     id: "ts/no-reduce-accumulator-copy",
     family: Family::Slop,
-    gate: Gate::Blocking,
+    gate: Gate::Advisory,
     provenance: "Port of anti-slop no-reduce-accumulator-copy and oxc no-accumulating-spread.",
     fix: "Mutate and return a fresh, locally owned accumulator, or use a single transformation to build the result.",
     run: Run::TsConservative(check),

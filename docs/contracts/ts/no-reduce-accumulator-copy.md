@@ -1,5 +1,7 @@
 # ts/no-reduce-accumulator-copy
 
+Advisory: findings print with `[advisory]` and never make a verdict red. Findings stayed open after two review rounds, so by the project's review rule it does not gate.
+
 ## Catches
 
 This list is complete: the rule reports these shapes and nothing else.
@@ -63,6 +65,13 @@ Anything outside the list above. In particular:
   values in a file that mentions anything named `eval`; a name shared with
   an interface or type alias (existing tests).
 - After a fixed amount of work per file, the rule reports nothing more there.
+- `Object.assign({}, acc, { async f() { await ready; } })`: a suspension
+  in a function created but not run before the copy still silences it.
+- A fresh member under a computed `__proto__` key, such as
+  `{ ['__proto__']: {} }`.
 - Known false positives: a detached call such as
-  `(0, xs.reduce)(acc => ({ ...acc }), {})`, and a direct `eval` string
-  that rebinds `acc`.
+  `(0, xs.reduce)(acc => ({ ...acc }), {})`; a direct `eval` string
+  that rebinds `acc`; an array whose `reduce` or copy method was replaced
+  (`rows.reduce = (_step, seed) => seed`, `acc.slice = () => acc`); and
+  `Reflect.apply` whose argument array arrives through a spread, such as
+  `Reflect.apply(() => [...acc], ...[null, null], [])`.
