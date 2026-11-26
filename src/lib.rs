@@ -44,6 +44,7 @@ mod packs {
         pub(crate) mod no_unsafe_dictionary_type;
         pub(crate) mod no_unsignaled_poll;
         pub(crate) mod no_widen_then_assert;
+        pub(crate) mod package_exports;
         mod playwright;
         pub(crate) mod reflect_method;
         mod regions;
@@ -53,6 +54,11 @@ mod packs {
         pub(crate) mod test_file_names;
         mod transports;
         pub(crate) mod values;
+
+        fn script_extension(extension: &str) -> bool {
+            let base = extension.strip_prefix(['c', 'm']).unwrap_or(extension);
+            matches!(base, "ts" | "tsx" | "js" | "jsx")
+        }
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;

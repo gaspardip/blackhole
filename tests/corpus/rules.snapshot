@@ -1306,6 +1306,17 @@ rules/ts/no-widen-then-assert/reject/invalid-01.ts:1:59 ts/no-known-value-wideni
 rules/ts/no-widen-then-assert/reject/invalid-01.ts:1:82 ts/no-known-value-widening
 rules/ts/no-widen-then-assert/reject/invalid-01.ts:1:82 ts/no-widen-then-assert
 rules/ts/no-widen-then-assert/reject/typed-rest-source.ts:1:79 ts/no-widen-then-assert
+rules/ts/package-exports/reject/checks-fallback-arrays-while-respecting-null-exclusions-01/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*.ts
+rules/ts/package-exports/reject/enforces-the-rule-through-global-configuration-without-local-options-01/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*.ts
+rules/ts/package-exports/reject/finds-the-owning-package-when-lint-runs-from-a-nested-directory-01/tree/packages/client/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*.ts
+rules/ts/package-exports/reject/invalid-json/tree/package.json:1:1 ts/package-exports package.json must contain a valid JSON object
+rules/ts/package-exports/reject/non-object-manifest/tree/package.json:1:1 ts/package-exports package.json must contain a valid JSON object
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-01/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*.ts
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-02/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*.tsx
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-03/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/*
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-04/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./*.js
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-05/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./*
+rules/ts/package-exports/reject/rejects-root-source-wildcard-through-nested-conditions-06/tree/package.json:1:1 ts/package-exports unrestricted source exports: ./src/../src/*.mts
 rules/ts/strict-msw/reject/on-unhandled-request-getter.ts:2:32 ts/strict-msw
 rules/ts/strict-msw/reject/on-unhandled-request-setter.ts:2:32 ts/strict-msw
 rules/ts/strict-msw/reject/rejects-lenient-msw-starts-01.ts:2:32 ts/strict-msw

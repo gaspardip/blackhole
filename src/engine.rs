@@ -94,6 +94,7 @@ pub struct FileCtx<'a> {
 
 pub struct StructureCtx<'a> {
     pub(crate) path: &'a str,
+    pub(crate) bytes: &'a [u8],
     packages: &'a BTreeSet<&'a Path>,
     work: Cell<u64>,
 }
@@ -239,6 +240,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_unsafe_dictionary_type::RULE,
         crate::packs::ts::no_unsignaled_poll::RULE,
         crate::packs::ts::no_widen_then_assert::RULE,
+        crate::packs::ts::package_exports::RULE,
         crate::packs::ts::strict_msw::RULE,
         crate::packs::ts::test_file_names::RULE,
     ]
@@ -564,6 +566,7 @@ impl Scanner<'_, '_> {
     ) -> u64 {
         let ctx = StructureCtx {
             path,
+            bytes,
             packages,
             work: Cell::new(0),
         };

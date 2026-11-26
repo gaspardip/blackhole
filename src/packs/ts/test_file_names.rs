@@ -10,11 +10,6 @@ pub const RULE: Rule = Rule {
     run: Run::Structure(check),
 };
 
-fn script_extension(extension: &str) -> bool {
-    let base = extension.strip_prefix(['c', 'm']).unwrap_or(extension);
-    matches!(base, "ts" | "tsx" | "js" | "jsx")
-}
-
 fn name_problem(stem: &str) -> Option<&'static str> {
     let suffix = stem.rsplit_once('.').map(|(_, suffix)| suffix);
     if matches!(suffix, Some("specs" | "tests")) {
@@ -57,7 +52,7 @@ fn check(ctx: &StructureCtx<'_>, notes: &mut Vec<String>) {
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.rsplit_once('.'))
-        .filter(|(_, ext)| script_extension(ext))
+        .filter(|(_, ext)| super::script_extension(ext))
         .and_then(|(stem, _)| name_problem(stem));
     notes.extend(misnamed.map(str::to_owned));
     if misplaced_test_dir(ctx, path) {
