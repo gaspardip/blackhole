@@ -210,7 +210,7 @@ fn installed_guards_run_synchronously() {
     let dir = repo();
     let root = dir.path();
     let legacy = json!({"hooks":{"Stop":[{"hooks":[
-        {"type":"command","command":"blackhole hook stop","async":true}
+        {"type":"command","command":"blackhole hook stop","async":true,"asyncRewake":true}
     ]}]}});
     for name in HOOK_FILES {
         let p = root.join(name);
@@ -227,9 +227,11 @@ fn installed_guards_run_synchronously() {
     for hooks in guards(root) {
         assert_eq!(hooks.as_array().unwrap().len(), 1);
         assert_eq!(hooks[0].get("async"), None, "{hooks}");
+        assert_eq!(hooks[0].get("asyncRewake"), None, "{hooks}");
     }
     for (name, mut hooks) in HOOK_FILES.into_iter().zip(guards(root)) {
         hooks[0]["async"] = json!(true);
+        hooks[0]["asyncRewake"] = json!(true);
         let doc = json!({"hooks":{"Stop":[{"hooks":hooks}]}});
         fs::write(root.join(name), doc.to_string()).unwrap();
     }
@@ -237,6 +239,7 @@ fn installed_guards_run_synchronously() {
     for hooks in guards(root) {
         assert_eq!(hooks.as_array().unwrap().len(), 1);
         assert_eq!(hooks[0].get("async"), None, "{hooks}");
+        assert_eq!(hooks[0].get("asyncRewake"), None, "{hooks}");
     }
 }
 
@@ -287,6 +290,26 @@ fn initializes_empty_repository_and_keeps_first_ledger() {
     assert_eq!(fs::read(root.join("blackhole.toml")).unwrap(), b"");
     fs::write(root.join("new.py"), "# noqa").unwrap();
     init(root, true);
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        b"blackhole-ledger 1\n"
+    );
+}
+
+#[test]
+fn malformed_objections_stop_init_before_any_write() {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    for name in HOOK_FILES.into_iter().chain(["blackhole.toml"]) {
+        fs::remove_file(root.join(name)).unwrap();
+    }
+    fs::write(root.join(".blackhole/objections"), "invalid").unwrap();
+    let message = init(root, false);
+    assert!(message.contains("objections line 1"), "{message}");
+    for name in HOOK_FILES.into_iter().chain(["blackhole.toml"]) {
+        assert!(!root.join(name).exists(), "{name}");
+    }
     assert_eq!(
         fs::read(root.join(".blackhole/ledger")).unwrap(),
         b"blackhole-ledger 1\n"
@@ -471,16 +494,18 @@ fn unrepresentable_names_remain_red() {
     );
 }
 
-fn invalidate_objections(root: &Path) {
-    fs::create_dir(root.join(".blackhole")).unwrap();
-    fs::write(root.join(".blackhole/objections"), "invalid").unwrap();
+// A link to itself cannot be read, so the first ledger fails after the settings are installed.
+#[cfg(unix)]
+fn fail_first_ledger(root: &Path) {
+    std::os::unix::fs::symlink("loop.py", root.join("loop.py")).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn late_init_error_preserves_settings() {
     let dir = repo();
     let root = dir.path();
-    invalidate_objections(root);
+    fail_first_ledger(root);
     fs::create_dir(root.join(".codex")).unwrap();
     let original = b"{ \"description\": \"Original\" }";
     fs::write(root.join(".codex/hooks.json"), original).unwrap();
@@ -508,7 +533,7 @@ fn settings_modes_survive_install_and_rollback() {
                 fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
             }
             if failure {
-                invalidate_objections(root);
+                fail_first_ledger(root);
             }
             let out = common::command("sh")
                 .args([

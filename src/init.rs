@@ -30,8 +30,12 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
     let codex = settings(&root, CODEX, "^apply_patch$")?;
     let config = root.join("blackhole.toml");
     let existing = crate::files::policy(&config)?;
-    // A malformed ledger would turn every hook red, so it stops init before anything is written.
-    crate::Policy::load(&root)?;
+    // A malformed ledger or objections file would turn every hook red, so it stops init before anything is written.
+    let policy = crate::Policy::load(&root)?;
+    crate::objections::parse(
+        &crate::policy(policy.entered, "objections")?.unwrap_or_default(),
+        crate::objections::Date::today()?,
+    )?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
     let created =
         claude.install_then(&root, || codex.install_then(&root, || first_ledger(&root)))?;
@@ -284,7 +288,9 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                     changed = true;
                 }
                 // Codex and Claude run an async handler in the background, where it cannot block.
-                changed |= hook.remove("async").is_some();
+                for flag in ["async", "asyncRewake"] {
+                    changed |= hook.remove(flag).is_some();
+                }
                 found = true;
             }
         }
