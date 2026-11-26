@@ -4,7 +4,7 @@ use common::{Result, command, git};
 use std::{fs, path::Path};
 use tempfile::tempdir;
 
-fn populate(source: &Path, root: &Path, tree: &str) -> Result<()> {
+fn populate(source: &Path, root: &Path, tree: &str, strip: &Path) -> Result<()> {
     git(root, &["init", "-q", "--template="])?;
     let tracked = git(source, &["ls-files", "--deduplicate", "-z", "--", tree])?;
     for path in tracked.split_terminator('\0') {
@@ -12,7 +12,7 @@ fn populate(source: &Path, root: &Path, tree: &str) -> Result<()> {
         if tree == "evasion" && !matches!(components.nth(2), Some("base" | "head")) {
             continue;
         }
-        let target = root.join(path);
+        let target = root.join(Path::new(path).strip_prefix(strip)?);
         fs::create_dir_all(target.parent().ok_or("missing fixture directory")?)?;
         fs::copy(source.join(path), target)?;
     }
@@ -32,26 +32,48 @@ fn findings(root: &Path, tree: &str) -> Result<String> {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout)?;
-    let prefix = format!("{tree}/");
-    let mut lines: Vec<_> = stdout
-        .lines()
-        .filter(|line| line.starts_with(&prefix))
-        .collect();
-    lines.sort_unstable();
-    let mut snapshot = String::new();
-    for line in lines {
-        snapshot.push_str(line);
-        snapshot.push('\n');
+    Ok(String::from_utf8(out.stdout)?)
+}
+
+fn banned_fixture_findings(source: &Path) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    let reject = source.join("rules/boundary/banned-imports/reject");
+    for case in fs::read_dir(reject)? {
+        let tree = case?.path().join("tree");
+        let path = tree.strip_prefix(source)?;
+        let prefix = path.to_str().ok_or("fixture path is not UTF-8")?;
+        let repo = tempdir()?;
+        populate(source, repo.path(), prefix, path)?;
+        let out = findings(repo.path(), prefix)?;
+        lines.extend(
+            out.lines()
+                .filter(|line| line.contains(" boundary/banned-imports "))
+                .map(|line| format!("{prefix}/{line}")),
+        );
     }
-    Ok(snapshot)
+    Ok(lines)
 }
 
 fn verify(tree: &str) -> Result<()> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo = tempdir()?;
-    populate(source, repo.path(), tree)?;
-    let actual = findings(repo.path(), tree)?;
+    populate(source, repo.path(), tree, Path::new(""))?;
+    let stdout = findings(repo.path(), tree)?;
+    let prefix = format!("{tree}/");
+    let mut lines: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .map(str::to_owned)
+        .collect();
+    if tree == "rules" {
+        lines.extend(banned_fixture_findings(source)?);
+    }
+    lines.sort_unstable();
+    let mut actual = String::new();
+    for line in lines {
+        actual.push_str(&line);
+        actual.push('\n');
+    }
     let snapshot = source.join("tests/corpus").join(format!("{tree}.snapshot"));
     if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
         fs::write(snapshot, actual)?;

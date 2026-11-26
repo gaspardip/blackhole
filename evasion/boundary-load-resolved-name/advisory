@@ -1,0 +1,2 @@
+app.cjs:1:9 boundary/banned-imports [advisory] specifier is not a literal
+boundary/banned-imports Remove the dependency and implement the operation with an allowed module.

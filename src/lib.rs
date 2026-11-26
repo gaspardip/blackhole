@@ -264,9 +264,14 @@ fn scan(
     // Both policy files are read before any file is judged.
     let filed = policy(rules.entered, "objections")?.unwrap_or_default();
     let names = listing.names.iter().map(String::as_str);
-    let findings = scan_files(&rules.config, Vec::new(), names, |name| {
-        files::read(&root.join(name))
-    })?;
+    let findings = scan_files(
+        &rules.config,
+        Vec::new(),
+        names,
+        (),
+        |()| inventory(root, listing),
+        |(), name| files::read(&root.join(name)),
+    )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(&filed, today)?;
@@ -286,23 +291,44 @@ fn scan(
     })
 }
 
-fn scan_files<'a>(
+// A listing narrowed to selected paths still resolves imports against every file in the repository.
+fn inventory(
+    root: &Path,
+    listing: &files::Listing<'_>,
+) -> io::Result<packs::boundary::RepositoryPaths> {
+    if listing.rows.is_none() {
+        return files::repository_paths(root, listing.names.iter().map(String::as_str));
+    }
+    let all = files::list(root, root, &[], std::iter::empty())?;
+    files::repository_paths(root, all.names.iter().map(String::as_str))
+}
+
+fn scan_files<'a, S: Send>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
-    mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
+    mut source: S,
+    inventory: impl FnOnce(&mut S) -> io::Result<packs::boundary::RepositoryPaths>,
+    mut read: impl FnMut(&mut S, &str) -> io::Result<Option<Vec<u8>>> + Send,
 ) -> io::Result<Vec<engine::Finding>> {
-    for name in names.filter(|name| !config.exclude.is_match(name)) {
-        let bytes = read(name)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", diagnostic_text(name))))?;
-        if let Some(bytes) = bytes {
-            findings.extend(engine::run_configured(
-                engine::registry(),
-                config.engine_settings(),
-                [(name, bytes.as_slice())],
-            ));
-        }
-    }
+    engine::scan(
+        engine::registry(),
+        config.engine_settings(),
+        config.banned_imports(),
+        |enabled| {
+            let paths = enabled.then(|| inventory(&mut source).map_err(|error| error.to_string()));
+            let reader = packs::boundary::Reader::new(move |name| read(&mut source, name));
+            (paths, reader, ())
+        },
+        |scanner, reader, ()| -> io::Result<()> {
+            for name in names.filter(|name| !config.exclude.is_match(name)) {
+                if let Some(bytes) = reader.read(name)? {
+                    scanner.file(name, &bytes, &mut findings);
+                }
+            }
+            Ok(())
+        },
+    )?;
     engine::sort_findings(&mut findings);
     Ok(findings)
 }

@@ -311,3 +311,39 @@ pub(crate) fn listed_matching<'a>(
     selected.dedup();
     Ok(selected)
 }
+
+pub(crate) fn repository_paths<'a>(
+    root: &Path,
+    names: impl Iterator<Item = &'a str>,
+) -> io::Result<crate::packs::boundary::RepositoryPaths> {
+    let mut paths = crate::packs::boundary::RepositoryPaths::default();
+    for name in names {
+        let real = root.join(name);
+        let virtual_path = Path::new("/").join(name);
+        match fs::symlink_metadata(&real) {
+            Ok(meta) if meta.is_symlink() => {
+                let target = fs::read_link(&real)?;
+                let target = match target.strip_prefix(root) {
+                    Ok(local) => {
+                        let up: PathBuf =
+                            Path::new(name).components().skip(1).map(|_| "..").collect();
+                        up.join(local)
+                    }
+                    Err(_) => target,
+                };
+                paths.links.insert(virtual_path, target);
+            }
+            Ok(meta) if meta.is_file() => {
+                paths.files.insert(virtual_path);
+            }
+            Ok(_) => (),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{name:?}: {e}"))),
+        }
+    }
+    Ok(paths)
+}
