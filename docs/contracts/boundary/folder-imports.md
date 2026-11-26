@@ -14,7 +14,8 @@ Advisory until the resolution cases under Does not catch are addressed. Findings
 - Denied targets reached through `tsconfig.json` paths and
   `package.json` imports aliases, including aliases to package subpaths
   (`forms`, `package-import-aliases`, `alias-folder` and
-  `boundary-folder-package-alias`).
+  `boundary-folder-package-alias`). Two runtime alias targets are
+  exceptions, listed under Does not catch.
 - Package names listed in the deny patterns, and package entry points
   resolved to files under a denied path (`forms`, `listed-package`).
 - A re-export chain into a denied folder. Named, default, namespace
@@ -118,13 +119,16 @@ Advisory until the resolution cases under Does not catch are addressed. Findings
   also select legacy folder keys that Node skips.
 - In an alias target array, an entry Node rejects as invalid (such as a
   `node:` URL target) is taken instead of falling through to the next entry.
-- A `package.json` imports alias to a package subpath whose first
-  segment is a Node built-in name, such as `path/custom`. The alias is
-  taken as the built-in and skipped, while the same specifier imported
-  directly is checked (review probe, follow-up).
-- A `package.json` imports alias to an exported subpath of the current
-  package's own name. The rule looks the name up only in `node_modules`,
-  while Node reads the package's own `exports` (review probe, follow-up).
+- The runtime file behind a `package.json` imports alias to a package
+  subpath whose first segment is a Node built-in name, such as
+  `path/custom`. The runtime file lookup takes it as the built-in and
+  stops; the alias target still matches package-name deny patterns, and
+  the same specifier imported directly is checked (review probe, follow-up).
+- The runtime file behind a `package.json` imports alias to an exported
+  subpath of the current package's own name. The runtime file lookup
+  searches only `node_modules`, while Node reads the package's own
+  `exports`; type-only lookups of the same alias do read them (review
+  probe, follow-up).
 - A CommonJS `require` that only reaches a compiled `.node` addon
   through extension or index lookup (review probe, follow-up).
 - The rule gives `package.json` imports precedence over a TypeScript
