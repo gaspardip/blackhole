@@ -16,6 +16,7 @@ struct Settings {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct Boundaries {
     max_lines: Option<NonZeroUsize>,
+    banned_imports: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -34,13 +35,16 @@ pub struct Config {
     pub(crate) lcov: Option<String>,
     pub(crate) exclude: GlobSet,
     pub(crate) guard: GlobSet,
-    engine_settings: engine::Settings,
+    boundaries: Boundaries,
 }
 
 impl Config {
     #[must_use]
-    pub fn engine_settings(&self) -> engine::Settings {
-        self.engine_settings
+    pub fn engine_settings(&self) -> engine::Settings<'_> {
+        engine::Settings {
+            max_lines: self.boundaries.max_lines,
+            banned_imports: &self.boundaries.banned_imports,
+        }
     }
 }
 
@@ -73,8 +77,6 @@ pub fn parse(bytes: &[u8]) -> io::Result<Config> {
         lcov,
         exclude: globs(settings.exclude)?,
         guard: globs(settings.guard.paths)?,
-        engine_settings: engine::Settings {
-            max_lines: settings.boundaries.max_lines,
-        },
+        boundaries: settings.boundaries,
     })
 }

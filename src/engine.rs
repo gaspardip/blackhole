@@ -1,5 +1,7 @@
+pub use crate::packs::boundary::RepoCtx;
 use crate::{
     git::{Batch, Tree},
+    packs::boundary::Reader,
     verdict::Change,
 };
 use globset::GlobSet;
@@ -12,7 +14,7 @@ use oxc::{
     span::SourceType,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::{cell::Cell, collections::BTreeMap, io, num::NonZeroUsize};
+use std::{cell::Cell, collections::BTreeMap, io, num::NonZeroUsize, path::Path};
 
 pub enum Family {
     Judge,
@@ -43,6 +45,7 @@ pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
+    Repo(fn(&TsCtx<'_>, &RepoCtx<'_, '_>, &[String], &mut Findings)),
     Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
     Lines(fn(&str, &str, usize, &mut Findings)),
     ParseError,
@@ -72,8 +75,9 @@ pub struct DiffFindings {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct Settings {
+pub struct Settings<'a> {
     pub(crate) max_lines: Option<NonZeroUsize>,
+    pub(crate) banned_imports: &'a [String],
 }
 
 pub struct FileCtx<'a> {
@@ -88,6 +92,7 @@ pub struct TsCtx<'a> {
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
     pub text: &'a str,
+    pub(crate) has_module_syntax: bool,
     pub program: &'a Program<'a>,
     pub semantic: Semantic<'a>,
     pub comments: &'a [Comment],
@@ -174,6 +179,7 @@ const UNPARSEABLE: Rule = Rule {
 #[must_use]
 pub fn registry() -> &'static [Rule] {
     &[
+        crate::packs::boundary::BANNED,
         crate::packs::boundary::SIZE,
         crate::packs::core::no_suppression::RULE,
         UNPARSEABLE,
@@ -303,6 +309,7 @@ fn parse<'a>(
         work: Cell::new(0),
         arena,
         resolution: crate::packs::ts::values::Resolution::default(),
+        has_module_syntax: parsed.module_record.has_module_syntax,
         path,
         text,
         program,
@@ -326,7 +333,8 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     source: &Source,
-    settings: Settings,
+    settings: Settings<'_>,
+    repository: Option<&RepoCtx<'_, '_>>,
     parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
     let error = parsed.as_ref().err().copied();
@@ -364,6 +372,11 @@ fn collect<'r>(
             Run::ParseError => {
                 if let Some((at, message)) = error {
                     findings.report(*at, Some(message));
+                }
+            }
+            Run::Repo(check) => {
+                if let (Some(ts), Some(repository)) = (ts.as_deref(), repository) {
+                    check(ts, repository, settings.banned_imports, &mut findings);
                 }
             }
             Run::Diff(_) => (),
@@ -488,13 +501,14 @@ fn parsed_hits<'r>(
     path: &str,
     source: &Source,
     kind: SourceType,
-    settings: Settings,
+    settings: Settings<'_>,
+    repository: Option<&RepoCtx<'_, '_>>,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     source.encoding()?;
     parser_thread(|| {
         let arena = Allocator::default();
         let mut ts = parse(&arena, path, source.text(), kind)?;
-        let hits = collect(rules, path, source, settings, Ok(Some(&mut ts)));
+        let hits = collect(rules, path, source, settings, repository, Ok(Some(&mut ts)));
         Ok((hits, ts.work.get()))
     })
     .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
@@ -520,12 +534,30 @@ pub fn run<'a>(
 /// Panics if a rule reports an offset past the end of its input.
 pub fn run_configured<'a>(
     rules: &[Rule],
-    settings: Settings,
+    settings: Settings<'_>,
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
     let mut result = Vec::new();
-    for (path, bytes) in files {
-        run_file(rules, path, bytes, settings, &mut result);
+    if !settings.banned_imports.is_empty()
+        && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)))
+    {
+        let files: Vec<_> = files.into_iter().collect();
+        let by_name: BTreeMap<_, _> = files.iter().copied().collect();
+        let paths = by_name
+            .keys()
+            .map(|name| Path::new("/").join(name))
+            .collect();
+        let reader = Reader::new(BTreeMap::new(), |name| {
+            Ok(by_name.get(name).map(|bytes| bytes.to_vec()))
+        });
+        let repository = RepoCtx::new(paths, &reader);
+        for (path, bytes) in files {
+            run_file(rules, path, bytes, settings, Some(&repository), &mut result);
+        }
+    } else {
+        for (path, bytes) in files {
+            run_file(rules, path, bytes, settings, None, &mut result);
+        }
     }
     sort_findings(&mut result);
     result
@@ -536,23 +568,33 @@ pub fn run_configured<'a>(
 #[must_use]
 pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
-    let work = run_file(rules, path, bytes, Settings::default(), &mut findings);
+    let work = run_file(rules, path, bytes, Settings::default(), None, &mut findings);
     sort_findings(&mut findings);
     (findings, work)
 }
 
-fn run_file(
+pub(crate) fn run_file(
     rules: &[Rule],
     path: &str,
     bytes: &[u8],
-    settings: Settings,
+    settings: Settings<'_>,
+    repository: Option<&RepoCtx<'_, '_>>,
     result: &mut Vec<Finding>,
 ) -> u64 {
     let source = Source::new(bytes);
     let (hits, work) = match source_type(path) {
-        Some(kind) => parsed_hits(rules, path, &source, kind, settings)
-            .unwrap_or_else(|error| (collect(rules, path, &source, settings, Err(&error)), 0)),
-        None => (collect(rules, path, &source, settings, Ok(None)), 0),
+        Some(kind) => {
+            parsed_hits(rules, path, &source, kind, settings, repository).unwrap_or_else(|error| {
+                (
+                    collect(rules, path, &source, settings, repository, Err(&error)),
+                    0,
+                )
+            })
+        }
+        None => (
+            collect(rules, path, &source, settings, repository, Ok(None)),
+            0,
+        ),
     };
     source.locate(path, hits, result);
     work

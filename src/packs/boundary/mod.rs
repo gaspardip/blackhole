@@ -22,3 +22,269 @@ fn check(path: &str, text: &str, limit: usize, findings: &mut Findings) {
         findings.report(offset, Some(&format!("{total} lines, limit {limit}")));
     }
 }
+
+mod bases;
+mod imports;
+mod links;
+mod module_object;
+mod resolver;
+mod specifier;
+mod values;
+
+use crate::engine::TsCtx;
+use imports::{Import, Kind};
+use oxc_resolver::PackageType;
+pub(crate) use resolver::Reader;
+use resolver::{Conditions, Loaders, Tree, TypeImportTarget};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
+
+pub const BANNED: Rule = Rule {
+    id: "boundary/banned-imports",
+    family: Family::Boundary,
+    gate: Gate::Blocking,
+    provenance: "A disallowed dependency can enter through any import form.",
+    fix: "Remove the dependency and implement the operation with an allowed module.",
+    run: Run::Repo(banned),
+};
+
+const NON_LITERAL: &str = "specifier is not a literal";
+
+#[derive(Default)]
+pub(crate) struct RepositoryPaths {
+    pub files: BTreeSet<PathBuf>,
+    pub links: BTreeMap<PathBuf, PathBuf>,
+}
+
+pub struct RepoCtx<'a, 'source> {
+    tree: Tree<'a, 'source>,
+    loaders: Loaders<'a, 'source>,
+    reader: &'a Reader<'source>,
+}
+
+impl<'a, 'source> RepoCtx<'a, 'source> {
+    pub(crate) fn new(files: BTreeSet<PathBuf>, reader: &'a Reader<'source>) -> Self {
+        let tree = Tree::from_files(files, reader);
+        let loaders = tree.loaders();
+        Self {
+            tree,
+            loaders,
+            reader,
+        }
+    }
+
+    fn package_target(
+        &self,
+        importer: Result<&Path, &String>,
+        mode: Conditions,
+        name: &str,
+    ) -> Result<Option<String>, String> {
+        if !name.starts_with('#') {
+            return Ok(None);
+        }
+        let path = importer.map_err(Clone::clone)?;
+        if let Some(loader) = self.loaders.types(mode)
+            && !name.contains('?')
+            && let Some(target) = self
+                .reader
+                .type_import_target(loader, &self.tree, mode, path, name)?
+        {
+            return Ok(match target {
+                TypeImportTarget::Local => None,
+                TypeImportTarget::Package(package) => Some(package),
+            });
+        }
+        self.reader
+            .package_target(self.loaders.package(mode), &self.tree, mode, path, name)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ModuleFormat {
+    kind: PackageType,
+    declared: bool,
+}
+
+impl ModuleFormat {
+    fn has_filename_base(self, required: PackageType, extension: Option<&str>) -> bool {
+        // Without a declared format, TypeScript tooling can change which loader runs the file.
+        self.kind == required
+            && (self.declared
+                || match required {
+                    PackageType::CommonJs => extension == Some("js"),
+                    PackageType::Module => !matches!(extension, Some("ts" | "tsx")),
+                })
+    }
+}
+
+fn module_format(
+    extension: Option<&str>,
+    has_module_syntax: bool,
+    package_type: impl FnOnce() -> Result<Option<PackageType>, String>,
+) -> Result<ModuleFormat, String> {
+    let explicit = match extension {
+        Some("cjs" | "cts") => Some(PackageType::CommonJs),
+        Some("mjs" | "mts") => Some(PackageType::Module),
+        _ => None,
+    };
+    let declared = if explicit.is_some() {
+        explicit
+    } else {
+        package_type()?
+    };
+    let implicit = if has_module_syntax {
+        PackageType::Module
+    } else {
+        PackageType::CommonJs
+    };
+    Ok(ModuleFormat {
+        kind: declared.unwrap_or(implicit),
+        declared: declared.is_some(),
+    })
+}
+
+fn loader_readings(
+    kind: Kind,
+    extension: Option<&str>,
+    module: Option<ModuleFormat>,
+    name: &str,
+) -> impl Iterator<Item = (Result<String, &'static str>, Conditions)> {
+    use Conditions::{Import, Require, TypeImport, TypeRequire};
+    let commonjs = module.is_some_and(|m| m.declared && m.kind == PackageType::CommonJs);
+    let conditions = match (kind, commonjs) {
+        (Kind::StaticRequire | Kind::Require, _) | (Kind::Static, true) => Require,
+        (Kind::TypeRequire, _) | (Kind::TypeDeclaration, true) => TypeRequire,
+        (Kind::TypeImport | Kind::TypeDeclaration, _) => TypeImport,
+        _ => Import,
+    };
+    let dual = kind.implicit_mode()
+        && !module.is_some_and(|m| m.declared)
+        && matches!(extension, Some("ts" | "tsx"))
+        && specifier::bare(name)
+        && (kind == Kind::TypeDeclaration || !name.contains('?'));
+    specifier::readings(name, kind)
+        .into_iter()
+        .enumerate()
+        .flat_map(move |(index, text)| {
+            let other = (dual && text.is_ok() && (kind == Kind::TypeDeclaration || index == 0))
+                .then(|| {
+                    (
+                        text.clone(),
+                        if kind == Kind::TypeDeclaration {
+                            TypeRequire
+                        } else {
+                            Require
+                        },
+                    )
+                });
+            std::iter::once((text, conditions)).chain(other)
+        })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuiltinSource {
+    Module,
+    Process,
+}
+
+impl BuiltinSource {
+    fn source(name: Option<&str>) -> Option<Self> {
+        match bare(name?) {
+            "module" => Some(Self::Module),
+            "process" => Some(Self::Process),
+            _ => None,
+        }
+    }
+}
+
+fn bare(s: &str) -> &str {
+    s.strip_prefix("node:").unwrap_or(s)
+}
+
+fn denied(name: &str, bans: &[String]) -> bool {
+    bans.iter().any(|ban| {
+        bare(name)
+            .strip_prefix(bare(ban))
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+fn note(
+    repo: &RepoCtx<'_, '_>,
+    import: &Import,
+    path: Result<&Path, &String>,
+    module: Result<ModuleFormat, &String>,
+    extension: Option<&str>,
+    bans: &[String],
+) -> Result<Option<String>, String> {
+    let Some(name) = import.name.as_deref() else {
+        return Ok(Some(NON_LITERAL.into()));
+    };
+    if let Some(required) = import.filename_base
+        && module.is_ok_and(|m| !m.has_filename_base(required, extension))
+    {
+        return Ok(Some(NON_LITERAL.into()));
+    }
+    for (reading, mode) in loader_readings(import.kind, extension, module.ok(), name) {
+        let name = reading?;
+        if import.needs_format(matches!(extension, Some("ts" | "tsx"))) {
+            module.map_err(Clone::clone)?;
+        }
+        let target = repo.package_target(path, mode, &name)?;
+        if denied(&name, bans) {
+            return Ok(Some(name));
+        }
+        if target.as_deref().is_some_and(|name| denied(name, bans)) {
+            return Ok(target);
+        }
+    }
+    Ok(None)
+}
+
+fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, bans: &[String], findings: &mut Findings) {
+    let imports = imports::collect(ts, ts.program.source_type.is_typescript_definition());
+    if imports.is_empty() {
+        return;
+    }
+    let rooted = Path::new("/").join(ts.path);
+    let importer = repo.tree.follow(&rooted);
+    let extension = ts
+        .path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    let extension = extension.as_deref();
+    let module = module_format(extension, ts.has_module_syntax, || {
+        if imports
+            .iter()
+            .any(|i| i.needs_format(matches!(extension, Some("ts" | "tsx"))))
+        {
+            repo.tree
+                .package_scope(importer.as_deref().map_err(Clone::clone)?)
+        } else {
+            Ok(None)
+        }
+    });
+    let mut last = None;
+    for import in &imports {
+        if last == Some(import.offset) {
+            continue;
+        }
+        let note = note(
+            repo,
+            import,
+            importer.as_deref(),
+            module.as_ref().copied(),
+            extension,
+            bans,
+        )
+        .unwrap_or_else(Some);
+        if let Some(note) = note {
+            findings.report(import.offset as usize, Some(&note));
+            last = Some(import.offset);
+        }
+    }
+}

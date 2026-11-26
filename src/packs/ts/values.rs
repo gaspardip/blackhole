@@ -110,20 +110,20 @@ pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     })
 }
 
-pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
+pub(crate) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
         .get_reference(id.reference_id.get()?)
         .symbol_id()
 }
 #[derive(PartialEq)]
-pub(super) enum Imported<'a> {
+pub(crate) enum Imported<'a> {
     Named(&'a str),
     Default,
     Namespace,
 }
 
-pub(super) fn import_of<'a>(
+pub(crate) fn import_of<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<(&'a str, Imported<'a>)> {
@@ -197,7 +197,7 @@ fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool 
         })[id.index()]
 }
 
-pub(super) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+pub(crate) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
     ctx.record_work(1);
     let scoping = ctx.semantic.scoping();
     !scoping.symbol_flags(symbol).is_const_variable()
@@ -214,19 +214,20 @@ fn mutation_index(ctx: &TsCtx<'_>) -> HashSet<SymbolId> {
         .collect()
 }
 
+pub(crate) fn is_written(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    ctx.resolution
+        .written
+        .get_or_init(|| mutation_index(ctx))
+        .contains(&symbol)
+}
+
 pub(super) fn declaration<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<AstKind<'a>> {
     let scope = ctx.semantic.scoping();
     let symbol = symbol(ctx, id)?;
-    if ctx
-        .resolution
-        .written
-        .get_or_init(|| mutation_index(ctx))
-        .contains(&symbol)
-        || unreadable(ctx, symbol)
-    {
+    if is_written(ctx, symbol) || unreadable(ctx, symbol) {
         return None;
     }
     let redeclarations = scope.symbol_redeclarations(symbol);
@@ -447,7 +448,7 @@ pub(super) fn any_assigned_path<'a>(
     })
 }
 
-pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+pub(crate) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     loop {
         if !ctx.take_work(1) {
             return expr;
@@ -469,7 +470,7 @@ pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'
     }
 }
 
-pub(super) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+pub(crate) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     while ctx.take_work(1) {
         expr = match expr {
             Expression::ParenthesizedExpression(n) => &n.expression,
@@ -934,7 +935,7 @@ fn transparent(kind: &AstKind<'_>) -> bool {
     )
 }
 
-pub(super) fn global_object(name: &str) -> bool {
+pub(crate) fn global_object(name: &str) -> bool {
     matches!(name, "window" | "self" | "global" | "globalThis")
 }
 

@@ -3,7 +3,10 @@ mod work;
 use work::{assert_growth, assert_work};
 
 use blackhole_check::engine::{registry, run, run_with_work};
-use std::fmt::Write;
+use std::{
+    fmt::Write,
+    time::{Duration, Instant},
+};
 
 fn source(shape: &str, n: usize) -> String {
     let mut text = String::new();
@@ -748,5 +751,101 @@ fn reducer_resolution_scales_with_repeated_reads() {
             work
         });
         assert_growth(small, large, 6, shape);
+    }
+}
+
+#[test]
+fn resolves_large_loader_inputs() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(time_loader_inputs)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn time_loader_inputs() {
+    let config =
+        blackhole_check::config::parse(b"[boundaries]\nbanned-imports=['restricted']").unwrap();
+    let names: Vec<_> = (0..20_000).map(|i| format!("v{i}")).collect();
+    let cases = [
+        ("unknown member chain", format!("x{};", ".a".repeat(512))),
+        (
+            "object bindings",
+            format!("const {{{}}}=x; {};", names.join(","), names.join(";")),
+        ),
+        (
+            "call chain 2500",
+            format!("require{}();", ".call".repeat(2_500)),
+        ),
+        (
+            "call chain 5000",
+            format!("require{}();", ".call".repeat(5_000)),
+        ),
+        (
+            "call chain 10000",
+            format!("require{}();", ".call".repeat(10_000)),
+        ),
+        (
+            "apply chain 10000",
+            format!("require{}();", ".apply".repeat(10_000)),
+        ),
+        (
+            "bind chain 10000",
+            format!("require{}();", ".bind(null)".repeat(10_000)),
+        ),
+        (
+            "nested calls 3000",
+            format!("{}0{};", "f(require,".repeat(3_000), ")".repeat(3_000)),
+        ),
+        (
+            "repeated loader",
+            format!("const r=require; {}", "r('x');".repeat(20_000)),
+        ),
+    ];
+    for (root, n) in [
+        ("require", 2500),
+        ("require", 5000),
+        ("require", 10000),
+        ("arguments", 30000),
+    ] {
+        let source = format!(
+            "{}0{};",
+            "consume(".repeat(n),
+            format!(",{root})").repeat(n)
+        );
+        let start = Instant::now();
+        let hits = blackhole_check::engine::run_configured(
+            registry(),
+            config.engine_settings(),
+            [("large.cjs", source.as_bytes())],
+        );
+        let elapsed = start.elapsed();
+        assert_eq!(
+            hits.iter()
+                .filter(|f| f.rule == "boundary/banned-imports")
+                .count(),
+            n
+        );
+        eprintln!("nested {root} mentions {n} {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(8));
+    }
+    for (label, mut source) in cases {
+        source.push_str("\nrequire('restricted');");
+        let start = Instant::now();
+        let hits = blackhole_check::engine::run_configured(
+            registry(),
+            config.engine_settings(),
+            [("large.ts", source.as_bytes())],
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            hits.iter().any(|f| f.rule == "boundary/banned-imports"
+                && f.line == 2
+                && f.note.as_deref() == Some("restricted")),
+            "{label}"
+        );
+        eprintln!("{label} {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(8), "{label} took {elapsed:?}");
     }
 }

@@ -79,9 +79,18 @@ fn evaluate(
         batch: &mut batch,
     };
     let diff = diff_rules(&mut ctx)?;
-    let findings = crate::scan_files(scan_config, diff.diagnostics, head_tree.paths(), |path| {
-        head_tree.read(path, ctx.batch)
-    })?;
+    let resolution_paths = if scan_config.engine_settings().banned_imports.is_empty() {
+        crate::packs::boundary::RepositoryPaths::default()
+    } else {
+        head_tree.repository_paths(ctx.batch)?
+    };
+    let findings = crate::scan_files(
+        scan_config,
+        diff.diagnostics,
+        head_tree.paths(),
+        resolution_paths,
+        |path| head_tree.read(path, ctx.batch),
+    )?;
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,

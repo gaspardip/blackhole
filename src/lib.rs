@@ -187,12 +187,17 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     }
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
-    let findings = scan_files(
-        &config,
-        Vec::new(),
-        names.iter().map(String::as_str),
-        |name| files::read(&root.join(name)),
-    )?;
+    let all = || names.iter().map(String::as_str);
+    let resolution_paths = if config.engine_settings().banned_imports.is_empty() {
+        packs::boundary::RepositoryPaths::default()
+    } else {
+        files::repository_paths(root, all())?
+    };
+    let selected = all()
+        .filter(|name| selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)));
+    let findings = scan_files(&config, Vec::new(), selected, resolution_paths, |name| {
+        files::read(&root.join(name))
+    })?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(&filed, today)?;
@@ -216,18 +221,26 @@ fn scan_files<'a>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
-    mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
+    paths: packs::boundary::RepositoryPaths,
+    read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send,
 ) -> io::Result<Vec<engine::Finding>> {
+    let settings = config.engine_settings();
+    let reader = packs::boundary::Reader::new(paths.links, read);
+    let repository =
+        (!settings.banned_imports.is_empty()).then(|| engine::RepoCtx::new(paths.files, &reader));
     for name in names.filter(|name| !config.exclude.is_match(name)) {
-        let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))?;
-        if let Some(bytes) = bytes {
-            findings.extend(engine::run_configured(
+        if let Some(bytes) = reader.read(name)? {
+            engine::run_file(
                 engine::registry(),
-                config.engine_settings(),
-                [(name, bytes.as_slice())],
-            ));
+                name,
+                &bytes,
+                settings,
+                repository.as_ref(),
+                &mut findings,
+            );
         }
     }
+    reader.finish()?;
     engine::sort_findings(&mut findings);
     Ok(findings)
 }
