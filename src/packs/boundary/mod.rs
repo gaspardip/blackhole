@@ -35,8 +35,9 @@ use crate::engine::TsCtx;
 use imports::{Import, Kind};
 use oxc_resolver::PackageType;
 pub(crate) use resolver::Reader;
-use resolver::{Conditions, Loaders, Tree, TypeImportTarget};
+use resolver::{Charge, Conditions, Loaders, Tree, TypeImportTarget};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
@@ -87,6 +88,7 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
         importer: Result<&Path, &String>,
         mode: Conditions,
         name: &str,
+        charge: &Charge<'_>,
     ) -> Result<Option<String>, String> {
         if !name.starts_with('#') {
             return Ok(None);
@@ -95,14 +97,15 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
         let Resolution { tree, loaders } = self.resolution.as_ref().map_err(Clone::clone)?;
         let reader = tree.reader.expect("repository context has a reader");
         if let Some(loader) = loaders.types(mode)
-            && let Some(target) = reader.type_import_target(loader, tree, mode, path, name)?
+            && let Some(target) =
+                reader.type_import_target(loader, tree, mode, path, name, charge)?
         {
             return Ok(match target {
                 TypeImportTarget::Blocked | TypeImportTarget::Local => None,
                 TypeImportTarget::Package(package) => Some(package),
             });
         }
-        reader.package_target(tree, mode, path, name)
+        reader.package_target(tree, mode, path, name, charge)
     }
 }
 
@@ -223,6 +226,7 @@ fn note(
     module: Result<ModuleFormat, &String>,
     extension: Option<&str>,
     ts_extension: bool,
+    charge: &Charge<'_>,
 ) -> Result<Option<String>, String> {
     let Some(name) = import.name.as_deref() else {
         return Ok(Some(NON_LITERAL.into()));
@@ -238,7 +242,7 @@ fn note(
         if needs_format {
             module.map_err(Clone::clone)?;
         }
-        let target = repo.package_target(path, mode, &name)?;
+        let target = repo.package_target(path, mode, &name, charge)?;
         if denied(&name, repo.bans) {
             return Ok(Some(name));
         }
@@ -278,6 +282,22 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
             Ok(None)
         }
     });
+    let remaining = Cell::new(
+        ts.semantic
+            .nodes()
+            .len()
+            .saturating_mul(40)
+            .saturating_add(1024),
+    );
+    let charge = || {
+        let next = remaining
+            .get()
+            .checked_sub(1)
+            .ok_or_else(|| "package manifest resolution exceeded the work budget".to_owned())?;
+        remaining.set(next);
+        ts.record_work(1);
+        Ok(())
+    };
     let mut verbatim = None;
     let mut last = None;
     for import in &imports {
@@ -292,6 +312,7 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
             module.as_ref().copied(),
             extension,
             ts_extension,
+            &charge,
         )
         .unwrap_or_else(Some) else {
             continue;

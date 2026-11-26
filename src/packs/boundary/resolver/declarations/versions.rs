@@ -1,17 +1,31 @@
-use super::Manifest;
+use super::{Charge, Manifest};
 use std::cmp::Ordering;
 
 const TYPESCRIPT: [u64; 3] = [5, 9, 3];
 
-pub(super) fn paths(manifest: &Manifest) -> Option<&Manifest> {
-    manifest
-        .get("typesVersions")?
-        .as_object()?
-        .iter()
-        .filter(|(range, _)| matches(range))
-        .min_by_key(|(range, _)| array_index(range).unwrap_or(u32::MAX))?
-        .1
-        .as_object()
+pub(super) fn paths<'a>(
+    manifest: &'a Manifest,
+    charge: &Charge<'_>,
+) -> Result<Option<&'a Manifest>, String> {
+    let Some(versions) = manifest
+        .get("typesVersions")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let mut selected = None;
+    let mut rank = u32::MAX;
+    for (range, target) in versions {
+        charge()?;
+        if matches(range) {
+            let index = array_index(range).unwrap_or(u32::MAX);
+            if selected.is_none() || index < rank {
+                selected = Some(target);
+                rank = index;
+            }
+        }
+    }
+    Ok(selected.and_then(serde_json::Value::as_object))
 }
 
 fn array_index(key: &str) -> Option<u32> {

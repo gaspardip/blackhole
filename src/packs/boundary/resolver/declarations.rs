@@ -1,6 +1,6 @@
 mod versions;
 
-use super::{Conditions, Manifest, Tree, repository_name};
+use super::{Charge, Conditions, Manifest, Tree, repository_name};
 use oxc::span::SourceType;
 use oxc_resolver::PathUtil;
 use serde_json::Value;
@@ -35,17 +35,19 @@ pub(super) fn import_target(
     importer: &Path,
     name: &str,
     mode: Conditions,
+    charge: &Charge<'_>,
 ) -> Result<Option<super::TypeImportTarget>, String> {
     let declarations = PackageLookup {
         tree,
         mode,
+        charge,
         javascript: false,
     };
     let javascript = PackageLookup {
         javascript: true,
         ..declarations
     };
-    match walk_import(tree, importer, name, mode, |root, target, capture| {
+    let resolve = |root: &Path, target: &str, capture: Capture<'_>| {
         let Some(target) = capture.apply(target) else {
             return Ok(None);
         };
@@ -69,9 +71,10 @@ pub(super) fn import_target(
         if target.is_empty() || !is_package(&target) {
             return Ok(None);
         }
-        lookup(tree, &root.join("package.json"), &target, mode)
+        lookup(tree, &root.join("package.json"), &target, mode, charge)
             .map(|found| found.then_some(super::TypeImportTarget::Package(target)))
-    }) {
+    };
+    match walk_import(tree, importer, name, mode, charge, resolve) {
         Ok(Target::Matched(target)) => Ok(Some(target)),
         Ok(Target::Blocked) => Ok(Some(super::TypeImportTarget::Blocked)),
         Ok(Target::Unmatched) => Ok(None),
@@ -84,8 +87,9 @@ pub(super) fn package_target(
     importer: &Path,
     name: &str,
     mode: Conditions,
+    charge: &Charge<'_>,
 ) -> Result<Option<String>, String> {
-    match walk_import(tree, importer, name, mode, |_, target, capture| {
+    match walk_import(tree, importer, name, mode, charge, |_, target, capture| {
         let end = super::super::specifier::path_end(target);
         let Some(target) = capture.apply(&target[..end]) else {
             return Ok(None);
@@ -110,6 +114,7 @@ fn walk_import<T>(
     importer: &Path,
     name: &str,
     mode: Conditions,
+    charge: &Charge<'_>,
     mut resolve: impl FnMut(&Path, &str, Capture<'_>) -> TargetLookup<T>,
 ) -> Result<Target<T>, TargetError> {
     if name == "#" {
@@ -120,14 +125,17 @@ fn walk_import<T>(
     else {
         return Ok(Target::Unmatched);
     };
-    let Some((target, capture)) = manifest
-        .get("imports")
-        .and_then(Value::as_object)
-        .and_then(|paths| select_path(paths, name, true))
+    let Some(paths) = manifest.get("imports").and_then(Value::as_object) else {
+        return Ok(Target::Unmatched);
+    };
+    let Some((target, capture)) =
+        select_path(paths, name, true, charge).map_err(TargetError::Resolution)?
     else {
         return Ok(Target::Unmatched);
     };
-    walk_target(target, mode, &mut |target| resolve(root, target, capture))
+    walk_target(target, mode, charge, &mut |target| {
+        resolve(root, target, capture)
+    })
 }
 
 fn lookup(
@@ -135,6 +143,7 @@ fn lookup(
     importer: &Path,
     name: &str,
     mode: Conditions,
+    charge: &Charge<'_>,
 ) -> Result<bool, TargetError> {
     let package_end = name
         .match_indices('/')
@@ -145,6 +154,7 @@ fn lookup(
     let package_lookup = PackageLookup {
         tree,
         mode,
+        charge,
         javascript: false,
     };
     let mut candidates = Vec::new();
@@ -203,6 +213,7 @@ fn exports_field(manifest: &Manifest) -> Option<&Value> {
 struct PackageLookup<'a, 'tree, 'source> {
     tree: &'a Tree<'tree, 'source>,
     mode: Conditions,
+    charge: &'a Charge<'a>,
     javascript: bool,
 }
 
@@ -217,23 +228,30 @@ impl PackageLookup<'_, '_, '_> {
     }
 
     fn exports(&self, root: &Path, exports: &Value, subpath: &str) -> Result<bool, TargetError> {
-        let paths = exports
-            .as_object()
-            .filter(|map| map.keys().any(|key| key.starts_with('.')));
+        let mut paths = None;
+        if let Some(map) = exports.as_object() {
+            for key in map.keys() {
+                (self.charge)().map_err(TargetError::Resolution)?;
+                if key.starts_with('.') {
+                    paths = Some(map);
+                    break;
+                }
+            }
+        }
         let key = if subpath.is_empty() {
             ".".to_owned()
         } else {
             format!("./{subpath}")
         };
         let selected = if let Some(paths) = paths {
-            select_path(paths, &key, true)
+            select_path(paths, &key, true, self.charge).map_err(TargetError::Resolution)?
         } else {
             subpath.is_empty().then_some((exports, Capture::Exact))
         };
         let Some((target, capture)) = selected else {
             return Ok(false);
         };
-        walk_target(target, self.mode, &mut |target| {
+        walk_target(target, self.mode, self.charge, &mut |target| {
             let invalid = |target: &str| {
                 TargetError::InvalidTarget(format!(
                     "invalid package export target {target:?} in {}",
@@ -279,20 +297,19 @@ impl PackageLookup<'_, '_, '_> {
         let module = manifest.get("type").and_then(Value::as_str) == Some("module");
         let implicit =
             !matches!(self.mode, Conditions::TypeImport) || (subpath.is_empty() && !module);
-        if let Some((targets, capture)) = candidate
-            .strip_prefix(root)
-            .ok()
-            .and_then(Path::to_str)
-            .and_then(|path| {
-                versions::paths(manifest).and_then(|paths| select_path(paths, path, false))
-            })
+        let selected = if let Some(path) = candidate.strip_prefix(root).ok().and_then(Path::to_str)
+            && let Some(paths) = versions::paths(manifest, self.charge)?
         {
-            for target in targets
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-            {
+            select_path(paths, path, false, self.charge)?
+        } else {
+            None
+        };
+        if let Some((targets, capture)) = selected {
+            for target in targets.as_array().into_iter().flatten() {
+                (self.charge)()?;
+                let Some(target) = target.as_str() else {
+                    continue;
+                };
                 let target = match capture {
                     Capture::Star(text) => target.replacen('*', text, 1),
                     _ => target.to_owned(),
@@ -415,11 +432,13 @@ fn remember_invalid(
 fn walk_target<T>(
     target: &Value,
     mode: Conditions,
+    charge: &Charge<'_>,
     resolve: &mut impl FnMut(&str) -> TargetLookup<T>,
 ) -> Result<Target<T>, TargetError> {
+    charge().map_err(TargetError::Resolution)?;
     let mut fallback = Ok(Target::Unmatched);
     let array = target.is_array();
-    let mut try_target = |target| match walk_target(target, mode, resolve) {
+    let mut try_target = |target| match walk_target(target, mode, charge, resolve) {
         Err(error @ TargetError::InvalidTarget(_)) if array || mode.is_type() => {
             if array || matches!(fallback, Ok(Target::Unmatched)) {
                 fallback = Err(error);
@@ -437,13 +456,17 @@ fn walk_target<T>(
         Value::String(target) => {
             return resolve(target).map(|target| target.map_or(Target::Unmatched, Target::Matched));
         }
-        Value::Object(conditions) => conditions
-            .iter()
-            .filter(|(key, _)| {
-                mode.names().contains(&key.as_str())
-                    || (mode.is_type() && versioned_type_condition(key))
-            })
-            .find_map(|(_, target)| try_target(target)),
+        Value::Object(conditions) => conditions.iter().find_map(|(key, target)| {
+            if let Err(error) = charge() {
+                Some(Err(TargetError::Resolution(error)))
+            } else if mode.names().contains(&key.as_str())
+                || (mode.is_type() && versioned_type_condition(key))
+            {
+                try_target(target)
+            } else {
+                None
+            }
+        }),
         Value::Array(targets) if !targets.is_empty() => targets.iter().find_map(try_target),
         Value::Null if mode.is_type() => return Ok(Target::Unmatched),
         Value::Array(_) | Value::Null => return Ok(Target::Blocked),
@@ -485,15 +508,17 @@ fn select_path<'a, 'b>(
     paths: &'a Manifest,
     name: &'b str,
     exports: bool,
-) -> Option<(&'a Value, Capture<'b>)> {
+    charge: &Charge<'_>,
+) -> Result<Option<(&'a Value, Capture<'b>)>, String> {
     if (!exports || (!name.contains('*') && !name.ends_with('/')))
         && let Some(target) = paths.get(name)
     {
-        return Some((target, Capture::Exact));
+        return Ok(Some((target, Capture::Exact)));
     }
     let mut best = None;
     let mut rank = None;
     for (key, target) in paths {
+        charge()?;
         let matched = if let Some((prefix, suffix)) = key.split_once('*') {
             if suffix.contains('*') {
                 continue;
@@ -522,5 +547,5 @@ fn select_path<'a, 'b>(
             best = Some((target, capture));
         }
     }
-    best
+    Ok(best)
 }

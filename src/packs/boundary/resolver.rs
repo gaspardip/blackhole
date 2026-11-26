@@ -17,6 +17,7 @@ use std::{
 };
 
 const MAX_READS: usize = 64;
+pub(super) type Charge<'a> = dyn Fn() -> Result<(), String> + 'a;
 type ReadFile<'a> = Box<dyn FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a>;
 pub(crate) struct Reader<'a> {
     read: Mutex<ReadFile<'a>>,
@@ -64,8 +65,9 @@ impl<'a> Reader<'a> {
         mode: Conditions,
         file: &Path,
         name: &str,
+        charge: &Charge<'_>,
     ) -> Result<Option<String>, String> {
-        self.bounded(|| declarations::package_target(tree, file, name, mode))
+        self.bounded(|| declarations::package_target(tree, file, name, mode, charge))
     }
     pub(super) fn type_import_target(
         &self,
@@ -74,12 +76,13 @@ impl<'a> Reader<'a> {
         mode: Conditions,
         file: &Path,
         name: &str,
+        charge: &Charge<'_>,
     ) -> Result<Option<TypeImportTarget>, String> {
         self.bounded(|| {
             if !name.contains('?') && Self::type_paths_target(loader, tree, file, name)? {
                 return Ok(Some(TypeImportTarget::Local));
             }
-            declarations::import_target(tree, file, name, mode)
+            declarations::import_target(tree, file, name, mode, charge)
         })
     }
     fn type_paths_target(
