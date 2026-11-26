@@ -84,19 +84,18 @@ pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
 
 fn check_paths(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Result<bool> {
     let scan = scan(root, targets, output)?;
-    report_stale(&scan.stale, &scan.actual, targets.hook(), output)?;
+    report_stale(&scan.stale, &scan.actual, output)?;
     Ok(scan.over || !scan.stale.is_empty())
 }
 
 fn report_stale(
     stale: &ledger::Counts,
     actual: &ledger::Counts,
-    hook: bool,
     output: &mut impl Write,
 ) -> io::Result<()> {
     for (key, allowed) in stale {
         let (rule, path) = key;
-        let path = rendered(path, hook);
+        let path = diagnostic_text(path);
         let found = actual.get(key).copied().unwrap_or(0);
         writeln!(
             output,
@@ -216,12 +215,6 @@ enum Targets<'a> {
     Edits(Option<&'a hooks::EditNames<'a>>),
 }
 
-impl Targets<'_> {
-    fn hook(self) -> bool {
-        !matches!(self, Self::Command(_))
-    }
-}
-
 fn scan(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Result<Scan> {
     // The selection is resolved before the working directory moves.
     let (names, selection) = match targets {
@@ -267,7 +260,7 @@ fn scan(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Resul
         .iter()
         .map(String::as_str)
         .filter(|name| selected(name));
-    let findings = scan_files(&config, Vec::new(), names, targets.hook(), |name| {
+    let findings = scan_files(&config, Vec::new(), names, |name| {
         files::read(&root.join(name))
     })?;
     let actual = ledger::counts(&findings);
@@ -276,7 +269,7 @@ fn scan(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Resul
     let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
     let mut stale = ledger::excess(&base, &actual);
     stale.retain(|(_, path), _| selected(path));
-    report(&findings, &over, targets.hook(), output)?;
+    report(&findings, &over, output)?;
     Ok(Scan {
         ledger_bytes,
         base,
@@ -290,18 +283,10 @@ fn scan_files<'a>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
-    hook: bool,
     mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Vec<engine::Finding>> {
     for name in names.filter(|name| !config.exclude.is_match(name)) {
-        let bytes = read(name).map_err(|e| {
-            let path = if hook {
-                name.into()
-            } else {
-                format!("{name:?}")
-            };
-            io::Error::new(e.kind(), format!("{path}: {e}"))
-        })?;
+        let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name}: {e}")))?;
         if let Some(bytes) = bytes {
             findings.extend(engine::run_configured(
                 engine::registry(),
@@ -314,30 +299,20 @@ fn scan_files<'a>(
     Ok(findings)
 }
 
-fn rendered(text: &str, hook: bool) -> std::borrow::Cow<'_, str> {
-    if hook {
-        hooks::hook_text(text)
-    } else {
-        text.into()
-    }
-}
-
 fn report(
     findings: &[engine::Finding],
     over: &ledger::Counts,
-    hook: bool,
     output: &mut impl Write,
 ) -> io::Result<()> {
     let findings = findings.iter().filter(|f| {
         // Advisory findings need output even when there is no overage.
         f.gate == engine::Gate::Advisory || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
     });
-    print_findings(findings, hook, output)
+    print_findings(findings, output)
 }
 
 fn print_findings<'a>(
     findings: impl IntoIterator<Item = &'a engine::Finding>,
-    hook: bool,
     output: &mut impl Write,
 ) -> io::Result<()> {
     let mut matched = std::collections::BTreeSet::new();
@@ -346,7 +321,7 @@ fn print_findings<'a>(
         write!(
             output,
             "{}:{}:{} {}",
-            rendered(&f.path, hook),
+            diagnostic_text(&f.path),
             f.line,
             f.col,
             f.rule
@@ -355,7 +330,7 @@ fn print_findings<'a>(
             write!(output, " [advisory]")?;
         }
         if let Some(note) = &f.note {
-            write!(output, " {}", rendered(note, hook))?;
+            write!(output, " {}", diagnostic_text(note))?;
         }
         writeln!(output)?;
     }
@@ -448,4 +423,21 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         }
     }
     replace("objections", &contents)
+}
+
+/// Escapes characters that could disrupt a line of CLI output.
+pub fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let needs_escape = |c: char| c.is_control() || matches!(c, '\\' | '\u{2028}' | '\u{2029}');
+    if !text.chars().any(needs_escape) {
+        return text.into();
+    }
+    let mut result = String::new();
+    for c in text.chars() {
+        if needs_escape(c) {
+            result.extend(c.escape_debug());
+        } else {
+            result.push(c);
+        }
+    }
+    result.into()
 }

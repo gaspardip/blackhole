@@ -23,7 +23,11 @@ pub fn run(event: Event) -> ExitCode {
         Ok(false) => ExitCode::SUCCESS,
         Ok(true) => ExitCode::from(2),
         Err(error) => {
-            let _ = writeln!(out, "blackhole: {}", hook_text(&error.to_string()));
+            let _ = writeln!(
+                out,
+                "blackhole: {}",
+                crate::diagnostic_text(&error.to_string())
+            );
             if matches!(event, Event::PreEdit) && crate::files::root().is_ok() {
                 ExitCode::from(2)
             } else {
@@ -362,20 +366,4 @@ fn alias_spellings(link: &Path) -> impl Iterator<Item = PathBuf> {
         .take(40)
         .filter(|path| !path.components().any(|part| part == Component::ParentDir))
         .chain(final_target)
-}
-
-pub(super) fn hook_text(text: &str) -> std::borrow::Cow<'_, str> {
-    let needs_escape = |c: char| c.is_control() || matches!(c, '\\' | '\u{2028}' | '\u{2029}');
-    if !text.chars().any(needs_escape) {
-        return text.into();
-    }
-    let mut result = String::new();
-    for c in text.chars() {
-        if needs_escape(c) {
-            result.extend(c.escape_debug());
-        } else {
-            result.push(c);
-        }
-    }
-    result.into()
 }

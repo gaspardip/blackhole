@@ -43,6 +43,15 @@ fn names(dir: &Path) -> Vec<std::ffi::OsString> {
 }
 
 #[test]
+fn check_escapes_newlines_in_finding_paths() {
+    let dir = repo();
+    fs::write(dir.path().join("line\nbreak.py"), "# noqa").unwrap();
+    let text = String::from_utf8(check(dir.path(), &[], 1).stdout).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    assert!(text.starts_with(r"line\nbreak.py:1:1 "));
+}
+
+#[test]
 fn clean_selection_is_silent() {
     let dir = repo();
     let root = dir.path();
