@@ -29,6 +29,15 @@ aliases of a ledger that does not exist yet on filesystems that ignore some
 Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
 `ci` still judge the ledger.
 
+The hooks also do not catch these cases:
+
+- The npm install's `blackhole` needs `node` on the hook's PATH. Without it the
+  shim exits 127, which Codex treats as non-blocking.
+- A checkout directory whose name ends in a newline can make the launcher
+  resolve the wrong root.
+- A Codex hook that rewrites a patch after blackhole has checked it can change
+  which files the edit touches.
+
 ## Working on this repo
 
 ```sh
