@@ -112,6 +112,7 @@ pub(in crate::packs::ts) fn const_initializer<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<&'a Expression<'a>> {
+    ctx.resolution.record_work(1);
     if blocks_identifier_resolution(ctx, id.node_id.get()) {
         return None;
     }
@@ -138,6 +139,7 @@ fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
 fn has_eval_mention(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.eval_mention.get_or_init(|| {
         ctx.semantic.nodes().iter().any(|node| {
+            ctx.resolution.record_work(1);
             let name = match node.kind() {
                 AstKind::IdentifierReference(id) => Some(id.name.as_js_str()),
                 AstKind::IdentifierName(id) => Some(id.name.as_js_str()),
@@ -164,6 +166,7 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
         let mut inside = Vec::with_capacity(scoping.scopes_len());
         // Oxc assigns scope IDs in parent-first order.
         for scope in scoping.scope_descendants_from_root() {
+            ctx.resolution.record_work(1);
             let inherited = scoping
                 .scope_parent_id(scope)
                 .is_some_and(|parent| inside[parent.index()]);

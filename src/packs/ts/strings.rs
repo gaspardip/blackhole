@@ -97,12 +97,14 @@ enum Step<'a> {
 }
 
 fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold> {
+    ctx.resolution.record_work(1);
     let mut cache = ctx.resolution.strings.borrow_mut();
     if let Some(&known) = cache.get(&expr.node_id()) {
         return known;
     }
     let mut pending = vec![Step::Visit(expr)];
     while let Some(step) = pending.pop() {
+        ctx.resolution.record_work(1);
         let copy = |pending: &mut Vec<_>, id, next: &'a Expression<'a>| {
             pending.extend([Step::Copy(id, next.node_id()), Step::Visit(next)]);
         };
@@ -148,7 +150,10 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold> {
                 (
                     id,
                     leaf.filter(|leaf| leaf.len() <= ctx.text.len())
-                        .map(Fold::leaf),
+                        .map(|leaf| {
+                            ctx.resolution.record_work(leaf.len());
+                            Fold::leaf(leaf)
+                        }),
                 )
             }
             Step::Copy(id, next) => (id, cache[&next]),

@@ -32,14 +32,10 @@ fn named_exports<'ctx>(ctx: &'ctx TsCtx<'_>) -> &'ctx NamedExports {
                             continue;
                         };
                         let scoping = ctx.semantic.scoping();
-                        let binding = if ctx.resolution.has_work_limit() {
-                            scoping
-                                .scope_ancestors(node.scope_id())
-                                .take_while(|_| ctx.resolution.take_string_work(local.name.len()))
-                                .find_map(|scope| scoping.get_binding(scope, local.name))
-                        } else {
-                            scoping.find_binding(node.scope_id(), local.name)
-                        };
+                        let binding = scoping
+                            .scope_ancestors(node.scope_id())
+                            .take_while(|_| ctx.resolution.take_string_work(local.name.len()))
+                            .find_map(|scope| scoping.get_binding(scope, local.name));
                         if let Some(symbol) = binding {
                             if decl.export_kind.is_type() || spec.export_kind.is_type() {
                                 exports.types.insert(symbol);

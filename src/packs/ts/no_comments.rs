@@ -153,6 +153,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
         match kind {
             AstKind::ExportNamedDeclaration(n) => {
                 for spec in &n.specifiers {
+                    ctx.resolution.record_work(1);
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
                         bindings.extend(scoping.get_root_binding(r.name));
                     }
@@ -189,6 +190,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     // Semantic nodes are in preorder, so a node inherits its parent's top-level statement.
     let mut tops: Vec<NodeId> = Vec::with_capacity(nodes.len());
     for (id, _) in nodes.iter_enumerated() {
+        ctx.resolution.record_work(1);
         let parent = nodes.parent_id(id);
         let top = match nodes.kind(parent) {
             AstKind::Program(_) => id,
@@ -198,6 +200,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     }
     for symbol in bindings {
         for id in scoping.symbol_declarations(symbol) {
+            ctx.resolution.record_work(1);
             declarations.insert(tops[id.index()]);
         }
     }
@@ -243,6 +246,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
     for (id, node) in nodes.iter_enumerated() {
+        ctx.resolution.record_work(1);
         let kind = node.kind();
         let parent = nodes.parent_id(id);
         let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
@@ -270,6 +274,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let mut expanded = HashSet::new();
     let mut pending: Vec<_> = public.iter().copied().collect();
     while let Some(owner) = pending.pop() {
+        ctx.resolution.record_work(1);
         for symbol in references
             .remove(&owner)
             .into_iter()
@@ -280,7 +285,10 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
                 ctx.semantic
                     .scoping()
                     .symbol_declarations(symbol)
-                    .filter(|id| type_declaration(nodes.kind(*id)) && public.insert(*id)),
+                    .filter(|id| {
+                        ctx.resolution.record_work(1);
+                        type_declaration(nodes.kind(*id)) && public.insert(*id)
+                    }),
             );
         }
         if let Some(targets) = edges.remove(&owner) {
@@ -291,13 +299,19 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
 }
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
-    let end = ctx.comments.partition_point(|c| c.span.end <= start);
+    let end = ctx.comments.partition_point(|c| {
+        ctx.resolution.record_work(1);
+        c.span.end <= start
+    });
     for c in ctx.comments[..end].iter().rev() {
         // From the back, so code in between ends the scan before a long gap is read again.
         if !ctx.text[c.span.end as usize..start as usize]
             .chars()
             .rev()
-            .all(js_whitespace)
+            .all(|ch| {
+                ctx.resolution.record_work(ch.len_utf8());
+                js_whitespace(ch)
+            })
         {
             return None;
         }

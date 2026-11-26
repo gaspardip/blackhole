@@ -31,7 +31,8 @@ type AccumulatorAliases<'a> = HashMap<(SymbolId, SymbolId), &'a Expression<'a>>;
 
 #[derive(Default)]
 pub(crate) struct Resolution<'a> {
-    work: OnceCell<Cell<Option<usize>>>,
+    pub(crate) work: Rc<Cell<u64>>,
+    work_limit: OnceCell<Cell<Option<usize>>>,
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
     array_callbacks: OnceCell<HashMap<oxc::span::Span, Vec<Rc<Invocation<'a>>>>>,
     pub(super) named_callbacks:
@@ -55,28 +56,32 @@ pub(crate) struct Resolution<'a> {
     calls: RefCell<HashMap<oxc::span::Span, Rc<InvocationTarget<'a>>>>,
 }
 impl Resolution<'_> {
-    pub(crate) fn conservative() -> Self {
+    pub(crate) fn conservative(&self) -> Self {
         Self {
+            work: Rc::clone(&self.work),
             conservative: true,
             ..Self::default()
         }
     }
     pub(super) fn limit_work(&self, steps: usize) {
-        self.work
+        self.work_limit
             .set(Cell::new(Some(steps)))
             .expect("one work limit per rule");
     }
 
-    pub(super) fn has_work_limit(&self) -> bool {
-        self.work.get().is_some()
+    pub(super) fn has_work(&self) -> bool {
+        self.work_limit
+            .get()
+            .is_none_or(|work| work.get().is_some())
     }
 
-    pub(super) fn has_work(&self) -> bool {
-        self.work.get().is_none_or(|work| work.get().is_some())
+    pub(super) fn record_work(&self, steps: usize) {
+        self.work.set(self.work.get().saturating_add(steps as u64));
     }
 
     pub(super) fn take_work(&self, steps: usize) -> bool {
-        self.work.get().is_none_or(|work| {
+        self.record_work(steps);
+        self.work_limit.get().is_none_or(|work| {
             let remaining = work.get().and_then(|left| left.checked_sub(steps));
             work.set(remaining);
             remaining.is_some()
@@ -109,9 +114,10 @@ pub(super) fn path_is(ctx: &TsCtx<'_>, path: &[&str], expected: &[&str]) -> bool
 pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.has_with.get_or_init(|| {
         let scoping = ctx.semantic.scoping();
-        scoping
-            .scope_descendants_from_root()
-            .any(|id| scoping.scope_flags(id).is_with())
+        scoping.scope_descendants_from_root().any(|id| {
+            ctx.resolution.record_work(1);
+            scoping.scope_flags(id).is_with()
+        })
     })
 }
 
@@ -470,9 +476,6 @@ pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'
 }
 
 pub(super) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
-    if !ctx.resolution.has_work_limit() {
-        return expr.get_inner_expression();
-    }
     while ctx.resolution.take_work(1) {
         expr = match expr {
             Expression::ParenthesizedExpression(n) => &n.expression,

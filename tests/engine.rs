@@ -583,20 +583,18 @@ fn alias_verdicts_follow_original_reversed_and_rotated_declarations() {
     }
 }
 
-fn timed_alias_findings(path: &str, source: &str, seconds: u64) -> Vec<Finding> {
-    let start = std::time::Instant::now();
-    let findings = run(registry(), [(path, source.as_bytes())]);
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(seconds),
-        "{:?}",
-        start.elapsed()
-    );
+#[track_caller]
+fn bounded_findings(path: &str, source: &str) -> Vec<Finding> {
+    let (findings, work) =
+        blackhole_check::engine::run_with_work(registry(), path, source.as_bytes());
+    let cap = source.len() as u64 * 12;
+    assert!(work <= cap, "{path}: {work} work exceeds {cap}");
     findings
 }
 
 #[test]
 fn long_alias_chain_fits_the_budget() {
-    assert!(timed_alias_findings("chain.ts", &alias_chain(100_000), 3).is_empty());
+    assert!(bounded_findings("chain.ts", &alias_chain(100_000)).is_empty());
 }
 
 fn alias_chain(count: usize) -> String {
@@ -612,9 +610,7 @@ fn alias_chain(count: usize) -> String {
 fn wide_union_fits_the_budget() {
     let chain = alias_chain(100);
     let members = vec!["A99"; 5000].join(" | ");
-    assert!(
-        timed_alias_findings("wide.ts", &format!("{chain}type Wide = {members};"), 3).is_empty()
-    );
+    assert!(bounded_findings("wide.ts", &format!("{chain}type Wide = {members};")).is_empty());
 }
 
 #[test]
@@ -630,7 +626,7 @@ fn shared_union_members_fit_the_budget_with_and_without_a_cycle() {
             let prev = i - 1;
             writeln!(source, "type A{i} = A{prev} | A{prev};").unwrap();
         }
-        assert!(timed_alias_findings("aliases.ts", &source, 1).is_empty());
+        assert!(bounded_findings("aliases.ts", &source).is_empty());
     }
 }
 
@@ -645,7 +641,7 @@ fn generic_forwarders_reuse_the_target_with_distinct_arguments() {
         writeln!(src, "type V{i} = G3999<{{ v{i}: string }}>;").unwrap();
     }
     src.push_str("type Last = G3999<unknown>;");
-    let hits = timed_alias_findings("aliases.ts", &src, 3);
+    let hits = bounded_findings("aliases.ts", &src);
     assert_eq!(hits.len(), 1);
     assert_eq!(
         locations(&hits),
@@ -661,7 +657,7 @@ fn dictionaries_share_a_merged_interface_verdict() {
     for i in 0..4000 {
         writeln!(source, "type D{i} = {{ [k: string]: X }};").unwrap();
     }
-    let hits = timed_alias_findings("aliases.ts", &source, 3);
+    let hits = bounded_findings("aliases.ts", &source);
     assert_eq!(hits.len(), 4000);
     for (i, f) in hits.iter().enumerate() {
         assert_eq!(
@@ -709,7 +705,7 @@ fn forward_union_members_settle_before_the_union() {
         writeln!(source, "type A{i} = A{};", i + 1).unwrap();
     }
     source.push_str("type A3999 = unknown;");
-    let hits = timed_alias_findings("aliases.ts", &source, 3);
+    let hits = bounded_findings("aliases.ts", &source);
     assert_eq!(hits.len(), 4001);
     assert!(
         hits.iter()
@@ -728,7 +724,7 @@ fn recursive_node_types_propagate_unknown_to_every_alias() {
         let leaf = if i == 0 { " | Leaf" } else { "" };
         writeln!(source, "type N{i} = {}{leaf};", children.join(" | ")).unwrap();
     }
-    let hits = timed_alias_findings("aliases.ts", &source, 1);
+    let hits = bounded_findings("aliases.ts", &source);
     let expected: Vec<_> = (1..=41)
         .map(|i| ("ts/no-unknown-type-aliases", i, 6))
         .collect();
@@ -737,14 +733,14 @@ fn recursive_node_types_propagate_unknown_to_every_alias() {
 }
 
 #[test]
-fn exported_alias_chain_is_judged_in_linear_time() {
+fn exported_alias_chain_is_judged_in_linear_work() {
     use std::fmt::Write as _;
     let mut text = String::from("/** Public value. */\ntype T0 = number;\n");
     for i in 1..4000 {
         writeln!(text, "type T{i} = T{};", i - 1).unwrap();
     }
     text.push_str("export type Last = T3999;");
-    assert!(timed_alias_findings("aliases.ts", &text, 3).is_empty());
+    assert!(bounded_findings("aliases.ts", &text).is_empty());
 }
 
 #[test]
@@ -757,12 +753,11 @@ fn export_aliases_expand_each_root_binding_once() {
         "/** Public contract. */\n{}export {{ {aliases} }};",
         "interface M {}\n".repeat(4000)
     );
-    assert!(timed_alias_findings("aliases.ts", &text, 2).is_empty());
+    assert!(bounded_findings("aliases.ts", &text).is_empty());
 }
 
 #[test]
 fn exported_bindings_share_the_walk_to_their_statement() {
-    use std::time::{Duration, Instant};
     const COUNT: usize = 16_000;
     let names: Vec<_> = (0..COUNT).map(|i| format!("a{i}")).collect();
     let text = format!(
@@ -772,13 +767,7 @@ fn exported_bindings_share_the_walk_to_their_statement() {
         "\n",
         names.join(",")
     );
-    let start = Instant::now();
-    assert!(run(registry(), [("nested.js", text.as_bytes())]).is_empty());
-    assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(bounded_findings("nested.js", &text).is_empty());
 }
 
 #[test]
@@ -788,7 +777,7 @@ fn a_gap_after_a_comment_is_scanned_once() {
     for i in 0..2000 {
         writeln!(text, "export const a{i} = 0;").unwrap();
     }
-    assert!(timed_alias_findings("gap.ts", &text, 2).is_empty());
+    assert!(bounded_findings("gap.ts", &text).is_empty());
 }
 
 #[test]
@@ -811,7 +800,7 @@ fn merged_interfaces_are_expanded_once() {
         "Merge,".repeat(8000),
         "interface Merge {}\n".repeat(8000)
     );
-    assert!(timed_alias_findings("merge.ts", &text, 3).is_empty());
+    assert!(bounded_findings("merge.ts", &text).is_empty());
 }
 
 #[test]
@@ -1269,11 +1258,11 @@ fn only_unresolved_parameters_receive_the_budget_note() {
 }
 
 #[test]
-fn deep_alias_questions_keep_their_time_and_budget_bounds() {
+fn deep_alias_questions_keep_their_work_and_budget_bounds() {
     use std::fmt::Write as _;
     let mut chain = alias_chain(100_000);
     chain.push_str("function f(x: A99999) {}\nconst v: A99999 = 's';\nconst p = v as string;");
-    assert!(timed_alias_findings("chain.ts", &chain, 3).is_empty());
+    assert!(bounded_findings("chain.ts", &chain).is_empty());
 
     let mut nested = String::from("type G0<T> = T;\n");
     for i in 1..=128 {

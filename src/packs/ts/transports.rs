@@ -141,6 +141,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
     let mut results = Vec::new();
     let mut paths = FieldPaths::default();
     while let Some(step) = pending.pop() {
+        ctx.resolution.record_work(1);
         let (e, fields) = match step {
             Step::Visit(e, path) => (resolve(ctx, e), path),
             Step::Leave(span) => {
@@ -179,6 +180,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             && let Some((parent, wanted)) = fields.map(|id| paths.entries[id])
         {
             for p in &o.properties {
+                ctx.resolution.record_work(1);
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => {
                         pending.push(Step::Visit(&s.argument, fields));

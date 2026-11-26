@@ -29,6 +29,6 @@ toml = "1"
 serde_json = "1"
 oxc = { version = "0.158.0", default-features = false, features = ["regular_expression", "semantic"] }
 
-# The tests bound resolution time; unoptimized code runs close to those bounds on hosted runners.
+# The large resolution fixtures run as part of every check.
 [profile.test]
 opt-level = 1

@@ -26,6 +26,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut reported = HashSet::new();
     let mut queried = HashSet::new();
     for (id, node) in nodes.iter_enumerated() {
+        ctx.resolution.record_work(1);
         let kind = node.kind();
         // Parents come before children, so one lookup marks a path under a `typeof` query.
         if type_path(&kind)
@@ -100,6 +101,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 }
                 _ => continue,
             };
+            ctx.resolution.record_work(name.len());
             (contains_shape(name), node.span())
         };
         if has_shape && reported.insert(span) {

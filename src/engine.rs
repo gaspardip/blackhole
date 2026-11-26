@@ -230,6 +230,7 @@ fn source_type(path: &str) -> Option<SourceType> {
 }
 
 type Hit<'a> = (usize, &'a Rule, Option<String>);
+type MeasuredHits<'a> = (Vec<Hit<'a>>, u64);
 
 fn collect<'r>(
     rules: &'r [Rule],
@@ -256,10 +257,8 @@ fn collect<'r>(
             }
             Run::TsConservative(check) => {
                 if let Some(ts) = ts.as_deref_mut() {
-                    let resolution = std::mem::replace(
-                        &mut ts.resolution,
-                        crate::packs::ts::values::Resolution::conservative(),
-                    );
+                    let conservative = ts.resolution.conservative();
+                    let resolution = std::mem::replace(&mut ts.resolution, conservative);
                     check(ts, &mut findings);
                     ts.resolution = resolution;
                 }
@@ -280,7 +279,7 @@ fn parsed_hits<'r>(
     path: &str,
     text: &str,
     kind: SourceType,
-) -> Result<Vec<Hit<'r>>, (usize, String)> {
+) -> Result<MeasuredHits<'r>, (usize, String)> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
     std::thread::scope(|scope| {
@@ -289,7 +288,8 @@ fn parsed_hits<'r>(
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
                 let mut ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
+                let hits = collect(rules, path, text, Ok(Some(&mut ts)));
+                Ok((hits, ts.resolution.work.get()))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()
@@ -305,51 +305,72 @@ pub fn run<'a>(
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let (decoded, malformed) = decode(bytes);
-        let nul = decoded.find('\0');
-        let stripped = nul.map(|_| decoded.replace('\0', ""));
-        let text = stripped.as_deref().unwrap_or(&decoded);
-        let mut hits = match (source_type(path), malformed, nul) {
-            (Some(_), Some(at), _) => {
-                let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
-                Err((at - nuls, "Malformed source encoding".to_owned()))
-            }
-            (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
-            (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
-            (None, _, _) => Ok(collect(rules, path, text, Ok(None))),
-        }
-        .unwrap_or_else(|error| collect(rules, path, text, Err(&error)));
-        // A parse failure at the first NUL precedes matches at the same stripped offset.
-        hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
-        let mut chars = decoded.chars().peekable();
-        let (mut matched, mut line, mut col) = (0, 1, 1);
-        for (offset, rule, note) in hits {
-            let at_nul =
-                malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
-            while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
-                let ch = chars.next().expect("finding offset exceeds decoded text");
-                if ch != '\0' {
-                    matched += ch.len_utf8();
-                }
-                if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
-                    line += 1;
-                    col = 1;
-                } else {
-                    col += 1;
-                }
-            }
-            result.push(Finding {
-                rule: rule.id,
-                gate: rule.gate,
-                path: path.to_owned(),
-                line,
-                col,
-                note,
-            });
-        }
+        run_file(rules, path, bytes, &mut result);
     }
-    result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
+    sort_findings(&mut result);
     result
+}
+
+/// Runs the selected rules on one file and returns findings and counted work.
+#[doc(hidden)]
+#[must_use]
+pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
+    let mut findings = Vec::new();
+    let work = run_file(rules, path, bytes, &mut findings);
+    sort_findings(&mut findings);
+    (findings, work)
+}
+
+fn sort_findings(findings: &mut [Finding]) {
+    findings
+        .sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
+}
+
+fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
+    let (decoded, malformed) = decode(bytes);
+    let nul = decoded.find('\0');
+    let stripped = nul.map(|_| decoded.replace('\0', ""));
+    let text = stripped.as_deref().unwrap_or(&decoded);
+    let (mut hits, work) = match (source_type(path), malformed, nul) {
+        (Some(_), Some(at), _) => {
+            let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
+            Err((at - nuls, "Malformed source encoding".to_owned()))
+        }
+        (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
+        (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
+        (None, _, _) => Ok((collect(rules, path, text, Ok(None)), 0)),
+    }
+    .unwrap_or_else(|error| (collect(rules, path, text, Err(&error)), 0));
+    // A parse failure at the first NUL precedes matches at the same stripped offset.
+    hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
+    let mut chars = decoded.chars().peekable();
+    let (mut matched, mut line, mut col) = (0, 1, 1);
+    for (offset, rule, note) in hits {
+        let at_nul =
+            malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
+        while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
+            let ch = chars.next().expect("finding offset exceeds decoded text");
+            if ch != '\0' {
+                matched += ch.len_utf8();
+            }
+            if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        result.push(Finding {
+            rule: rule.id,
+            gate: rule.gate,
+            path: path.to_owned(),
+            line,
+            col,
+            note,
+        });
+    }
+    // Input bytes account for the initial decode and parse before the rule walks.
+    work.saturating_add(bytes.len() as u64)
 }
 
 #[cfg(test)]

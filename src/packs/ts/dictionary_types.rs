@@ -14,7 +14,11 @@ use oxc::{
         symbol::{SymbolFlags, SymbolId},
     },
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Class {
@@ -229,8 +233,27 @@ enum Children {
     One(Goal),
     Many(Vec<Goal>),
 }
-struct Budget(Option<usize>);
+struct Budget {
+    remaining: Option<usize>,
+    work: Option<Rc<Cell<u64>>>,
+}
 impl Budget {
+    fn new(steps: usize) -> Self {
+        Self {
+            remaining: Some(steps),
+            work: None,
+        }
+    }
+
+    fn for_file<'a>(budget: &'a mut Option<Self>, ctx: &TsCtx<'_>) -> &'a mut Self {
+        let budget =
+            budget.get_or_insert_with(|| Self::new(ctx.semantic.nodes().len().saturating_mul(128)));
+        budget
+            .work
+            .get_or_insert_with(|| Rc::clone(&ctx.resolution.work));
+        budget
+    }
+
     fn unparen<'a>(&mut self, mut ty: &'a TSType<'a>) -> Option<&'a TSType<'a>> {
         while let TSType::TSParenthesizedType(p) = ty {
             if !self.take(1) {
@@ -241,8 +264,11 @@ impl Budget {
         Some(ty)
     }
     fn take(&mut self, steps: usize) -> bool {
-        self.0 = self.0.and_then(|left| left.checked_sub(steps));
-        self.0.is_some()
+        if let Some(work) = &self.work {
+            work.set(work.get().saturating_add(steps as u64));
+        }
+        self.remaining = self.remaining.and_then(|left| left.checked_sub(steps));
+        self.remaining.is_some()
     }
 }
 
@@ -327,9 +353,7 @@ impl Solver {
 
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
         // shortcut: 128 steps per syntax node and a minimum of 128 per candidate; revisit if ordinary inputs exhaust both.
-        let budget = self
-            .budget
-            .get_or_insert_with(|| Budget(Some(ctx.semantic.nodes().len().saturating_mul(128))));
+        let budget = Budget::for_file(&mut self.budget, ctx);
         evaluate(&mut self.memo, goal, budget, |g, b| {
             self.envs.plan(ctx, g, b)
         })
@@ -348,14 +372,17 @@ fn plan_root(
     budget: &mut Budget,
     plan: impl FnOnce(&mut Budget) -> Plan,
 ) -> Option<Plan> {
-    let available = budget.0.unwrap_or(0);
-    let mut planning = Budget(Some(available));
+    let available = budget.remaining.unwrap_or(0);
+    let mut planning = Budget {
+        remaining: Some(available),
+        work: budget.work.clone(),
+    };
     let root = plan(&mut planning);
-    let Some(remaining) = planning.0 else {
-        budget.0 = None;
+    let Some(remaining) = planning.remaining else {
+        budget.remaining = None;
         return None;
     };
-    budget.0 = budget.0.map(|_| remaining);
+    budget.remaining = budget.remaining.map(|_| remaining);
     let children = root.children();
     if children.is_empty() {
         let value = match root {
@@ -421,7 +448,7 @@ fn evaluate(
             continue;
         }
         let p = first.take().unwrap_or_else(|| plan(g, budget));
-        budget.0?;
+        budget.remaining?;
         if !budget.take(p.children().len()) {
             return None;
         }
@@ -840,7 +867,7 @@ impl Environments {
                 return None;
             }
             let Some(next) = self.forwarding_target(ctx, id, budget) else {
-                budget.0?;
+                budget.remaining?;
                 break Some(id);
             };
             // A single hop into a cached tail needs no cycle set.
@@ -1080,7 +1107,7 @@ impl Environments {
             return cached.clone();
         }
         let resolved = self.local_name(ctx, name, budget);
-        budget.0?;
+        budget.remaining?;
         self.resolved_names.insert(name.node_id(), resolved.clone());
         resolved
     }
@@ -1342,7 +1369,7 @@ impl Environments {
             } else {
                 self.argument(ctx, arg, base, budget)
             };
-            budget.0?;
+            budget.remaining?;
             parameter_values.insert(p.name.symbol_id.get().unwrap(), value);
             body.env = self.bind(Binding {
                 outer: body.env,
@@ -1350,7 +1377,7 @@ impl Environments {
                 value,
             });
         }
-        budget.0?;
+        budget.remaining?;
         self.applications.insert(key, body);
         Some(body)
     }
@@ -1745,14 +1772,14 @@ impl Resolution {
         #[cfg(test)]
         let allowance = solver.test_allowance.unwrap_or(allowance);
         if let Some(budget) = &mut solver.budget {
-            budget.0 = Some(budget.0.unwrap_or(0).max(allowance));
+            budget.remaining = Some(budget.remaining.unwrap_or(0).max(allowance));
         }
     }
 
     #[cfg(test)]
     fn with_budget(steps: usize, allowance: usize) -> Self {
         Self(RefCell::new(Solver {
-            budget: Some(Budget(Some(steps))),
+            budget: Some(Budget::new(steps)),
             test_allowance: Some(allowance),
             ..Solver::default()
         }))
@@ -1772,11 +1799,9 @@ impl Resolution {
             && ctx.semantic.scoping().symbol_flags(sym).is_type_alias()
             && let Some(decl) = {
                 let mut solver = self.0.borrow_mut();
-                let budget = solver.budget.get_or_insert_with(|| {
-                    Budget(Some(ctx.semantic.nodes().len().saturating_mul(128)))
-                });
+                let budget = Budget::for_file(&mut solver.budget, ctx);
                 let result = alias_declaration(ctx, sym, budget);
-                budget.0.ok_or(Unjudged)?;
+                budget.remaining.ok_or(Unjudged)?;
                 result
             }
             && let Class::AliasBody(id) = self.query(ctx, decl, Query::PlainAlias)?
@@ -2069,13 +2094,13 @@ mod tests {
                 ) {
                     continue;
                 }
-                let mut budget = Budget(Some(1));
+                let mut budget = Budget::new(1);
                 let plan = super::Environments::default().plan(
                     ctx,
                     Goal::root(id, Query::ContainedDictionary),
                     &mut budget,
                 );
-                if budget.0.is_none() && plan.children().is_empty() {
+                if budget.remaining.is_none() && plan.children().is_empty() {
                     findings.report(0, None);
                 }
             }
@@ -2109,10 +2134,10 @@ mod tests {
                 })
                 .collect();
             let mut env = super::Environments::default();
-            assert_eq!(env.forwarded(ctx, ids[0], &mut Budget(Some(1))), None);
+            assert_eq!(env.forwarded(ctx, ids[0], &mut Budget::new(1)), None);
             for start in [ids[1], ids[0]] {
                 assert_eq!(
-                    env.forwarded(ctx, start, &mut Budget(Some(10))),
+                    env.forwarded(ctx, start, &mut Budget::new(10)),
                     Some(ids[2])
                 );
             }
@@ -2191,7 +2216,7 @@ mod tests {
                     };
                     let mut shared = Solver::default();
                     let places = &mut shared.envs;
-                    let mut budget = Budget(Some(100));
+                    let mut budget = Budget::new(100);
                     let active = places.enter(0, alias_id, first, &mut budget).unwrap();
                     assert!(places.enter(active, alias_id, first, &mut budget).is_none());
                     assert!(
@@ -2241,7 +2266,7 @@ mod tests {
         };
         let run = |limit| {
             let mut memo = HashMap::new();
-            let mut budget = Budget(Some(limit));
+            let mut budget = Budget::new(limit);
             evaluate(&mut memo, goal(0), &mut budget, |g, _| {
                 let i = g.term.node.index();
                 let links = [[1, 4], [0, 2], [0, 3], [3, 3], [5, 3]];
@@ -2340,11 +2365,8 @@ mod tests {
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
-        use crate::engine::run;
-        use std::{
-            fmt::Write as _,
-            time::{Duration, Instant},
-        };
+        use crate::engine::{run, run_with_work};
+        use std::fmt::Write as _;
 
         for (origin, note) in [
             (
@@ -2360,9 +2382,9 @@ mod tests {
                 writeln!(source, "const v{i} = v{};", i - 1).unwrap();
             }
             source.push_str(&"guard(v4000);\n".repeat(4000));
-            let start = Instant::now();
-            let hits = run(&[guard::<0, 0>()], [("guard.ts", source.as_bytes())]);
-            assert!(start.elapsed() < Duration::from_secs(3));
+            let (hits, work) = run_with_work(&[guard::<0, 0>()], "guard.ts", source.as_bytes());
+            let cap = source.len() as u64 * 32;
+            assert!(work <= cap, "{work} work exceeds {cap}");
             assert_eq!(hits.len(), 4000);
             for (i, hit) in hits.iter().enumerate() {
                 assert_eq!(
@@ -2502,7 +2524,7 @@ mod tests {
             query: Query::UnknownAlias,
         };
         let mut calls = 0;
-        let mut budget = Budget(Some(usize::MAX));
+        let mut budget = Budget::new(usize::MAX);
         let mut memo = HashMap::new();
         let mut plan = |g: Goal, _: &mut Budget| {
             calls += 1;
@@ -2526,4 +2548,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "../../../tests/resolution_time/allowance.rs"]
-mod allowance_time;
+mod allowance;
