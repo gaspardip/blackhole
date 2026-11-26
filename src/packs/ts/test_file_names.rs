@@ -52,7 +52,6 @@ fn check(ctx: &StructureCtx<'_>, notes: &mut Vec<String>) {
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.rsplit_once('.'))
-        .filter(|(_, ext)| super::script_extension(ext))
         .and_then(|(stem, _)| name_problem(stem));
     notes.extend(misnamed.map(str::to_owned));
     if misplaced_test_dir(ctx, path) {
