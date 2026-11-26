@@ -100,6 +100,8 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
 2. Before pushing a release tag, create the GitHub `release` environment with
    a required reviewer. The artifact scan reads the same `BANNED_NAMES`
    repository secret as the `name-guard` workflow.
+   Use a `v*` tag ruleset to restrict creation to the maintainer and a separate ruleset to block updates and deletions for everyone.
+   Set the `release` environment deployment policy to allow only `v*` tags.
 3. For a release candidate, set the package version in `Cargo.toml` and the
    matching package entry in `Cargo.lock` to `X.Y.Z-rc.N`. After that commit
    lands on `main`, tag it `vX.Y.Z-rc.N` and push the tag. The workflow
