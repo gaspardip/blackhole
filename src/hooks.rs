@@ -104,23 +104,21 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         return crate::check_paths(&root, crate::Targets::Edits(listed), out);
     }
     let ledger = root.join(crate::files::LEDGER_PATH);
-    let metadata = match fs::metadata(&ledger) {
-        Ok(meta) => Some(meta),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
+    let identity = if ledger.try_exists()? {
+        crate::files::identity(&ledger)
+    } else {
+        None
     };
+    let matches_ledger =
+        |path: &Path| identity.is_some_and(|id| crate::files::identity(path) == Some(id));
     let mut seen = None;
     for name in &names {
         let path = cwd.join(name);
         let physical = resolve(&path, &mut seen)?;
         if physical
             .as_ref()
-            .is_some_and(|p| same_file(p, &ledger, metadata.as_ref()))
-            || (metadata.is_some()
-                && edits.normalized(name).any(|normalized| {
-                    physical.as_ref() != Some(&normalized)
-                        && same_file(&normalized, &ledger, metadata.as_ref())
-                }))
+            .is_some_and(|p| p == &ledger || matches_ledger(p))
+            || edits.normalized(name).any(|p| matches_ledger(&p))
         {
             return Err(io::Error::other(
                 "The ledger only changes through blackhole ledger. Fix code to shrink it, or file an exception with blackhole object.",
@@ -317,17 +315,6 @@ fn resolve(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<Path
     }
 }
 
-fn same_file(path: &Path, ledger: &Path, metadata: Option<&fs::Metadata>) -> bool {
-    #[cfg(unix)]
-    if let (Ok(a), Some(b)) = (fs::metadata(path), metadata) {
-        return crate::files::same(&a, b);
-    }
-    #[cfg(not(unix))]
-    if let (Ok(target), Ok(existing)) = (fs::canonicalize(path), fs::canonicalize(ledger)) {
-        return target == existing;
-    }
-    path == ledger
-}
 fn checkout_names<'a>(root: &'a Path, path: &'a Path) -> impl Iterator<Item = PathBuf> + 'a {
     let direct = path.strip_prefix(root).ok().map(Path::to_owned);
     // Preserve the suffix at each directory alias: the ledger can still name a departed file through it.

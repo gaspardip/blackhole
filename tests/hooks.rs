@@ -110,6 +110,15 @@ fn absolute_ledger() {
 }
 
 #[test]
+fn a_direct_write_cannot_create_the_ledger() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    refuses(root, Path::new(".blackhole/ledger"));
+    assert!(!root.join(".blackhole/ledger").exists());
+}
+
+#[test]
 fn current_directory_ledger() {
     let dir = ledger_repo();
     refuses(dir.path(), Path::new("./.blackhole/ledger"));
