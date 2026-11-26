@@ -98,7 +98,8 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
    [crates.io setup](https://crates.io/docs/trusted-publishing) ·
    [npm setup](https://docs.npmjs.com/trusted-publishers/)
 2. Before pushing a release tag, create the GitHub `release` environment with
-   a required reviewer. Add `BLACKHOLE_BANNED` as an environment secret.
+   a required reviewer. The artifact scan reads the same `BANNED_NAMES`
+   repository secret as the `name-guard` workflow.
 3. For a release candidate, set the package version in `Cargo.toml` and the
    matching package entry in `Cargo.lock` to `X.Y.Z-rc.N`. After that commit
    lands on `main`, tag it `vX.Y.Z-rc.N` and push the tag. The workflow

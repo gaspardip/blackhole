@@ -79,7 +79,6 @@ jobs:
     needs: [validate, packaging]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: release
     steps:
       - *fetch
       - *download
@@ -91,7 +90,7 @@ jobs:
           tar -xzf dist/*.tgz -C extracted/npm
       - name: Scan archives, checksums and release notes
         env:
-          BLACKHOLE_BANNED: ${{ secrets.BLACKHOLE_BANNED }}
+          BLACKHOLE_BANNED: ${{ secrets.BANNED_NAMES }}
           RELEASE_NOTES: ${{ needs.validate.outputs.notes }}
         run: |
           printf '%s\n' "$RELEASE_NOTES" > release-notes.md
