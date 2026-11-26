@@ -118,6 +118,15 @@ Advisory until the resolution cases under Does not catch are addressed. Findings
   also select legacy folder keys that Node skips.
 - In an alias target array, an entry Node rejects as invalid (such as a
   `node:` URL target) is taken instead of falling through to the next entry.
+- A `package.json` imports alias to a package subpath whose first
+  segment is a Node built-in name, such as `path/custom`. The alias is
+  taken as the built-in and skipped, while the same specifier imported
+  directly is checked (review probe, follow-up).
+- A `package.json` imports alias to an exported subpath of the current
+  package's own name. The rule looks the name up only in `node_modules`,
+  while Node reads the package's own `exports` (review probe, follow-up).
+- A CommonJS `require` that only reaches a compiled `.node` addon
+  through extension or index lookup (review probe, follow-up).
 - The rule gives `package.json` imports precedence over a TypeScript
   `paths` entry for a full alias with a `?` suffix.
 - When several `extends` entries disagree on `verbatimModuleSyntax`,
