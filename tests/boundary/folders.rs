@@ -884,6 +884,46 @@ fn type_import_follows_declaration_reexports(extension: &str, declaration: &str)
 }
 
 #[test]
+fn type_import_follows_plain_barrel_reexports_as_types() {
+    let notes = [
+        ("node_modules/sample/model.d.mts", "ui/app.mts:1:26"),
+        ("node_modules/sample/model.mjs", "ui/app.mts:2:37"),
+    ]
+    .map(|(denied, position)| {
+        let out = judge(
+            &[
+                (
+                    "blackhole.toml",
+                    &format!("[[boundaries.folders]]\nfrom='ui/**'\ndeny=['{denied}']"),
+                ),
+                (
+                    "ui/app.mts",
+                    "import type {Model} from '../barrel.mjs';\nimport {Model as RuntimeModel} from '../barrel.mjs';",
+                ),
+                ("barrel.mts", "export {Model} from 'sample';"),
+                (
+                    "node_modules/sample/package.json",
+                    r#"{"exports":{"types":"./model.d.mts","default":"./model.mjs"}}"#,
+                ),
+                ("node_modules/sample/model.d.mts", "export interface Model {}"),
+                ("node_modules/sample/model.mjs", "export const Model = {};"),
+            ],
+            &[],
+            0,
+        );
+        (
+            lines_for(&out, "ui/app.mts:")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            vec![format!("{position} boundary/folder-imports [advisory] {denied}")],
+        )
+    });
+    let [(types, expected_types), (runtime, expected_runtime)] = notes;
+    assert_eq!([types, runtime], [expected_types, expected_runtime]);
+}
+
+#[test]
 fn mjs_type_import_prefers_the_d_mts_file() {
     type_import_follows_declaration_reexports("mjs", "d.mts");
 }

@@ -9,7 +9,7 @@ use std::{borrow::Cow, cell::OnceCell, path::Path};
 #[derive(Clone, Copy)]
 pub(super) enum ReadingMode {
     Banned,
-    Folder,
+    Folder { type_only: bool },
 }
 
 #[derive(Clone)]
@@ -109,8 +109,12 @@ impl<'a, 'tree, 'source> Importer<'a, 'tree, 'source> {
         let ts_extension = self.ts_extension();
         let module = self.module(|| true);
         let needs_format = import.needs_format(ts_extension);
-        if matches!(rule, ReadingMode::Folder)
-            && (needs_format || import.kind.implicit_mode() && specifier::bare(name))
+        let kind = match rule {
+            ReadingMode::Banned => import.kind,
+            ReadingMode::Folder { type_only } => import.kind.in_type_context(type_only),
+        };
+        if matches!(rule, ReadingMode::Folder { .. })
+            && (needs_format || kind.implicit_mode() && specifier::bare(name))
         {
             module.map_err(Clone::clone)?;
         }
@@ -120,15 +124,13 @@ impl<'a, 'tree, 'source> Importer<'a, 'tree, 'source> {
             return Err(NON_LITERAL.into());
         }
         Ok(
-            loader_readings(import.kind, ts_extension, module.ok(), name).map(
-                move |(name, mode)| {
-                    let name = name?;
-                    if needs_format {
-                        module.map_err(Clone::clone)?;
-                    }
-                    Ok((name, mode))
-                },
-            ),
+            loader_readings(kind, ts_extension, module.ok(), name).map(move |(name, mode)| {
+                let name = name?;
+                if needs_format {
+                    module.map_err(Clone::clone)?;
+                }
+                Ok((name, mode))
+            }),
         )
     }
 

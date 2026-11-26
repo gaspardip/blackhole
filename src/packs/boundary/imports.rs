@@ -44,8 +44,8 @@ impl Kind {
             .and_then(|a| a.value.value.as_str());
         Self::type_mode(mode)
     }
-    fn for_importer(self, in_declaration: bool) -> Self {
-        match (in_declaration, self) {
+    pub(super) fn in_type_context(self, type_only: bool) -> Self {
+        match (type_only, self) {
             (true, Self::Static) => Self::TypeDeclaration,
             (true, Self::StaticRequire) => Self::TypeRequire,
             (_, kind) => kind,
@@ -417,7 +417,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>) -> Vec<Import> {
         imports.push(import);
     }
     for import in &mut imports {
-        import.kind = import.kind.for_importer(in_declaration);
+        import.kind = import.kind.in_type_context(in_declaration);
     }
     imports.sort_by_key(|i| i.offset);
     imports

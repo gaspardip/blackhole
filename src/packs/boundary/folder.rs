@@ -80,7 +80,8 @@ impl Importer<'_, '_, '_> {
         &self,
         import: &Import,
         matches: &impl Fn(&str) -> bool,
-        pending: &mut Vec<String>,
+        pending: &mut Vec<(String, bool)>,
+        type_only: bool,
         charge: &Charge<'_>,
         targets: Option<&Targets>,
     ) -> Result<Option<String>, String> {
@@ -89,7 +90,7 @@ impl Importer<'_, '_, '_> {
         if import.verbatim_only && !self.verbatim()? {
             return Ok(None);
         }
-        for reading in self.readings(import, ReadingMode::Folder)? {
+        for reading in self.readings(import, ReadingMode::Folder { type_only })? {
             charge()?;
             let (name, mode) = reading?;
             let resolve = || {
@@ -114,7 +115,7 @@ impl Importer<'_, '_, '_> {
             {
                 return Ok(Some(target.to_owned()));
             }
-            pending.extend(file);
+            pending.extend(file.map(|path| (path, mode.is_type())));
         }
         Ok(None)
     }
@@ -155,14 +156,14 @@ fn crossing(
     charge: &Charge<'_>,
 ) -> Result<Option<String>, String> {
     let mut pending = Vec::new();
-    if let Some(note) = importer.read_folder(import, matches, &mut pending, charge, None)? {
+    if let Some(note) = importer.read_folder(import, matches, &mut pending, false, charge, None)? {
         return Ok(Some(note));
     }
     let mut seen = BTreeSet::new();
     pending.reverse();
-    while let Some(path) = pending.pop() {
+    while let Some((path, type_only)) = pending.pop() {
         charge()?;
-        if !seen.insert(path.clone()) {
+        if !seen.insert((path.clone(), type_only)) {
             continue;
         }
         let Some(source) = repo.exported_imports(ts, &path)? else {
@@ -186,6 +187,7 @@ fn crossing(
                 dependency,
                 matches,
                 &mut pending,
+                type_only,
                 charge,
                 Some(&source.targets),
             )? {
