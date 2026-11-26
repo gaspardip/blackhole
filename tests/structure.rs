@@ -37,6 +37,34 @@ fn naming_uses_the_whole_tree_and_reports_selected_paths() -> common::Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn checking_a_file_does_not_read_an_unrelated_manifest() -> common::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    fs::create_dir(root.join("other"))?;
+    let manifest = root.join("other/package.json");
+    fs::write(&manifest, "{}")?;
+    fs::write(root.join("normal.ts"), "")?;
+    common::git(root, &["init", "-q"])?;
+    common::git(root, &["add", "."])?;
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000))?;
+
+    let output = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .args(["check", "normal.ts"])
+        .current_dir(root)
+        .output()?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 #[test]
 fn naming_survives_parse_failure() {
     use blackhole_check::engine::{registry, run};
