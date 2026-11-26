@@ -9,6 +9,9 @@
   queries, `typeof import()` and type specifiers in mixed imports
   and re-exports (`forms`, `import-types`,
   `mixed_reexports_follow_the_exported_type_and_value_readings`).
+  With `verbatimModuleSyntax` enabled, imports and re-exports containing
+  only inline type specifiers also check the runtime target
+  (`inline_type_specifiers_load_under_verbatim_module_syntax`).
 - A banned package name or subpath behind a `package.json` imports
   alias. Exact and wildcard aliases match the full specifier, including
   any query or fragment. The applicable `import`, `require`,
@@ -58,7 +61,15 @@
   (`unconfigured`).
 - A banned target in a condition the import does not select
   (`package-aliases`, the clean `#unused` import). A selected `null` stops
-  conditional lookup (`package_import_conditions_stop_at_null`).
+  runtime conditional lookup. TypeScript type lookups continue to later
+  conditions (`package_import_conditions_stop_at_null`).
+- Wildcard `imports` keys whose prefix and suffix overlap the specifier
+  (such as `#x*end` against `#xend`) and legacy folder keys can select a
+  different key than Node's precedence rules.
+- In an alias target array, an entry Node rejects as invalid (such as a
+  `node:` URL target) is taken instead of falling through to the next entry.
+- A TypeScript `paths` entry for a full alias with a `?` or `#` suffix does
+  not take precedence over `package.json` imports.
 - A standalone `require.resolve(name)` or
   `createRequire(base).resolve(name)`, even with an unknown base or
   dynamic name. A lookup loads nothing (`resolve-only`,
