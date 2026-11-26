@@ -70,8 +70,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MISPLACED: &str = ".blackhole must be a directory";
-
 /// Checks the selected files and returns whether any rule was violated.
 ///
 /// Leaves the process inside the repository's `.blackhole` directory when there is one.
@@ -417,11 +415,7 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         contents.push_str(&filed.line(&key));
     }
     if !entered {
-        // Creating the directory never follows a link at its path, and entering it checks where the process landed.
-        fs::create_dir(root.join(".blackhole"))?;
-        if !enter(&root, ".blackhole", false)? {
-            return Err(io::Error::other(MISPLACED));
-        }
+        enter(&root, ".blackhole", true)?;
     }
     replace("objections", &contents)
 }
