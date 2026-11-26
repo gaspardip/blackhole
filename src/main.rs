@@ -76,11 +76,7 @@ fn main() -> ExitCode {
     match result {
         Ok(found) => ExitCode::from(u8::from(found)),
         Err(e) => {
-            let _ = writeln!(
-                io::stderr().lock(),
-                "blackhole: {}",
-                blackhole_check::diagnostic_text(&e.to_string())
-            );
+            let _ = writeln!(io::stderr().lock(), "blackhole: {e}");
             ExitCode::from(2)
         }
     }

@@ -278,8 +278,8 @@ fn absent_baseline() {
     assert_eq!(found, check(root, &[], 1).stdout);
     let found = String::from_utf8(found).unwrap();
     for line in [
-        format!("a\tb.py:1:1 {RULE}\n"),
-        format!("a\nb.py:1:1 {RULE}\n"),
+        format!("a\\tb.py:1:1 {RULE}\n"),
+        format!("a\\nb.py:1:1 {RULE}\n"),
     ] {
         assert!(found.contains(&line), "{found:?}");
     }

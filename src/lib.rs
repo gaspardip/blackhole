@@ -286,7 +286,8 @@ fn scan_files<'a>(
     mut read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Vec<engine::Finding>> {
     for name in names.filter(|name| !config.exclude.is_match(name)) {
-        let bytes = read(name).map_err(|e| io::Error::new(e.kind(), format!("{name}: {e}")))?;
+        let bytes = read(name)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", diagnostic_text(name))))?;
         if let Some(bytes) = bytes {
             findings.extend(engine::run_configured(
                 engine::registry(),
@@ -426,14 +427,20 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
 }
 
 /// Escapes characters that could disrupt a line of CLI output.
-pub fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
-    let needs_escape = |c: char| c.is_control() || matches!(c, '\\' | '\u{2028}' | '\u{2029}');
-    if !text.chars().any(needs_escape) {
+fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+    // A literal escape must remain distinguishable from the control character it spells.
+    if !text.chars().any(control)
+        && !text.match_indices('\\').any(|(index, _)| {
+            let rest = &text[index + 1..];
+            rest.starts_with(['0', 'n', 'r', 't']) || rest.starts_with("u{")
+        })
+    {
         return text.into();
     }
     let mut result = String::new();
     for c in text.chars() {
-        if needs_escape(c) {
+        if control(c) || c == '\\' {
             result.extend(c.escape_debug());
         } else {
             result.push(c);
