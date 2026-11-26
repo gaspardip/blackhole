@@ -1,6 +1,7 @@
 use crate::{
     config,
     engine::{self, DiffCtx, DiffFindings, Run},
+    files::{LEDGER_PATH, OBJECTIONS_PATH},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
@@ -13,7 +14,7 @@ use std::{
 };
 
 fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
-    ledger::load(tree.judge_file(".blackhole/ledger", batch)?.as_deref())
+    ledger::load(tree.judge_file(LEDGER_PATH, batch)?.as_deref())
 }
 fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
     config::parse(
@@ -24,9 +25,7 @@ fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
 }
 fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
     objections::parse(
-        &tree
-            .judge_file(".blackhole/objections", batch)?
-            .unwrap_or_default(),
+        &tree.judge_file(OBJECTIONS_PATH, batch)?.unwrap_or_default(),
         day,
     )
 }
@@ -57,12 +56,13 @@ fn evaluate(
     let mut batch = Batch::start()?;
     let base_config = configuration(&base_tree, &mut batch)?;
     let head_config;
-    let excludes = if approved {
+    let scan_config = if approved {
         head_config = configuration(&head_tree, &mut batch)?;
-        &head_config.exclude
+        &head_config
     } else {
-        &base_config.exclude
+        &base_config
     };
+    let excludes = &scan_config.exclude;
     let base_ledger = ledger(&base_tree, &mut batch)?;
     let base_rows = rows(&base_tree, &mut batch, today)?;
     let head_ledger = ledger(&head_tree, &mut batch);
@@ -79,11 +79,9 @@ fn evaluate(
         batch: &mut batch,
     };
     let diff = diff_rules(&mut ctx)?;
-    let findings = crate::scan_files(
-        diff.diagnostics,
-        head_tree.paths().filter(|p| !excludes.is_match(p)),
-        |path| head_tree.read(path, ctx.batch),
-    )?;
+    let findings = crate::scan_files(scan_config, diff.diagnostics, head_tree.paths(), |path| {
+        head_tree.read(path, ctx.batch)
+    })?;
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,

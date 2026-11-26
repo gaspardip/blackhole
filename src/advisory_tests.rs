@@ -1,5 +1,6 @@
 use super::*;
 use crate::engine::{Family, Gate, Rule, Run};
+use crate::files::{LEDGER_PATH, OBJECTIONS_PATH};
 use std::{process::Command, str::from_utf8};
 
 pub(super) const RULE: Rule = Rule {
@@ -62,7 +63,7 @@ fn in_repo(test: impl FnOnce()) {
 fn legacy_ledger() {
     fs::create_dir(".blackhole").unwrap();
     fs::write(
-        ".blackhole/ledger",
+        LEDGER_PATH,
         format!("{HEADER}test/advisory\t2\tadvice.txt\ntest/advisory\t1\tgone.txt\n"),
     )
     .unwrap();
@@ -107,7 +108,7 @@ fn ledger_leaves_new_advice_unrecorded_and_drops_old_allowances() {
     in_repo(|| {
         let root = env::current_dir().unwrap();
         let red = regenerate(&mut io::sink()).unwrap();
-        let ledger = root.join(".blackhole/ledger");
+        let ledger = root.join(LEDGER_PATH);
         assert!(!ledger.exists());
         legacy_ledger();
         let legacy_red = regenerate(&mut io::sink()).unwrap();
@@ -131,7 +132,7 @@ fn advisory_rules_take_no_new_objections_and_ignore_old_ones() {
         // A row left from when the rule was blocking must not break any command.
         fs::create_dir(".blackhole").unwrap();
         fs::write(
-            ".blackhole/objections",
+            OBJECTIONS_PATH,
             "test/advisory\tadvice.txt\t1\t2026-11-18\t-\treason\n",
         )
         .unwrap();

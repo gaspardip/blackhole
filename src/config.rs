@@ -1,13 +1,21 @@
+use crate::engine;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
-use std::io;
+use std::{io, num::NonZeroUsize};
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     exclude: Vec<String>,
+    boundaries: Boundaries,
     guard: Guard,
     coverage: Option<Coverage>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+struct Boundaries {
+    max_lines: Option<NonZeroUsize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -22,10 +30,18 @@ struct Coverage {
     lcov: String,
 }
 
-pub(crate) struct Config {
+pub struct Config {
     pub(crate) lcov: Option<String>,
     pub(crate) exclude: GlobSet,
     pub(crate) guard: GlobSet,
+    engine_settings: engine::Settings,
+}
+
+impl Config {
+    #[must_use]
+    pub fn engine_settings(&self) -> engine::Settings {
+        self.engine_settings
+    }
 }
 
 fn globs(patterns: Vec<String>) -> io::Result<GlobSet> {
@@ -36,7 +52,9 @@ fn globs(patterns: Vec<String>) -> io::Result<GlobSet> {
     set.build().map_err(io::Error::other)
 }
 
-pub(crate) fn parse(bytes: &[u8]) -> io::Result<Config> {
+/// # Errors
+/// Returns an error if the repository configuration is invalid.
+pub fn parse(bytes: &[u8]) -> io::Result<Config> {
     let settings: Settings = toml::from_slice(bytes)
         .map_err(|e| io::Error::other(format!("blackhole.toml: {}", e.message().escape_debug())))?;
     let lcov = settings
@@ -55,5 +73,8 @@ pub(crate) fn parse(bytes: &[u8]) -> io::Result<Config> {
         lcov,
         exclude: globs(settings.exclude)?,
         guard: globs(settings.guard.paths)?,
+        engine_settings: engine::Settings {
+            max_lines: settings.boundaries.max_lines,
+        },
     })
 }

@@ -1,17 +1,17 @@
+#[path = "common/cli.rs"]
+mod cli;
+mod common;
+
+use cli::{check, repo, run};
+use common::command;
 use std::{
-    env, fs,
+    fs,
     path::Path,
     process::{Command, Output},
     thread,
     time::Duration,
 };
-use tempfile::{TempDir, tempdir};
-
-fn repo() -> TempDir {
-    let dir = tempdir().unwrap();
-    git(dir.path(), &["init", "-q"]);
-    dir
-}
+use tempfile::tempdir;
 
 fn git(dir: &Path, args: &[&str]) {
     let out = git_output(dir, args);
@@ -19,14 +19,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new("git");
-    // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
-    for (name, _) in env::vars_os() {
-        if name.as_encoded_bytes().starts_with(b"GIT_") {
-            command.env_remove(name);
-        }
-    }
-    command.current_dir(dir).args(args).output().unwrap()
+    command("git").current_dir(dir).args(args).output().unwrap()
 }
 
 fn commit(root: &Path) {
@@ -47,25 +40,6 @@ fn names(dir: &Path) -> Vec<std::ffi::OsString> {
         .collect();
     names.sort();
     names
-}
-
-fn check(dir: &Path, args: &[&str], code: i32) -> Output {
-    run(dir, &[&["check"], args].concat(), code)
-}
-
-fn run(dir: &Path, args: &[&str], code: i32) -> Output {
-    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(code), "{out:?}");
-    if code == 2 {
-        assert_eq!(String::from_utf8_lossy(&out.stderr).lines().count(), 1);
-    } else {
-        assert_eq!(out.stderr, b"");
-    }
-    out
 }
 
 #[test]
@@ -157,6 +131,7 @@ fn an_ignore_rule_hides_an_untracked_file_and_never_a_tracked_one() {
     let dir = repo();
     let root = dir.path();
     fs::write(root.join("a.py"), "#noqa").unwrap();
+    fs::create_dir(root.join(".git/info")).unwrap();
     fs::write(root.join(".git/info/exclude"), "a.py\n").unwrap();
     assert_eq!(check(root, &[], 0).stdout, b"");
     check(root, &["a.py"], 2);

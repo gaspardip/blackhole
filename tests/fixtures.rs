@@ -1,7 +1,10 @@
 mod common;
 mod trees;
 
-use blackhole_check::engine::{Rule, Run, registry, run};
+use blackhole_check::{
+    config,
+    engine::{Rule, Run, registry, run_configured},
+};
 use std::{
     collections::BTreeSet,
     fmt::Write,
@@ -67,8 +70,15 @@ impl Case {
         } else {
             registry()
         };
-        let hits = run(
+        let policy = self
+            .files
+            .iter()
+            .find(|(path, _)| path == "blackhole.toml")
+            .map_or(&[][..], |(_, bytes)| bytes.as_slice());
+        let config = config::parse(policy).unwrap();
+        let hits = run_configured(
             rules,
+            config.engine_settings(),
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
         verify_locations(

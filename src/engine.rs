@@ -12,7 +12,7 @@ use oxc::{
     span::SourceType,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::{cell::Cell, collections::BTreeMap, io};
+use std::{cell::Cell, collections::BTreeMap, io, num::NonZeroUsize};
 
 pub enum Family {
     Judge,
@@ -44,6 +44,7 @@ pub enum Run {
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
+    Lines(fn(&str, &str, usize, &mut Findings)),
     ParseError,
 }
 
@@ -68,6 +69,11 @@ pub struct DiffCtx<'a> {
 pub struct DiffFindings {
     pub(crate) removals: Vec<Finding>,
     pub(crate) diagnostics: Vec<Finding>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Settings {
+    pub(crate) max_lines: Option<NonZeroUsize>,
 }
 
 pub struct FileCtx<'a> {
@@ -168,6 +174,7 @@ const UNPARSEABLE: Rule = Rule {
 #[must_use]
 pub fn registry() -> &'static [Rule] {
     &[
+        crate::packs::boundary::SIZE,
         crate::packs::core::no_suppression::RULE,
         UNPARSEABLE,
         #[cfg(test)]
@@ -318,14 +325,15 @@ type Hit<'a> = (usize, &'a Rule, Option<String>);
 fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
-    text: &str,
+    source: &Source,
+    settings: Settings,
     parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
     let error = parsed.as_ref().err().copied();
     let mut ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
-        text,
+        text: source.text(),
         comments: ts.as_deref().map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
@@ -346,6 +354,11 @@ fn collect<'r>(
                     );
                     check(ts, &mut findings);
                     ts.resolution = resolution;
+                }
+            }
+            Run::Lines(check) => {
+                if let Some(limit) = settings.max_lines {
+                    check(path, &source.decoded, limit.get(), &mut findings);
                 }
             }
             Run::ParseError => {
@@ -399,8 +412,7 @@ impl Source {
 
     fn encoding(&self) -> Result<(), (usize, String)> {
         if let Some(at) = self.malformed {
-            let nuls = self.decoded[..at].bytes().filter(|&b| b == 0).count();
-            return Err((at - nuls, "Malformed source encoding".to_owned()));
+            return Err((at, "Malformed source encoding".to_owned()));
         }
         if let Some(at) = self.nul {
             return Err((at, "NUL in source text".to_owned()));
@@ -409,24 +421,28 @@ impl Source {
     }
 
     fn locate(&self, path: &str, mut hits: Vec<Hit<'_>>, result: &mut Vec<Finding>) {
-        let Self {
-            decoded,
-            malformed,
-            nul,
-            ..
-        } = self;
-        // A parse failure at the first NUL precedes matches at the same stripped offset.
-        hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
-        let mut chars = decoded.chars().peekable();
+        hits.sort_by_key(|(offset, _, _)| *offset);
+        if self.nul.is_some() {
+            // Text rules see stripped offsets. Line rules and encoding errors use decoded offsets.
+            let mut nuls = self.decoded.match_indices('\0').peekable();
+            let mut skipped = 0;
+            for (offset, rule, _) in &mut hits {
+                if !matches!(rule.run, Run::Lines(_) | Run::ParseError) {
+                    while nuls.peek().is_some_and(|(at, _)| *at <= *offset + skipped) {
+                        nuls.next();
+                        skipped += 1;
+                    }
+                    *offset += skipped;
+                }
+            }
+            hits.sort_by_key(|(offset, _, _)| *offset);
+        }
+        let mut chars = self.decoded.chars().peekable();
         let (mut matched, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
-            let at_nul =
-                malformed.is_none() && matches!(rule.run, Run::ParseError) && *nul == Some(offset);
-            while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
+            while matched < offset {
                 let ch = chars.next().expect("finding offset exceeds decoded text");
-                if ch != '\0' {
-                    matched += ch.len_utf8();
-                }
+                matched += ch.len_utf8();
                 if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
                     line += 1;
                     col = 1;
@@ -472,12 +488,13 @@ fn parsed_hits<'r>(
     path: &str,
     source: &Source,
     kind: SourceType,
+    settings: Settings,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     source.encoding()?;
     parser_thread(|| {
         let arena = Allocator::default();
         let mut ts = parse(&arena, path, source.text(), kind)?;
-        let hits = collect(rules, path, source.text(), Ok(Some(&mut ts)));
+        let hits = collect(rules, path, source, settings, Ok(Some(&mut ts)));
         Ok((hits, ts.work.get()))
     })
     .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
@@ -494,9 +511,21 @@ pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
+    run_configured(rules, Settings::default(), files)
+}
+
+/// Applies configured rules to files already selected by the caller.
+///
+/// # Panics
+/// Panics if a rule reports an offset past the end of its input.
+pub fn run_configured<'a>(
+    rules: &[Rule],
+    settings: Settings,
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        run_file(rules, path, bytes, &mut result);
+        run_file(rules, path, bytes, settings, &mut result);
     }
     sort_findings(&mut result);
     result
@@ -507,17 +536,23 @@ pub fn run<'a>(
 #[must_use]
 pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
-    let work = run_file(rules, path, bytes, &mut findings);
+    let work = run_file(rules, path, bytes, Settings::default(), &mut findings);
     sort_findings(&mut findings);
     (findings, work)
 }
 
-fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
+fn run_file(
+    rules: &[Rule],
+    path: &str,
+    bytes: &[u8],
+    settings: Settings,
+    result: &mut Vec<Finding>,
+) -> u64 {
     let source = Source::new(bytes);
     let (hits, work) = match source_type(path) {
-        Some(kind) => parsed_hits(rules, path, &source, kind)
-            .unwrap_or_else(|error| (collect(rules, path, source.text(), Err(&error)), 0)),
-        None => (collect(rules, path, source.text(), Ok(None)), 0),
+        Some(kind) => parsed_hits(rules, path, &source, kind, settings)
+            .unwrap_or_else(|error| (collect(rules, path, &source, settings, Err(&error)), 0)),
+        None => (collect(rules, path, &source, settings, Ok(None)), 0),
     };
     source.locate(path, hits, result);
     work
