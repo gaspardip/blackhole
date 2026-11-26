@@ -1,7 +1,7 @@
 use super::values::symbol;
 use super::{
     double_mutations::writes,
-    values::{MemberKeys, declaration, invoked, path, resolve},
+    values::{MemberKeys, declaration, invoked, path, resolve, same_key},
 };
 use crate::engine::{Findings, TsCtx};
 use oxc::{
@@ -21,9 +21,8 @@ fn same<'a>(
     let (mut left, mut right) = (left, right);
     let mut seen = std::collections::HashSet::new();
     while seen.insert(left.span()) {
-        if MemberKeys(ctx).read(left).is_none()
-            || MemberKeys(ctx).read(left) != MemberKeys(ctx).read(right)
-        {
+        let keys = MemberKeys(ctx).read(left).zip(MemberKeys(ctx).read(right));
+        if !keys.is_some_and(|(left, right)| same_key(ctx, left, right)) {
             return false;
         }
         let (left_object, right_object) =
@@ -34,7 +33,8 @@ fn same<'a>(
         if let (Expression::Identifier(first), Expression::Identifier(second)) =
             (left_object, right_object)
         {
-            return first.name == second.name && symbol(ctx, first) == symbol(ctx, second);
+            return symbol(ctx, first) == symbol(ctx, second)
+                && same_key(ctx, first.name.as_str(), second.name.as_str());
         }
         let (Some(first), Some(second)) = (
             left_object.get_member_expr(),
@@ -102,14 +102,14 @@ fn delegates<'a>(ctx: &TsCtx<'a>, f: &'a Function<'a>, original: SymbolId) -> bo
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut saved = Vec::new();
     let mut assignments = Vec::new();
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         match node.kind() {
             AstKind::VariableDeclarator(v) => {
                 if let Some(m) = v.init.as_ref().and_then(Expression::get_member_expr)
                     && let Some(id) =
                         v.id.get_binding_identifier()
                             .and_then(|b| b.symbol_id.get())
-                    && !ctx.semantic.scoping().symbol_is_mutated(id)
+                    && !super::values::symbol_is_mutated(ctx, id)
                 {
                     saved.push((v.span.start, id, m));
                 }

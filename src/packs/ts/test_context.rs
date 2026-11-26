@@ -14,7 +14,9 @@ use oxc::ast::{
 use oxc::span::GetSpan;
 use oxc::syntax::{node::NodeId, operator::BinaryOperator};
 
-pub(super) fn test_file(path: &str) -> bool {
+pub(super) fn test_file(ctx: &TsCtx<'_>) -> bool {
+    let path = ctx.path;
+    ctx.record_string_work(path.len());
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
     file.split('.').any(|part| {
@@ -111,7 +113,7 @@ pub(crate) struct Runner<'a> {
     pub(super) todo: bool,
 }
 impl<'a> Runner<'a> {
-    pub(super) fn from_path(origin: Origin, parts: &[&'a str]) -> Option<Self> {
+    pub(super) fn from_path(ctx: &TsCtx<'_>, origin: Origin, parts: &[&'a str]) -> Option<Self> {
         let mut result = Self {
             option_syntax: match (origin, parts.first().copied()) {
                 (Origin::Global, _) | (_, Some("vitest")) => OptionSyntax::Flexible,
@@ -146,7 +148,7 @@ impl<'a> Runner<'a> {
             }
             _ => return None,
         };
-        for name in names {
+        for name in ctx.counted(names.iter()) {
             result.push(name);
         }
         Some(result)
@@ -223,7 +225,7 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
             continue;
         }
         if let Some((origin, parts)) = origin_path(ctx, e) {
-            let Some(result) = Runner::from_path(origin, &parts) else {
+            let Some(result) = Runner::from_path(ctx, origin, &parts) else {
                 return Runner::default();
             };
             ctx.resolution.runners.borrow_mut().insert(span, result);
@@ -574,7 +576,7 @@ pub(super) fn returned_values<'a>(
     function: NodeId,
     pending: &mut Vec<&'a Expression<'a>>,
 ) {
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         if let AstKind::ReturnStatement(ret) = node.kind()
             && let Some(arg) = &ret.argument
             && super::values::enclosing_functions(ctx, id)
@@ -588,8 +590,7 @@ pub(super) fn returned_values<'a>(
 
 impl<'a> Invocation<'a> {
     pub(super) fn test_body(&self, ctx: &TsCtx<'a>) -> Option<oxc::span::Span> {
-        self.args
-            .iter()
+        ctx.counted(self.args.iter())
             .flatten()
             .find_map(|arg| callback_kind(ctx, arg).and_then(callback_body))
     }
@@ -624,15 +625,15 @@ pub(super) fn callback_sites<'ctx, 'a>(
     ctx: &'ctx TsCtx<'a>,
     function: NodeId,
 ) -> impl Iterator<Item = CallbackSite<'a>> + 'ctx {
-    let direct =
-        super::values::enclosing_call(ctx, function).and_then(|call| {
-            let runner = runner(ctx, &call);
-            (callback_owner(runner)
-                && call.args.iter().flatten().any(|arg| {
-                    callback_kind(ctx, arg).is_some_and(|kind| kind.node_id() == function)
-                }))
-            .then_some(CallbackSite { runner })
-        });
+    let direct = super::values::enclosing_call(ctx, function).and_then(|call| {
+        let runner = runner(ctx, &call);
+        (callback_owner(runner)
+            && ctx
+                .counted(call.args.iter())
+                .flatten()
+                .any(|arg| callback_kind(ctx, arg).is_some_and(|kind| kind.node_id() == function)))
+        .then_some(CallbackSite { runner })
+    });
     let named = direct
         .is_none()
         .then(|| {
@@ -640,7 +641,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                 .named_callbacks
                 .get_or_init(|| {
                     let mut sites = std::collections::HashMap::<_, Vec<_>>::new();
-                    for node in ctx.semantic.nodes().iter() {
+                    for node in ctx.nodes() {
                         let Some(site) = super::values::site(ctx, node.kind()) else {
                             continue;
                         };
@@ -648,7 +649,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                         if !callback_owner(runner) {
                             continue;
                         }
-                        for arg in site.call.args.iter().flatten() {
+                        for arg in ctx.counted(site.call.args.iter()).flatten() {
                             if unwrapped(ctx, arg).get_identifier_reference().is_some()
                                 && let Some(callback) = callback_kind(ctx, arg)
                             {
@@ -666,7 +667,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
         .flatten();
     direct
         .into_iter()
-        .chain(named.into_iter().flatten().copied())
+        .chain(ctx.counted(named.into_iter().flatten().copied()))
 }
 
 pub(super) fn callback_parameter<'a>(

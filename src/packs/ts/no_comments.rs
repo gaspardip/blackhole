@@ -29,7 +29,8 @@ fn js_whitespace(c: char) -> bool {
     oxc::syntax::identifier::is_white_space(c) || is_line_terminator(c)
 }
 
-fn directive(raw: &str) -> bool {
+fn directive(ctx: &TsCtx<'_>, raw: &str) -> bool {
+    ctx.record_string_work(raw.len());
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
@@ -145,15 +146,17 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     let mut declarations = HashSet::new();
     let scoping = ctx.semantic.scoping();
     let mut bindings = HashSet::new();
-    for (id, node) in nodes
-        .iter_enumerated()
+    for (id, node) in ctx
+        .nodes_with_ids()
         .filter(|(id, _)| matches!(nodes.parent_kind(*id), AstKind::Program(_)))
     {
         let kind = node.kind();
         match kind {
             AstKind::ExportNamedDeclaration(n) => {
                 for spec in &n.specifiers {
+                    ctx.record_work(1);
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
+                        ctx.record_string_work(r.name.len());
                         bindings.extend(scoping.get_root_binding(r.name));
                     }
                 }
@@ -164,6 +167,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
                     .as_expression()
                     .map(Expression::without_parentheses)
                 {
+                    ctx.record_string_work(r.name.len());
                     bindings.extend(scoping.get_root_binding(r.name));
                 }
             }
@@ -188,7 +192,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     }
     // Semantic nodes are in preorder, so a node inherits its parent's top-level statement.
     let mut tops: Vec<NodeId> = Vec::with_capacity(nodes.len());
-    for (id, _) in nodes.iter_enumerated() {
+    for (id, _) in ctx.nodes_with_ids() {
         let parent = nodes.parent_id(id);
         let top = match nodes.kind(parent) {
             AstKind::Program(_) => id,
@@ -197,7 +201,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
         tops.push(top);
     }
     for symbol in bindings {
-        for id in scoping.symbol_declarations(symbol) {
+        for id in ctx.counted(scoping.symbol_declarations(symbol)) {
             declarations.insert(tops[id.index()]);
         }
     }
@@ -242,7 +246,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let mut references: HashMap<NodeId, HashSet<_>> = HashMap::new();
     let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
-    for (id, node) in nodes.iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         let kind = node.kind();
         let parent = nodes.parent_id(id);
         let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
@@ -267,24 +271,25 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
             references.entry(owner).or_default().insert(symbol);
         }
     }
+    let scoping = ctx.semantic.scoping();
     let mut expanded = HashSet::new();
     let mut pending: Vec<_> = public.iter().copied().collect();
     while let Some(owner) = pending.pop() {
-        for symbol in references
-            .remove(&owner)
-            .into_iter()
-            .flatten()
+        ctx.record_work(1);
+        for symbol in ctx
+            .counted(references.remove(&owner).into_iter().flatten())
             .filter(|s| expanded.insert(*s))
         {
             pending.extend(
-                ctx.semantic
-                    .scoping()
-                    .symbol_declarations(symbol)
+                ctx.counted(scoping.symbol_declarations(symbol))
                     .filter(|id| type_declaration(nodes.kind(*id)) && public.insert(*id)),
             );
         }
         if let Some(targets) = edges.remove(&owner) {
-            pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
+            pending.extend(
+                ctx.counted(targets.into_iter())
+                    .filter(|id| public.insert(*id)),
+            );
         }
     }
     Exposure { owners, public }
@@ -292,13 +297,12 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
     let end = ctx.comments.partition_point(|c| c.span.end <= start);
-    for c in ctx.comments[..end].iter().rev() {
+    for c in ctx.counted(ctx.comments[..end].iter().rev()) {
         // From the back, so code in between ends the scan before a long gap is read again.
-        if !ctx.text[c.span.end as usize..start as usize]
-            .chars()
-            .rev()
-            .all(js_whitespace)
-        {
+        let gap = &ctx.text[c.span.end as usize..start as usize];
+        let non_whitespace = gap.char_indices().rev().find(|&(_, ch)| !js_whitespace(ch));
+        ctx.record_string_work(non_whitespace.map_or(gap.len(), |(index, _)| gap.len() - index));
+        if non_whitespace.is_some() {
             return None;
         }
         if !directives.contains(&c.span.start) {
@@ -306,6 +310,7 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
             return (c.is_block()
                 && raw.starts_with('*')
                 && !["@internal", "@private"].iter().any(|tag| {
+                    ctx.record_string_work(raw.len());
                     raw.match_indices(tag)
                         .any(|(i, _)| word_end(&raw[i + tag.len()..]))
                 }))
@@ -316,12 +321,20 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
     None
 }
 
-fn warning(comment: &Comment, raw: &str) -> bool {
-    comment.is_line()
-        && raw
-            .trim_start_matches(js_whitespace)
-            .strip_prefix("WARNING:")
-            .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
+fn warning(ctx: &TsCtx<'_>, comment: &Comment, raw: &str) -> bool {
+    if !comment.is_line() {
+        return false;
+    }
+    ctx.record_string_work(raw.len());
+    raw.trim_start_matches(js_whitespace)
+        .strip_prefix("WARNING:")
+        .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
+}
+
+fn suppressed(ctx: &TsCtx<'_>, comment: &Comment) -> bool {
+    let raw = comment.span.source_text(ctx.text);
+    ctx.record_string_work(raw.len());
+    suppressed_comment(raw)
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
@@ -329,19 +342,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         return;
     }
     let directives: HashSet<_> = ctx
-        .comments
-        .iter()
-        .filter(|c| {
-            directive(c.content_span().source_text(ctx.text))
-                && !suppressed_comment(c.span.source_text(ctx.text))
-        })
+        .counted(ctx.comments.iter())
+        .filter(|c| directive(ctx, c.content_span().source_text(ctx.text)) && !suppressed(ctx, c))
         .map(|c| c.span.start)
         .collect();
     let exposure = exposure(ctx);
     let documented: HashSet<_> = ctx
-        .semantic
-        .nodes()
-        .iter_enumerated()
+        .nodes_with_ids()
         .filter_map(|(id, n)| {
             let parent = ctx.semantic.nodes().parent_kind(id);
             let start = if let AstKind::ExportDefaultDeclaration(export) = parent
@@ -366,13 +373,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             doc_before(ctx, start, &directives)
         })
         .collect();
-    for c in ctx.comments {
+    for c in ctx.counted(ctx.comments.iter()) {
         if directives.contains(&c.span.start) {
             continue;
         }
         let allowed = documented.contains(&c.span.start)
-            || warning(c, c.content_span().source_text(ctx.text));
-        if !allowed || suppressed_comment(c.span.source_text(ctx.text)) {
+            || warning(ctx, c, c.content_span().source_text(ctx.text));
+        if !allowed || suppressed(ctx, c) {
             findings.report(c.span.start as usize, None);
         }
     }

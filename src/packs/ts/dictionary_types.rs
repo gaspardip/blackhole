@@ -229,8 +229,20 @@ enum Children {
     One(Goal),
     Many(Vec<Goal>),
 }
-struct Budget(Option<usize>);
+struct Budget {
+    remaining: Option<usize>,
+}
 impl Budget {
+    fn new(steps: usize) -> Self {
+        Self {
+            remaining: Some(steps),
+        }
+    }
+
+    fn for_file<'a>(budget: &'a mut Option<Self>, ctx: &TsCtx<'_>) -> &'a mut Self {
+        budget.get_or_insert_with(|| Self::new(ctx.semantic.nodes().len().saturating_mul(128)))
+    }
+
     fn unparen<'a>(&mut self, mut ty: &'a TSType<'a>) -> Option<&'a TSType<'a>> {
         while let TSType::TSParenthesizedType(p) = ty {
             if !self.take(1) {
@@ -241,8 +253,8 @@ impl Budget {
         Some(ty)
     }
     fn take(&mut self, steps: usize) -> bool {
-        self.0 = self.0.and_then(|left| left.checked_sub(steps));
-        self.0.is_some()
+        self.remaining = self.remaining.and_then(|left| left.checked_sub(steps));
+        self.remaining.is_some()
     }
 }
 
@@ -256,13 +268,10 @@ struct Solver {
     test_allowance: Option<usize>,
 }
 impl Solver {
-    fn charge_identity(&mut self, steps: usize) -> Judged<()> {
-        self.budget
-            .as_mut()
-            .ok_or(Unjudged)?
-            .take(steps)
-            .then_some(())
-            .ok_or(Unjudged)
+    fn charge_identity(&mut self, ctx: &TsCtx<'_>, steps: usize) -> Judged<()> {
+        let budget = self.budget.as_mut().ok_or(Unjudged)?;
+        ctx.record_work(steps.min(budget.remaining.unwrap_or(0)));
+        budget.take(steps).then_some(()).ok_or(Unjudged)
     }
 
     fn syntax_children(&mut self, ctx: &TsCtx<'_>, root: NodeId) -> Judged<Vec<NodeId>> {
@@ -270,7 +279,7 @@ impl Solver {
         if !self.syntax_children.contains_key(&root) {
             let mut children = HashMap::<NodeId, Vec<NodeId>>::from([(root, Vec::new())]);
             for index in root.index() + 1..nodes.len() {
-                self.charge_identity(1)?;
+                self.charge_identity(ctx, 1)?;
                 let child = NodeId::new(index);
                 let parent = nodes.parent_id(child);
                 if parent < root {
@@ -281,7 +290,7 @@ impl Solver {
             }
             self.syntax_children.extend(children);
         }
-        self.charge_identity(self.syntax_children[&root].len())?;
+        self.charge_identity(ctx, self.syntax_children[&root].len())?;
         Ok(self.syntax_children[&root].clone())
     }
 
@@ -311,7 +320,7 @@ impl Solver {
         if a.params.len() != b.params.len() {
             return Ok(false);
         }
-        self.charge_identity(a.params.len())?;
+        self.charge_identity(ctx, a.params.len())?;
         for (x, y) in a.params.iter().zip(&b.params) {
             let identity = Goal::root(x.name.node_id.get(), Query::Identity).term;
             for (term, parameter) in [(&mut *left, x), (&mut *right, y)] {
@@ -327,13 +336,13 @@ impl Solver {
 
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
         // shortcut: 128 steps per syntax node and a minimum of 128 per candidate; revisit if ordinary inputs exhaust both.
-        let budget = self
-            .budget
-            .get_or_insert_with(|| Budget(Some(ctx.semantic.nodes().len().saturating_mul(128))));
-        evaluate(&mut self.memo, goal, budget, |g, b| {
+        let budget = Budget::for_file(&mut self.budget, ctx);
+        let before = budget.remaining.unwrap_or(0);
+        let result = evaluate(&mut self.memo, goal, budget, |g, b| {
             self.envs.plan(ctx, g, b)
-        })
-        .ok_or(Unjudged)
+        });
+        ctx.record_work(before - budget.remaining.unwrap_or(0));
+        result.ok_or(Unjudged)
     }
 }
 
@@ -348,14 +357,14 @@ fn plan_root(
     budget: &mut Budget,
     plan: impl FnOnce(&mut Budget) -> Plan,
 ) -> Option<Plan> {
-    let available = budget.0.unwrap_or(0);
-    let mut planning = Budget(Some(available));
+    let available = budget.remaining.unwrap_or(0);
+    let mut planning = Budget::new(available);
     let root = plan(&mut planning);
-    let Some(remaining) = planning.0 else {
-        budget.0 = None;
+    let Some(remaining) = planning.remaining else {
+        budget.remaining = None;
         return None;
     };
-    budget.0 = budget.0.map(|_| remaining);
+    budget.remaining = budget.remaining.map(|_| remaining);
     let children = root.children();
     if children.is_empty() {
         let value = match root {
@@ -421,7 +430,7 @@ fn evaluate(
             continue;
         }
         let p = first.take().unwrap_or_else(|| plan(g, budget));
-        budget.0?;
+        budget.remaining?;
         if !budget.take(p.children().len()) {
             return None;
         }
@@ -577,11 +586,11 @@ fn implicit_namespace_exports(
 ) -> Option<bool> {
     let mut ambient = ns.declare || ctx.program.source_type.is_typescript_definition();
     if !ambient {
-        for ancestor in ctx.semantic.nodes().ancestor_kinds(ns.node_id()) {
+        for ancestor in ctx.semantic.nodes().ancestors(ns.node_id()) {
             if !budget.take(1) {
                 return None;
             }
-            ambient = match ancestor {
+            ambient = match ancestor.kind() {
                 AstKind::TSNamespaceDeclaration(ns) => ns.declare,
                 AstKind::TSExternalModuleDeclaration(module) => module.declare,
                 AstKind::TSGlobalDeclaration(global) => global.declare,
@@ -663,7 +672,12 @@ impl Environments {
                         return None;
                     }
                     if self.namespace_exported(ctx, ns, decl, budget)? {
+                        ctx.record_string_work(name.len());
+                        let capacity = exports.capacity();
                         exports.entry(name.to_string()).or_default().push(candidate);
+                        if exports.capacity() != capacity {
+                            ctx.record_work(exports.keys().map(String::len).sum());
+                        }
                         break;
                     }
                 }
@@ -840,7 +854,7 @@ impl Environments {
                 return None;
             }
             let Some(next) = self.forwarding_target(ctx, id, budget) else {
-                budget.0?;
+                budget.remaining?;
                 break Some(id);
             };
             // A single hop into a cached tail needs no cycle set.
@@ -864,10 +878,18 @@ impl Environments {
         member: &str,
         budget: &mut Budget,
     ) -> Option<&[SymbolId]> {
+        ctx.record_work(symbols.len());
         if !self.namespace_exports.contains_key(symbols) {
             let exports = self.namespace_exports(ctx, symbols, budget)?;
+            ctx.record_work(symbols.len().saturating_mul(2));
+            let capacity = self.namespace_exports.capacity();
             self.namespace_exports.insert(symbols.to_vec(), exports);
+            if self.namespace_exports.capacity() != capacity {
+                ctx.record_work(self.namespace_exports.keys().map(Vec::len).sum());
+            }
         }
+        ctx.record_work(symbols.len());
+        ctx.record_string_work(member.len());
         let candidates = self.namespace_exports[symbols].get(member)?;
         budget.take(candidates.len() - 1).then_some(candidates)
     }
@@ -925,7 +947,7 @@ impl Environments {
         }
         let mut path = Vec::new();
         let mut enclosing = None;
-        for scope in scopes.scope_ancestors(scope) {
+        for scope in ctx.counted(scopes.scope_ancestors(scope)) {
             if let Some(&cached) = self.enclosing_namespaces.get(&scope) {
                 enclosing = cached;
                 break;
@@ -1080,7 +1102,7 @@ impl Environments {
             return cached.clone();
         }
         let resolved = self.local_name(ctx, name, budget);
-        budget.0?;
+        budget.remaining?;
         self.resolved_names.insert(name.node_id(), resolved.clone());
         resolved
     }
@@ -1342,7 +1364,7 @@ impl Environments {
             } else {
                 self.argument(ctx, arg, base, budget)
             };
-            budget.0?;
+            budget.remaining?;
             parameter_values.insert(p.name.symbol_id.get().unwrap(), value);
             body.env = self.bind(Binding {
                 outer: body.env,
@@ -1350,7 +1372,7 @@ impl Environments {
                 value,
             });
         }
-        budget.0?;
+        budget.remaining?;
         self.applications.insert(key, body);
         Some(body)
     }
@@ -1683,13 +1705,18 @@ impl Environments {
     }
 }
 
-fn same_gap(text: &str, left: u32, left_end: u32, right: u32, right_end: u32) -> bool {
-    let gap = |start: u32, end: u32| {
-        text[start as usize..end as usize]
-            .chars()
-            .filter(|c| !c.is_whitespace())
-    };
-    gap(left, left_end).eq(gap(right, right_end))
+fn same_gap(ctx: &TsCtx<'_>, left: u32, left_end: u32, right: u32, right_end: u32) -> bool {
+    let mut left_bytes = 0;
+    let mut right_bytes = 0;
+    let gap = |start: u32, end: u32| ctx.text[start as usize..end as usize].chars();
+    let same = gap(left, left_end)
+        .inspect(|c| left_bytes += c.len_utf8())
+        .filter(|c| !c.is_whitespace())
+        .eq(gap(right, right_end)
+            .inspect(|c| right_bytes += c.len_utf8())
+            .filter(|c| !c.is_whitespace()));
+    ctx.record_work(left_bytes + right_bytes);
+    same
 }
 
 fn empty_members(
@@ -1745,14 +1772,14 @@ impl Resolution {
         #[cfg(test)]
         let allowance = solver.test_allowance.unwrap_or(allowance);
         if let Some(budget) = &mut solver.budget {
-            budget.0 = Some(budget.0.unwrap_or(0).max(allowance));
+            budget.remaining = Some(budget.remaining.unwrap_or(0).max(allowance));
         }
     }
 
     #[cfg(test)]
     fn with_budget(steps: usize, allowance: usize) -> Self {
         Self(RefCell::new(Solver {
-            budget: Some(Budget(Some(steps))),
+            budget: Some(Budget::new(steps)),
             test_allowance: Some(allowance),
             ..Solver::default()
         }))
@@ -1772,11 +1799,11 @@ impl Resolution {
             && ctx.semantic.scoping().symbol_flags(sym).is_type_alias()
             && let Some(decl) = {
                 let mut solver = self.0.borrow_mut();
-                let budget = solver.budget.get_or_insert_with(|| {
-                    Budget(Some(ctx.semantic.nodes().len().saturating_mul(128)))
-                });
+                let budget = Budget::for_file(&mut solver.budget, ctx);
+                let before = budget.remaining.unwrap_or(0);
                 let result = alias_declaration(ctx, sym, budget);
-                budget.0.ok_or(Unjudged)?;
+                ctx.record_work(before - budget.remaining.unwrap_or(0));
+                budget.remaining.ok_or(Unjudged)?;
                 result
             }
             && let Class::AliasBody(id) = self.query(ctx, decl, Query::PlainAlias)?
@@ -1847,7 +1874,7 @@ impl Resolution {
             let (mut a, mut b) = match (a, b) {
                 (Class::Declaration(a, mut x), Class::Declaration(b, mut y)) if a == b => {
                     while x != y {
-                        solver.charge_identity(1)?;
+                        solver.charge_identity(ctx, 1)?;
                         let (Some(left_binding), Some(right_binding)) = (
                             x.checked_sub(1).map(|n| solver.envs.frames[n]),
                             y.checked_sub(1).map(|n| solver.envs.frames[n]),
@@ -1882,7 +1909,7 @@ impl Resolution {
             if a == b {
                 continue;
             }
-            solver.charge_identity(1)?;
+            solver.charge_identity(ctx, 1)?;
             if std::mem::discriminant(&ak) != std::mem::discriminant(&bk) {
                 return Ok(false);
             }
@@ -1900,9 +1927,9 @@ impl Resolution {
                 return Ok(false);
             }
             let (mut ax, mut bx) = (ak.span().start, bk.span().start);
-            for (x, y) in xs.into_iter().zip(ys) {
+            for (x, y) in ctx.counted(xs.into_iter().zip(ys)) {
                 let (sx, sy) = (nodes.kind(x).span(), nodes.kind(y).span());
-                if !same_gap(ctx.text, ax, sx.start.max(ax), bx, sy.start.max(bx)) {
+                if !same_gap(ctx, ax, sx.start.max(ax), bx, sy.start.max(bx)) {
                     return Ok(false);
                 }
                 ax = ax.max(sx.end);
@@ -1918,13 +1945,7 @@ impl Resolution {
                     },
                 ));
             }
-            if !same_gap(
-                ctx.text,
-                ax,
-                ak.span().end.max(ax),
-                bx,
-                bk.span().end.max(bx),
-            ) {
+            if !same_gap(ctx, ax, ak.span().end.max(ax), bx, bk.span().end.max(bx)) {
                 return Ok(false);
             }
         }
@@ -2069,13 +2090,13 @@ mod tests {
                 ) {
                     continue;
                 }
-                let mut budget = Budget(Some(1));
+                let mut budget = Budget::new(1);
                 let plan = super::Environments::default().plan(
                     ctx,
                     Goal::root(id, Query::ContainedDictionary),
                     &mut budget,
                 );
-                if budget.0.is_none() && plan.children().is_empty() {
+                if budget.remaining.is_none() && plan.children().is_empty() {
                     findings.report(0, None);
                 }
             }
@@ -2109,10 +2130,10 @@ mod tests {
                 })
                 .collect();
             let mut env = super::Environments::default();
-            assert_eq!(env.forwarded(ctx, ids[0], &mut Budget(Some(1))), None);
+            assert_eq!(env.forwarded(ctx, ids[0], &mut Budget::new(1)), None);
             for start in [ids[1], ids[0]] {
                 assert_eq!(
-                    env.forwarded(ctx, start, &mut Budget(Some(10))),
+                    env.forwarded(ctx, start, &mut Budget::new(10)),
                     Some(ids[2])
                 );
             }
@@ -2191,7 +2212,7 @@ mod tests {
                     };
                     let mut shared = Solver::default();
                     let places = &mut shared.envs;
-                    let mut budget = Budget(Some(100));
+                    let mut budget = Budget::new(100);
                     let active = places.enter(0, alias_id, first, &mut budget).unwrap();
                     assert!(places.enter(active, alias_id, first, &mut budget).is_none());
                     assert!(
@@ -2241,7 +2262,7 @@ mod tests {
         };
         let run = |limit| {
             let mut memo = HashMap::new();
-            let mut budget = Budget(Some(limit));
+            let mut budget = Budget::new(limit);
             evaluate(&mut memo, goal(0), &mut budget, |g, _| {
                 let i = g.term.node.index();
                 let links = [[1, 4], [0, 2], [0, 3], [3, 3], [5, 3]];
@@ -2340,12 +2361,10 @@ mod tests {
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
-        use crate::engine::run;
-        use std::{
-            fmt::Write as _,
-            time::{Duration, Instant},
-        };
+        use crate::engine::{run, run_with_work};
+        use std::fmt::Write as _;
 
+        const READS: usize = 4_000;
         for (origin, note) in [
             (
                 "type Origin = string; declare const root: Origin;",
@@ -2359,11 +2378,12 @@ mod tests {
             for i in 1..=4000 {
                 writeln!(source, "const v{i} = v{};", i - 1).unwrap();
             }
-            source.push_str(&"guard(v4000);\n".repeat(4000));
-            let start = Instant::now();
-            let hits = run(&[guard::<0, 0>()], [("guard.ts", source.as_bytes())]);
-            assert!(start.elapsed() < Duration::from_secs(3));
-            assert_eq!(hits.len(), 4000);
+            source.push_str(&"guard(v4000);\n".repeat(READS));
+            let (hits, work) = run_with_work(&[guard::<0, 0>()], "guard.ts", source.as_bytes());
+            // Each call visits one parameter and compares its one-byte name.
+            let cap = (source.len() / 3 + 2 * READS) as u64;
+            assert!(work <= cap, "{work} work exceeds {cap}");
+            assert_eq!(hits.len(), READS);
             for (i, hit) in hits.iter().enumerate() {
                 assert_eq!(
                     (hit.line, hit.col, hit.note.as_deref()),
@@ -2502,7 +2522,7 @@ mod tests {
             query: Query::UnknownAlias,
         };
         let mut calls = 0;
-        let mut budget = Budget(Some(usize::MAX));
+        let mut budget = Budget::new(usize::MAX);
         let mut memo = HashMap::new();
         let mut plan = |g: Goal, _: &mut Budget| {
             calls += 1;
@@ -2526,4 +2546,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "../../../tests/resolution_time/allowance.rs"]
-mod allowance_time;
+mod allowance;

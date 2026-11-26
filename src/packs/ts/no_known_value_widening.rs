@@ -94,10 +94,14 @@ fn guard_argument<'a>(
 ) -> Option<(&'a Expression<'a>, Judged<()>)> {
     let (params, ret) = local_function(ctx, &call.callee)?;
     let subject = predicate_subject(ret?)?;
-    let (index, annotation) = params.items.iter().enumerate().find_map(|(index, p)| {
-        let (name, ty) = super::function_types::parameter(AstKind::FormalParameter(p))?;
-        (name == Some(subject)).then_some((index, ty))
-    })?;
+    let (index, annotation) =
+        ctx.counted(params.items.iter())
+            .enumerate()
+            .find_map(|(index, p)| {
+                let (name, ty) = super::function_types::parameter(AstKind::FormalParameter(p))?;
+                name.is_some_and(|name| super::values::same_key(ctx, name, subject))
+                    .then_some((index, ty))
+            })?;
     let arg = call.arguments.get(index)?.as_expression()?;
     match resolution.contains_unknown(ctx, annotation) {
         Ok(true) => {}
@@ -168,10 +172,7 @@ fn typed_flow<'a>(
         AstKind::AccessorProperty(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
         AstKind::ReturnStatement(n) => (
             n.argument.as_ref()?,
-            nodes
-                .ancestor_ids(id)
-                .find_map(|a| signature(nodes.kind(a)))?
-                .1?,
+            ctx.ancestors(id).find_map(|a| signature(a.kind()))?.1?,
         ),
         AstKind::AssignmentExpression(n) if n.operator.is_assign() => {
             let AssignmentTarget::AssignmentTargetIdentifier(i) = &n.left else {
@@ -223,7 +224,7 @@ pub(super) fn check_with_resolution(
     let mut bindings = ConstBindings::default();
     // Guard calls use declared types as evidence, so their cached origins belong to a separate walk.
     let mut guard_bindings = ConstBindings::default();
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         resolution.begin_candidate();
         let candidate = match node.kind() {
             AstKind::CallExpression(call) => {

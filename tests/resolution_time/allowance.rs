@@ -1,12 +1,9 @@
 use super::Resolution;
 use crate::{
-    engine::{Findings, Rule, Run, TsCtx, run},
+    engine::{Findings, Rule, Run, TsCtx, run_with_work},
     packs::ts::{no_unsafe_dictionary_type, no_widen_then_assert},
 };
-use std::{
-    fmt::Write,
-    time::{Duration, Instant},
-};
+use std::fmt::Write;
 
 fn dictionary(ctx: &TsCtx<'_>, findings: &mut Findings) {
     no_unsafe_dictionary_type::check_with_resolution(
@@ -37,8 +34,7 @@ fn twenty_thousand_annotations_and_assertions_receive_their_own_allowance() {
         writeln!(source, "const v{i}: Record<string, unknown> = {{id: 1}};").unwrap();
         writeln!(source, "const x{i} = v{i} as {{id: number}};").unwrap();
     }
-    let start = Instant::now();
-    let hits = run(
+    let (hits, work) = run_with_work(
         &[
             Rule {
                 run: Run::Ts(dictionary),
@@ -49,13 +45,11 @@ fn twenty_thousand_annotations_and_assertions_receive_their_own_allowance() {
                 ..no_widen_then_assert::RULE
             },
         ],
-        [("allowance.ts", source.as_bytes())],
+        "allowance.ts",
+        source.as_bytes(),
     );
-    assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        start.elapsed()
-    );
+    let cap = source.len() as u64;
+    assert!(work <= cap, "{work} work exceeds {cap}");
     for rule in [
         &no_unsafe_dictionary_type::RULE,
         &no_widen_then_assert::RULE,

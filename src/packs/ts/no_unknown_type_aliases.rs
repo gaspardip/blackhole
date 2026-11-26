@@ -16,7 +16,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
 }
 
 pub(super) fn check_aliases(ctx: &TsCtx<'_>, findings: &mut Findings, resolution: &Resolution) {
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         resolution.begin_candidate();
         if let AstKind::TSTypeAliasDeclaration(alias) = node.kind() {
             report(

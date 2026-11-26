@@ -15,7 +15,7 @@ fn literal(ctx: &TsCtx<'_>, e: &Expression<'_>) -> bool {
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
 fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
-    use super::values::{resolve, symbol, unwrapped};
+    use super::values::{resolve, same_key, same_string_bytes, symbol, unwrapped};
     let (a, b) = (unwrapped(ctx, a), unwrapped(ctx, b));
     match (a, b) {
         (Expression::Identifier(_), Expression::Identifier(_)) => {
@@ -24,21 +24,27 @@ fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bo
                 (Expression::Identifier(x), Expression::Identifier(y)) => {
                     match (symbol(ctx, x), symbol(ctx, y)) {
                         (Some(x), Some(y)) => x == y,
-                        (None, None) => x.name == y.name,
+                        (None, None) => same_key(ctx, x.name.as_str(), y.name.as_str()),
                         _ => false,
                     }
                 }
                 _ => a.span() == b.span(),
             }
         }
-        (Expression::StringLiteral(x), Expression::StringLiteral(y)) => x.value == y.value,
+        (Expression::StringLiteral(x), Expression::StringLiteral(y)) => {
+            same_string_bytes(ctx, x.value.as_bytes(), y.value.as_bytes())
+        }
         (Expression::NumericLiteral(x), Expression::NumericLiteral(y)) => {
             x.value.to_bits() == y.value.to_bits()
         }
-        (Expression::BigIntLiteral(x), Expression::BigIntLiteral(y)) => x.value == y.value,
-        (x, y) if literal(ctx, x) && literal(ctx, y) => {
-            x.span().source_text(ctx.text) == y.span().source_text(ctx.text)
+        (Expression::BigIntLiteral(x), Expression::BigIntLiteral(y)) => {
+            same_key(ctx, x.value.as_str(), y.value.as_str())
         }
+        (x, y) if literal(ctx, x) && literal(ctx, y) => same_key(
+            ctx,
+            x.span().source_text(ctx.text),
+            y.span().source_text(ctx.text),
+        ),
         _ => false,
     }
 }
@@ -60,6 +66,7 @@ fn tautology<'a>(
     };
     let mut object = resolve(ctx, object);
     while let Some(m) = object.get_member_expr() {
+        ctx.record_work(1);
         object = m.object().get_inner_expression();
     }
     let Some(expect) = call_expr(object) else {
@@ -72,9 +79,8 @@ fn tautology<'a>(
     ) && expect.arg(0).is_some_and(|subject| {
         literal(ctx, resolve(ctx, subject))
             && call.unreadable_args.is_none()
-            && call
-                .args
-                .iter()
+            && ctx
+                .counted(call.args.iter())
                 .all(|arg| arg.is_some_and(|value| literal(ctx, resolve(ctx, value))))
             || first.is_some_and(|arg| same(ctx, subject, arg))
     })
@@ -83,7 +89,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, Option<usize>>::new();
     let mut helpers = BTreeMap::new();
     let mut tests = Vec::new();
-    for n in ctx.semantic.nodes().iter() {
+    for n in ctx.nodes() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
@@ -167,10 +173,11 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             tests.push((position(), body));
         }
     }
-    report_assertions(tests, &assertions, &helpers, findings);
+    report_assertions(ctx, tests, &assertions, &helpers, findings);
 }
 
 fn report_assertions(
+    ctx: &TsCtx<'_>,
     tests: Vec<(usize, oxc::span::Span)>,
     assertions: &BTreeMap<u32, Option<usize>>,
     helpers: &BTreeMap<u32, oxc::span::Span>,
@@ -182,17 +189,20 @@ fn report_assertions(
         let mut seen = std::collections::HashSet::new();
         let mut asserted = false;
         while let Some(body) = pending.pop() {
+            ctx.record_work(1);
             if !seen.insert(body) {
                 continue;
             }
             let mut scope = assertions.range(body.start..body.end).peekable();
             asserted |= scope.peek().is_some();
-            at.extend(scope.filter_map(|(_, &finding)| finding));
-            pending.extend(
-                helpers
-                    .range(body.start..body.end)
-                    .map(|(_, &helper)| helper),
-            );
+            at.extend(scope.filter_map(|(_, &finding)| {
+                ctx.record_work(1);
+                finding
+            }));
+            pending.extend(helpers.range(body.start..body.end).map(|(_, &helper)| {
+                ctx.record_work(1);
+                helper
+            }));
         }
         if !asserted {
             at.insert(start);

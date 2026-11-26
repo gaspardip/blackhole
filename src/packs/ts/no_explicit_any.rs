@@ -11,7 +11,7 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         if let AstKind::TSAnyKeyword(keyword) = node.kind() {
             findings.report(keyword.span.start as usize, None);
         }

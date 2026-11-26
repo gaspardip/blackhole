@@ -78,10 +78,7 @@ fn immediate_call<'a>(
 
 fn suspension_starts(ctx: &TsCtx<'_>) -> Vec<u32> {
     let mut starts: Vec<_> = ctx
-        .semantic
-        .nodes()
-        .iter()
-        .take_while(|_| ctx.resolution.take_work(1))
+        .bounded_nodes()
         .filter(|node| match node.kind() {
             AstKind::AwaitExpression(_) | AstKind::YieldExpression(_) => true,
             AstKind::ForOfStatement(loop_) => loop_.r#await,
@@ -94,10 +91,7 @@ fn suspension_starts(ctx: &TsCtx<'_>) -> Vec<u32> {
         .collect();
     if !starts.is_sorted() {
         let passes = starts.len().bit_width() as usize;
-        if !ctx
-            .resolution
-            .take_work(starts.len().saturating_mul(passes))
-        {
+        if !ctx.take_work(starts.len().saturating_mul(passes)) {
             return Vec::new();
         }
         starts.sort_unstable();
@@ -119,8 +113,7 @@ impl Regions {
     }
 
     pub(super) fn uninterrupted(&self, ctx: &TsCtx<'_>, start: u32, end: u32) -> bool {
-        ctx.resolution
-            .take_work(self.suspensions.len().bit_width() as usize)
+        ctx.take_work(self.suspensions.len().bit_width() as usize)
             && self
                 .suspensions
                 .get(self.suspensions.partition_point(|&at| at < start))
@@ -132,7 +125,7 @@ pub(super) fn region(ctx: &TsCtx<'_>, regions: &mut Regions, mut id: NodeId) -> 
     let nodes = ctx.semantic.nodes();
     let mut path = Vec::new();
     let inherited = loop {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         if let Some(&region) = regions.boundaries.get(&id) {
@@ -146,9 +139,8 @@ pub(super) fn region(ctx: &TsCtx<'_>, regions: &mut Regions, mut id: NodeId) -> 
         let node = nodes.parent_node(id);
         let boundary = match node.kind() {
             AstKind::Decorator(_) => {
-                let Some(class) = nodes
-                    .ancestors(node.id())
-                    .take_while(|_| ctx.resolution.take_work(1))
+                let Some(class) = ctx
+                    .bounded_ancestors(node.id())
                     .find(|n| matches!(n.kind(), AstKind::Class(_)))
                 else {
                     break None;

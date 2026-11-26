@@ -97,10 +97,8 @@ pub(super) fn mutation<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
         return false;
     }
     match kind {
-        Mutation::Assign => call
-            .args
-            .iter()
-            .skip(1)
+        Mutation::Assign => ctx
+            .counted(call.args.iter().skip(1))
             .flatten()
             .any(|e| contains_function(ctx, e)),
         Mutation::SetProperty => call.arg(2).is_some_and(|e| contains_function(ctx, e)),

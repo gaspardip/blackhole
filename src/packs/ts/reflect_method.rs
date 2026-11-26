@@ -7,7 +7,7 @@ fn string_key(expr: &Expression<'_>, method: &str) -> bool {
 }
 
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings, method: &str) {
-    for n in ctx.semantic.nodes().iter() {
+    for n in ctx.nodes() {
         let AstKind::CallExpression(call) = n.kind() else {
             continue;
         };

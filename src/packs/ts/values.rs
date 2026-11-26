@@ -9,7 +9,7 @@ mod strings;
 #[path = "tracked_uses.rs"]
 pub(super) mod tracked_uses;
 use crate::engine::TsCtx;
-use oxc::syntax::symbol::SymbolId;
+use oxc::syntax::{reference::Reference, symbol::SymbolId};
 use oxc::{
     ast::{
         AstKind,
@@ -27,11 +27,13 @@ use std::{
     collections::HashMap,
     rc::Rc,
 };
+type Projections<'a> =
+    HashMap<(oxc::syntax::node::NodeId, *const str), Option<&'a ObjectProperty<'a>>>;
 type AccumulatorAliases<'a> = HashMap<(SymbolId, SymbolId), &'a Expression<'a>>;
 
 #[derive(Default)]
 pub(crate) struct Resolution<'a> {
-    work: OnceCell<Cell<Option<usize>>>,
+    work_limit: OnceCell<Cell<Option<usize>>>,
     pub(super) runners: RefCell<HashMap<oxc::span::Span, super::test_context::Runner<'a>>>,
     array_callbacks: OnceCell<HashMap<oxc::span::Span, Vec<Rc<Invocation<'a>>>>>,
     pub(super) named_callbacks:
@@ -50,6 +52,7 @@ pub(crate) struct Resolution<'a> {
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     accumulator_aliases: RefCell<AccumulatorAliases<'a>>,
     strings: strings::StringCache,
+    projections: RefCell<Projections<'a>>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<InvocationTarget<'a>>>>,
@@ -62,40 +65,33 @@ impl Resolution<'_> {
         }
     }
     pub(super) fn limit_work(&self, steps: usize) {
-        self.work
+        self.work_limit
             .set(Cell::new(Some(steps)))
             .expect("one work limit per rule");
     }
 
-    pub(super) fn has_work_limit(&self) -> bool {
-        self.work.get().is_some()
-    }
-
     pub(super) fn has_work(&self) -> bool {
-        self.work.get().is_none_or(|work| work.get().is_some())
+        self.work_limit
+            .get()
+            .is_none_or(|work| work.get().is_some())
     }
 
-    pub(super) fn take_work(&self, steps: usize) -> bool {
-        self.work.get().is_none_or(|work| {
+    pub(crate) fn take_work(&self, steps: usize) -> bool {
+        self.work_limit.get().is_none_or(|work| {
             let remaining = work.get().and_then(|left| left.checked_sub(steps));
             work.set(remaining);
             remaining.is_some()
         })
     }
+}
 
-    pub(super) fn take_string_work(&self, bytes: usize) -> bool {
-        self.take_work(bytes.max(1))
-    }
-
-    pub(super) fn same_string_bytes(&self, left: &[u8], right: &[u8]) -> bool {
-        left.len() == right.len()
-            && (std::ptr::eq(left, right) || self.take_string_work(left.len()) && left == right)
-    }
+pub(super) fn same_string_bytes(ctx: &TsCtx<'_>, left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && (std::ptr::eq(left, right) || ctx.take_string_work(left.len()) && left == right)
 }
 
 pub(super) fn same_key(ctx: &TsCtx<'_>, left: &str, right: &str) -> bool {
-    ctx.resolution
-        .same_string_bytes(left.as_bytes(), right.as_bytes())
+    same_string_bytes(ctx, left.as_bytes(), right.as_bytes())
 }
 
 pub(super) fn path_is(ctx: &TsCtx<'_>, path: &[&str], expected: &[&str]) -> bool {
@@ -109,8 +105,7 @@ pub(super) fn path_is(ctx: &TsCtx<'_>, path: &[&str], expected: &[&str]) -> bool
 pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.has_with.get_or_init(|| {
         let scoping = ctx.semantic.scoping();
-        scoping
-            .scope_descendants_from_root()
+        ctx.counted(scoping.scope_descendants_from_root())
             .any(|id| scoping.scope_flags(id).is_with())
     })
 }
@@ -149,9 +144,8 @@ pub(super) fn destructured<'a>(
     pattern: &'a oxc::ast::ast::ObjectPattern<'a>,
     matches: impl Fn(&oxc::ast::ast::BindingIdentifier<'a>) -> bool,
 ) -> Option<&'a str> {
-    let property = pattern
-        .properties
-        .iter()
+    let property = ctx
+        .counted(pattern.properties.iter())
         .find(|p| p.value.get_binding_identifier().is_some_and(&matches))?;
     key(ctx, &property.key)
 }
@@ -161,14 +155,14 @@ fn unreadable(ctx: &TsCtx<'_>, sym: SymbolId) -> bool {
         let mut symbols=HashSet::new();
         let nodes=ctx.semantic.nodes();
         let scopes=ctx.semantic.scoping();
-        for node in nodes.iter() {
+        for node in ctx.nodes() {
             match node.kind() {
                 AstKind::CallExpression(c) if c.callee.get_identifier_reference().is_some_and(|id|
                     same_key(ctx, id.name.as_str(), "eval") && ctx.semantic.is_reference_to_global_variable(id)) => {
                     for scope in scopes.scope_ancestors(node.scope_id()) {
-                        if !ctx.resolution.take_work(1) { return symbols; }
+                        if !ctx.take_work(1) { return symbols; }
                         for binding in scopes.iter_bindings_in(scope) {
-                            if !ctx.resolution.take_work(1) { return symbols; }
+                            if !ctx.take_work(1) { return symbols; }
                             if !scopes.symbol_flags(binding).is_const_variable() {
                                 symbols.insert(binding);
                             }
@@ -194,13 +188,30 @@ fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool 
             let nodes = ctx.semantic.nodes();
             let mut under = Vec::with_capacity(nodes.len());
             // Oxc numbers parents before children, and the root is its own parent.
-            for node in nodes.iter() {
+            for node in ctx.nodes() {
                 let parent = nodes.parent_id(node.id());
                 let inherited = parent != node.id() && under[parent.index()];
                 under.push(inherited || matches!(nodes.kind(parent), AstKind::WithStatement(_)));
             }
             under
         })[id.index()]
+}
+
+pub(super) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    ctx.record_work(1);
+    let scoping = ctx.semantic.scoping();
+    !scoping.symbol_flags(symbol).is_const_variable()
+        && ctx
+            .counted(scoping.get_resolved_references(symbol))
+            .any(Reference::is_write)
+}
+
+fn mutation_index(ctx: &TsCtx<'_>) -> HashSet<SymbolId> {
+    ctx.semantic
+        .scoping()
+        .symbol_ids()
+        .filter(|&symbol| symbol_is_mutated(ctx, symbol))
+        .collect()
 }
 
 pub(super) fn declaration<'a>(
@@ -212,12 +223,7 @@ pub(super) fn declaration<'a>(
     if ctx
         .resolution
         .written
-        .get_or_init(|| {
-            scope
-                .symbol_ids()
-                .filter(|&s| scope.symbol_is_mutated(s))
-                .collect()
-        })
+        .get_or_init(|| mutation_index(ctx))
         .contains(&symbol)
         || unreadable(ctx, symbol)
     {
@@ -234,7 +240,7 @@ pub(super) fn declaration<'a>(
     let nodes = ctx.semantic.nodes();
     let mut implementation = None;
     for entry in redeclarations {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         let kind = nodes.kind(entry.declaration);
@@ -267,7 +273,7 @@ pub(super) fn initializer<'a>(
                 return None;
             };
             let sym = f.id.as_ref()?.symbol_id.get()?;
-            if !ctx.resolution.take_work(f.params.items.len()) {
+            if !ctx.take_work(f.params.items.len()) {
                 return None;
             }
             let index = parameter_index(&f.params, symbol(ctx, id)?)?;
@@ -279,7 +285,7 @@ pub(super) fn initializer<'a>(
             refs.peek()?;
             let nodes = ctx.semantic.nodes();
             refs.all(|r| {
-                if !ctx.resolution.take_work(1) {
+                if !ctx.take_work(1) {
                     return false;
                 }
                 let AstKind::CallExpression(call) = nodes.parent_kind(r.node_id()) else {
@@ -287,7 +293,7 @@ pub(super) fn initializer<'a>(
                 };
                 call.callee.span() == nodes.get_node(r.node_id()).span()
                     && call.arguments.len() <= index
-                    && ctx.resolution.take_work(call.arguments.len())
+                    && ctx.take_work(call.arguments.len())
                     && call
                         .arguments
                         .iter()
@@ -306,10 +312,7 @@ struct Write<'a> {
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> Option<oxc::syntax::node::NodeId> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.resolution.take_work(1))
+    ctx.bounded_ancestors(id)
         .find(|n| {
             matches!(
                 n.kind(),
@@ -327,7 +330,7 @@ fn assignments<'a>(ctx: &TsCtx<'a>) -> HashMap<SymbolId, Vec<Write<'a>>> {
     let nodes = ctx.semantic.nodes();
     let mut by_symbol: HashMap<_, Vec<Write<'a>>> = HashMap::new();
     let mut previous = HashMap::new();
-    for node in nodes.iter().take_while(|_| ctx.resolution.take_work(1)) {
+    for node in ctx.bounded_nodes() {
         let written = match node.kind() {
             AstKind::VariableDeclarator(v) => {
                 v.id.get_binding_identifier()
@@ -386,24 +389,21 @@ fn live_writes<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'a>) -> Vec<&'a Exp
     let loops = OnceCell::new();
     writes
         .iter()
-        .take_while(|_| ctx.resolution.take_work(1))
+        .take_while(|_| ctx.take_work(1))
         .filter(|w| {
             let owner = || *owner.get_or_init(|| boundary(ctx, id.node_id.get()));
             (w.value.span().end <= id.span.start
                 || w.owner != owner()
                 || loops
                     .get_or_init(|| {
-                        ctx.semantic
-                            .nodes()
-                            .ancestors(id.node_id.get())
-                            .take_while(|_| ctx.resolution.take_work(1))
+                        ctx.bounded_ancestors(id.node_id.get())
                             .take_while(|node| Some(node.id()) != owner())
                             .filter(|node| node.kind().is_iteration_statement())
                             .map(oxc::semantic::AstNode::span)
                             .collect::<Vec<_>>()
                     })
                     .iter()
-                    .take_while(|_| ctx.resolution.take_work(1))
+                    .take_while(|_| ctx.take_work(1))
                     .any(|span| span.contains_inclusive(w.value.span())))
                 && !w
                     .overwritten
@@ -449,7 +449,7 @@ pub(super) fn any_assigned_path<'a>(
 
 pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     loop {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return expr;
         }
         expr = inner(ctx, expr);
@@ -470,10 +470,7 @@ pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'
 }
 
 pub(super) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
-    if !ctx.resolution.has_work_limit() {
-        return expr.get_inner_expression();
-    }
-    while ctx.resolution.take_work(1) {
+    while ctx.take_work(1) {
         expr = match expr {
             Expression::ParenthesizedExpression(n) => &n.expression,
             Expression::TSAsExpression(n) => &n.expression,
@@ -500,7 +497,7 @@ pub(super) fn binding_value_until<'a>(
     let mut aliases = Vec::new();
     loop {
         expr = unwrapped(ctx, expr);
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return expr;
         }
         let Expression::Identifier(id) = expr else {
@@ -561,23 +558,42 @@ pub(super) fn binding_value_until<'a>(
     expr
 }
 
+pub(super) fn static_name<'a>(
+    ctx: &TsCtx<'_>,
+    key: &PropertyKey<'a>,
+) -> Option<oxc::ast::StaticPropertyName<'a>> {
+    if let PropertyKey::RegExpLiteral(regex) = key {
+        ctx.record_string_work(regex.span.size() as usize);
+    }
+    key.static_name()
+}
+
 fn projection<'a>(
     ctx: &TsCtx<'a>,
     object: &'a Expression<'a>,
-    name: &str,
-) -> Option<&'a oxc::ast::ast::ObjectProperty<'a>> {
+    name: &'a str,
+) -> Option<&'a ObjectProperty<'a>> {
     let Expression::ObjectExpression(obj) = binding_value(ctx, object) else {
         return None;
     };
-    for field in obj.properties.iter().rev() {
-        let ObjectPropertyKind::ObjectProperty(p) = field else {
-            return None;
-        };
-        if p.key.static_name()? == name {
-            return (p.kind == oxc::ast::ast::PropertyKind::Init).then_some(p);
-        }
-    }
-    None
+    // The same borrowed selector can occur at many reads of one object.
+    let lookup = (obj.node_id(), std::ptr::from_ref(name));
+    *ctx.resolution
+        .projections
+        .borrow_mut()
+        .entry(lookup)
+        .or_insert_with(|| {
+            for field in ctx.counted(obj.properties.iter().rev()) {
+                let ObjectPropertyKind::ObjectProperty(p) = field else {
+                    return None;
+                };
+                let key = static_name(ctx, &p.key)?;
+                if same_string_bytes(ctx, key.as_js_str().as_bytes(), name.as_bytes()) {
+                    return (p.kind == oxc::ast::ast::PropertyKind::Init).then_some(p);
+                }
+            }
+            None
+        })
 }
 
 fn instance_field<'a>(
@@ -596,11 +612,17 @@ fn instance_field<'a>(
         return None;
     }
     let mut value = None;
-    for element in &class.body.body {
+    for element in ctx.counted(class.body.body.iter()) {
         let oxc::ast::ast::ClassElement::PropertyDefinition(field) = element else {
             return None;
         };
-        if !field.r#static && field.key.static_name()? == name {
+        if !field.r#static
+            && same_string_bytes(
+                ctx,
+                static_name(ctx, &field.key)?.as_js_str().as_bytes(),
+                name.as_bytes(),
+            )
+        {
             value = field.value.as_ref();
         }
     }
@@ -618,7 +640,7 @@ pub(super) fn resolve_with<'a>(
 ) -> &'a Expression<'a> {
     let mut value = binding(ctx, expr);
     let mut seen = HashSet::new();
-    while ctx.resolution.take_work(1)
+    while ctx.take_work(1)
         && let Some(member) = value.get_member_expr()
     {
         let next = if ctx.resolution.conservative {
@@ -744,7 +766,7 @@ pub(super) fn origin_path<'a>(
     let mut seen = HashSet::new();
     let mut expr = expr;
     loop {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         expr = resolve(ctx, expr);
@@ -778,7 +800,7 @@ pub(super) fn origin_path<'a>(
         if ctx.semantic.is_reference_to_global_variable(id) {
             let name = id.name.as_str();
             if !(name.len() <= "globalThis".len()
-                && ctx.resolution.take_string_work(name.len())
+                && ctx.take_string_work(name.len())
                 && global_object(name))
             {
                 parts.push(name);
@@ -816,16 +838,12 @@ pub(super) fn enclosing_functions<'ctx, 'a>(
     ctx: &'ctx TsCtx<'a>,
     id: oxc::syntax::node::NodeId,
 ) -> impl Iterator<Item = &'ctx oxc::semantic::AstNode<'a>> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.resolution.take_work(1))
-        .filter(|node| {
-            matches!(
-                node.kind(),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        })
+    ctx.bounded_ancestors(id).filter(|node| {
+        matches!(
+            node.kind(),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        )
+    })
 }
 
 pub(super) fn parameter_index(
@@ -870,11 +888,11 @@ pub(super) fn enclosing_call<'a>(
         AstKind::ArrayExpression(_) => {
             let callbacks = ctx.resolution.array_callbacks.get_or_init(|| {
                 let mut callbacks = HashMap::<_, Vec<_>>::new();
-                for node in ctx.semantic.nodes().iter() {
+                for node in ctx.nodes() {
                     let Some(site) = site(ctx, node.kind()) else {
                         continue;
                     };
-                    for arg in site.call.args.iter().flatten() {
+                    for arg in ctx.counted(site.call.args.iter()).flatten() {
                         let value = unwrapped(ctx, arg);
                         if value.is_function() {
                             callbacks
@@ -887,8 +905,7 @@ pub(super) fn enclosing_call<'a>(
                 callbacks
             });
             let calls = callbacks.get(&ctx.semantic.nodes().get_node(id).span())?;
-            calls
-                .iter()
+            ctx.counted(calls.iter())
                 .find(|c| super::test_context::runner(ctx, c).test_or_suite())
                 .or_else(|| calls.first())
                 .cloned()
@@ -898,10 +915,7 @@ pub(super) fn enclosing_call<'a>(
 }
 
 pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Option<AstKind<'a>> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.resolution.take_work(1))
+    ctx.bounded_ancestors(id)
         .map(oxc::semantic::AstNode::kind)
         .find(|kind| !transparent(kind))
 }
@@ -980,6 +994,7 @@ impl<'a> InvocationTarget<'a> {
         Rc::clone(self.expanded.get_or_init(|| {
             let (pending, intrinsic_targets) = self.pending.take();
             let args = pending.finish(ctx);
+            ctx.record_work(self.path.as_ref().map_or(0, Vec::len));
             Rc::new(Invocation {
                 callee: self.callee,
                 path: self.path.clone(),
@@ -1092,7 +1107,7 @@ fn cached_target<'a>(
     if let Some(hit) = calls.borrow().get(&span) {
         return Some(Rc::clone(hit));
     }
-    if !ctx.resolution.take_work(arg_count) {
+    if !ctx.take_work(arg_count) {
         return None;
     }
     let result = Rc::new(resolve_invocation(ctx, target, args())?);
@@ -1111,7 +1126,7 @@ fn resolve_invocation<'a>(
     let mut this_arg = ThisArg::Member;
     let mut function_apply = false;
     let (origin, path) = loop {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         let (origin, parts) = origin_path(ctx, callee).unzip();
@@ -1141,7 +1156,7 @@ fn resolve_invocation<'a>(
                 .read(m)
                 .is_some_and(|key| same_key(ctx, key, "bind"))
         {
-            if !ctx.resolution.take_work(c.arguments.len()) {
+            if !ctx.take_work(c.arguments.len()) {
                 return None;
             }
             args.prepend(&c.arguments);
@@ -1222,31 +1237,47 @@ pub(super) struct Properties<'a> {
 }
 pub(super) trait ObjectSummary<'a>: Clone + Default {
     fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>);
-    fn unreadable(&mut self);
-    fn overlay(&mut self, other: &Self);
+    fn unreadable(&mut self, ctx: &TsCtx<'_>);
+    fn overlay(&mut self, ctx: &TsCtx<'_>, other: &Self);
+    fn copy_work(&self) -> usize;
 }
+impl<'a> Properties<'a> {
+    fn insert(&mut self, ctx: &TsCtx<'_>, name: &'a str, property: &'a ObjectProperty<'a>) {
+        // A node compares at most eleven keys, and each lower level at least doubles the tree.
+        let comparisons = 11 * self.named.len().max(1).ilog2() as usize + 11;
+        ctx.record_work(
+            name.len()
+                .max(1)
+                .saturating_mul(self.named.len().min(comparisons)),
+        );
+        self.named.insert(name, property);
+    }
+}
+
 impl<'a> ObjectSummary<'a> for Properties<'a> {
     fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>) {
         if let Some(name) = key(ctx, &property.key) {
-            self.named.insert(name, property);
+            self.insert(ctx, name, property);
         } else {
-            self.unreadable();
+            self.unreadable(ctx);
         }
     }
-    fn unreadable(&mut self) {
+    fn unreadable(&mut self, ctx: &TsCtx<'_>) {
+        ctx.record_work(self.named.len());
         self.unknown = true;
         self.named.clear();
     }
-    fn overlay(&mut self, other: &Self) {
+    fn overlay(&mut self, ctx: &TsCtx<'_>, other: &Self) {
         if other.unknown {
-            self.unreadable();
+            self.unreadable(ctx);
         }
-        self.named.extend(
-            other
-                .named
-                .iter()
-                .map(|(&name, &property)| (name, property)),
-        );
+        for (&name, &property) in ctx.counted(other.named.iter()) {
+            self.insert(ctx, name, property);
+        }
+    }
+
+    fn copy_work(&self) -> usize {
+        self.named.len()
     }
 }
 pub(super) fn properties<'a>(
@@ -1272,6 +1303,7 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
     };
     let mut cache = cache.borrow_mut();
     if let Some(hit) = cache.get(&root.span.start) {
+        ctx.record_work(hit.copy_work());
         return Some(hit.clone());
     }
     let mut active = HashSet::from([root.span.start]);
@@ -1288,25 +1320,27 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
             let start = finished.object.span.start;
             active.remove(&start);
             if !finished.cyclic {
+                ctx.record_work(finished.summary.copy_work());
                 cache.insert(start, finished.summary.clone());
             }
             let Some(parent) = stack.last_mut() else {
                 return Some(finished.summary);
             };
             parent.cyclic |= finished.cyclic;
-            parent.summary.overlay(&finished.summary);
+            parent.summary.overlay(ctx, &finished.summary);
             continue;
         };
+        ctx.record_work(1);
         frame.index += 1;
         match property {
             ObjectPropertyKind::ObjectProperty(p) => frame.summary.field(ctx, p),
             ObjectPropertyKind::SpreadProperty(s) => {
                 let Expression::ObjectExpression(child) = resolve(ctx, &s.argument) else {
-                    frame.summary.unreadable();
+                    frame.summary.unreadable(ctx);
                     continue;
                 };
                 if let Some(hit) = cache.get(&child.span.start) {
-                    frame.summary.overlay(hit);
+                    frame.summary.overlay(ctx, hit);
                 } else if active.insert(child.span.start) {
                     stack.push(Frame {
                         object: child,
@@ -1316,7 +1350,7 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
                     });
                 } else {
                     frame.cyclic = true;
-                    frame.summary.unreadable();
+                    frame.summary.unreadable(ctx);
                 }
             }
         }
@@ -1328,7 +1362,7 @@ pub(super) fn receiver<'a>(
     callee: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
     let callee = inner(ctx, callee);
-    if !ctx.resolution.take_work(1) {
+    if !ctx.take_work(1) {
         return None;
     }
     if let Some(m) = callee.get_member_expr() {
@@ -1341,7 +1375,7 @@ pub(super) fn receiver<'a>(
     let BindingPattern::ObjectPattern(pattern) = &v.id else {
         return None;
     };
-    if !ctx.resolution.take_work(pattern.properties.len()) {
+    if !ctx.take_work(pattern.properties.len()) {
         return None;
     }
     let symbol = symbol(ctx, id)?;

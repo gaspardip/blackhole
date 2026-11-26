@@ -15,10 +15,8 @@ pub(crate) fn assertion(kind: AstKind<'_>) -> Option<(&Expression<'_>, &TSType<'
     }
 }
 pub(crate) fn parent<'a>(ctx: &TsCtx<'a>, id: NodeId) -> Option<AstKind<'a>> {
-    let nodes = ctx.semantic.nodes();
-    nodes
-        .ancestor_ids(id)
-        .map(|p| nodes.kind(p))
+    ctx.ancestors(id)
+        .map(oxc::semantic::AstNode::kind)
         .find(|k| !matches!(k, AstKind::ParenthesizedExpression(_)))
 }
 pub(crate) fn known_value(expr: &Expression<'_>) -> bool {

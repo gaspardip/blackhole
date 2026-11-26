@@ -1,7 +1,9 @@
 use super::values::global_object;
 use super::{
     config_responses::transport_response,
-    values::{ObjectSummary, declaration, initializer, key, object_summary, path, resolve},
+    values::{
+        ObjectSummary, declaration, initializer, key, object_summary, path, resolve, same_key,
+    },
 };
 use crate::engine::TsCtx;
 use oxc::{
@@ -74,13 +76,16 @@ impl<'a> ObjectSummary<'a> for TransportOption<'a> {
             *self = Self::Fetch(&property.value);
         }
     }
-    fn unreadable(&mut self) {
+    fn unreadable(&mut self, _ctx: &TsCtx<'_>) {
         *self = Self::Unknown;
     }
-    fn overlay(&mut self, other: &Self) {
+    fn overlay(&mut self, _ctx: &TsCtx<'_>, other: &Self) {
         if !matches!(other, Self::Absent) {
             *self = *other;
         }
+    }
+    fn copy_work(&self) -> usize {
+        1
     }
 }
 fn option<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
@@ -105,7 +110,7 @@ fn arguments<'a>(
     }) && let Some(index) = super::values::parameter_index(&f.params, symbol)
         && let Some(fn_id) = f.id.as_ref().and_then(|id| id.symbol_id.get())
     {
-        for reference in ctx.semantic.scoping().get_resolved_references(fn_id) {
+        for reference in ctx.counted(ctx.semantic.scoping().get_resolved_references(fn_id)) {
             if let AstKind::CallExpression(c) =
                 ctx.semantic.nodes().parent_kind(reference.node_id())
                 && c.callee.span() == ctx.semantic.nodes().get_node(reference.node_id()).span()
@@ -122,12 +127,18 @@ struct FieldPaths<'a> {
     ids: std::collections::HashMap<(Option<usize>, &'a str), usize>,
 }
 impl<'a> FieldPaths<'a> {
-    fn push(&mut self, parent: Option<usize>, key: &'a str) -> usize {
+    fn push(&mut self, ctx: &TsCtx<'_>, parent: Option<usize>, key: &'a str) -> usize {
+        ctx.record_string_work(key.len());
         let field = (parent, key);
-        *self.ids.entry(field).or_insert_with(|| {
+        let capacity = self.ids.capacity();
+        let id = *self.ids.entry(field).or_insert_with(|| {
             self.entries.push(field);
             self.entries.len() - 1
-        })
+        });
+        if self.ids.capacity() != capacity {
+            ctx.record_work(self.entries.iter().map(|(_, key)| key.len().max(1)).sum());
+        }
+        id
     }
 }
 pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&'a Expression<'a>> {
@@ -141,6 +152,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
     let mut results = Vec::new();
     let mut paths = FieldPaths::default();
     while let Some(step) = pending.pop() {
+        ctx.record_work(1);
         let (e, fields) = match step {
             Step::Visit(e, path) => (resolve(ctx, e), path),
             Step::Leave(span) => {
@@ -164,7 +176,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
                 && let Some(k) =
                     super::values::destructured(ctx, obj, |id| id.symbol_id.get() == Some(symbol))
             {
-                pending.push(Step::Visit(init, Some(paths.push(fields, k))));
+                pending.push(Step::Visit(init, Some(paths.push(ctx, fields, k))));
                 continue;
             }
             arguments(ctx, symbol, &mut next);
@@ -172,18 +184,21 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
         if let Some(m) = e.get_member_expr()
             && let Some(k) = super::values::MemberKeys(ctx).read(m)
         {
-            pending.push(Step::Visit(m.object(), Some(paths.push(fields, k))));
+            pending.push(Step::Visit(m.object(), Some(paths.push(ctx, fields, k))));
             continue;
         }
         if let Expression::ObjectExpression(o) = e
             && let Some((parent, wanted)) = fields.map(|id| paths.entries[id])
         {
             for p in &o.properties {
+                ctx.record_work(1);
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => {
                         pending.push(Step::Visit(&s.argument, fields));
                     }
-                    ObjectPropertyKind::ObjectProperty(p) if key(ctx, &p.key) == Some(wanted) => {
+                    ObjectPropertyKind::ObjectProperty(p)
+                        if key(ctx, &p.key).is_some_and(|name| same_key(ctx, name, wanted)) =>
+                    {
                         pending.push(Step::Visit(&p.value, parent));
                     }
                     ObjectPropertyKind::ObjectProperty(_) => (),

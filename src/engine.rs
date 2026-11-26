@@ -1,11 +1,13 @@
+use std::cell::Cell;
+
 use oxc::{
     allocator::Allocator,
     ast::ast::{Comment, Program},
     diagnostics::{LabeledSpan, OxcDiagnostic},
     parser::{ParseOptions, Parser},
-    semantic::{Semantic, SemanticBuilder},
+    semantic::{AstNode, Semantic, SemanticBuilder},
     span::SourceType,
-    syntax::line_terminator::is_line_terminator,
+    syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
 
 pub enum Family {
@@ -47,6 +49,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    work: Cell<u64>,
     pub(crate) arena: &'a Allocator,
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
@@ -54,6 +57,57 @@ pub struct TsCtx<'a> {
     pub program: &'a Program<'a>,
     pub semantic: Semantic<'a>,
     pub comments: &'a [Comment],
+}
+
+impl<'a> TsCtx<'a> {
+    pub(crate) fn record_work(&self, steps: usize) {
+        self.work.set(self.work.get().saturating_add(steps as u64));
+    }
+
+    pub(crate) fn record_string_work(&self, bytes: usize) {
+        self.record_work(bytes.max(1));
+    }
+
+    pub(crate) fn take_work(&self, steps: usize) -> bool {
+        self.record_work(steps);
+        self.resolution.take_work(steps)
+    }
+
+    pub(crate) fn take_string_work(&self, bytes: usize) -> bool {
+        self.record_string_work(bytes);
+        self.resolution.take_work(bytes.max(1))
+    }
+
+    pub(crate) fn counted<I: Iterator>(
+        &self,
+        items: I,
+    ) -> std::iter::Inspect<I, impl FnMut(&I::Item)> {
+        items.inspect(|_| self.record_work(1))
+    }
+
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &AstNode<'a>> {
+        self.counted(self.semantic.nodes().iter())
+    }
+
+    pub(crate) fn nodes_with_ids(&self) -> impl Iterator<Item = (NodeId, &AstNode<'a>)> {
+        self.nodes().map(|node| (node.id(), node))
+    }
+
+    pub(crate) fn ancestors(&self, id: NodeId) -> impl Iterator<Item = &AstNode<'a>> {
+        self.counted(self.semantic.nodes().ancestors(id))
+    }
+
+    pub(crate) fn bounded_ancestors(&self, id: NodeId) -> impl Iterator<Item = &AstNode<'a>> {
+        self.ancestors(id)
+            .take_while(|_| self.resolution.take_work(1))
+    }
+
+    pub(crate) fn bounded_nodes(&self) -> impl Iterator<Item = &AstNode<'a>> {
+        self.semantic
+            .nodes()
+            .iter()
+            .take_while(|_| self.take_work(1))
+    }
 }
 
 #[derive(Default)]
@@ -210,6 +264,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        work: Cell::new(0),
         arena,
         resolution: crate::packs::ts::values::Resolution::default(),
         path,
@@ -280,7 +335,7 @@ fn parsed_hits<'r>(
     path: &str,
     text: &str,
     kind: SourceType,
-) -> Result<Vec<Hit<'r>>, (usize, String)> {
+) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
     std::thread::scope(|scope| {
@@ -289,7 +344,8 @@ fn parsed_hits<'r>(
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
                 let mut ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
+                let hits = collect(rules, path, text, Ok(Some(&mut ts)));
+                Ok((hits, ts.work.get()))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()
@@ -305,51 +361,71 @@ pub fn run<'a>(
 ) -> Vec<Finding> {
     let mut result = Vec::new();
     for (path, bytes) in files {
-        let (decoded, malformed) = decode(bytes);
-        let nul = decoded.find('\0');
-        let stripped = nul.map(|_| decoded.replace('\0', ""));
-        let text = stripped.as_deref().unwrap_or(&decoded);
-        let mut hits = match (source_type(path), malformed, nul) {
-            (Some(_), Some(at), _) => {
-                let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
-                Err((at - nuls, "Malformed source encoding".to_owned()))
-            }
-            (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
-            (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
-            (None, _, _) => Ok(collect(rules, path, text, Ok(None))),
-        }
-        .unwrap_or_else(|error| collect(rules, path, text, Err(&error)));
-        // A parse failure at the first NUL precedes matches at the same stripped offset.
-        hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
-        let mut chars = decoded.chars().peekable();
-        let (mut matched, mut line, mut col) = (0, 1, 1);
-        for (offset, rule, note) in hits {
-            let at_nul =
-                malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
-            while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
-                let ch = chars.next().expect("finding offset exceeds decoded text");
-                if ch != '\0' {
-                    matched += ch.len_utf8();
-                }
-                if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
-                    line += 1;
-                    col = 1;
-                } else {
-                    col += 1;
-                }
-            }
-            result.push(Finding {
-                rule: rule.id,
-                gate: rule.gate,
-                path: path.to_owned(),
-                line,
-                col,
-                note,
-            });
-        }
+        run_file(rules, path, bytes, &mut result);
     }
-    result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
+    sort_findings(&mut result);
     result
+}
+
+/// Runs the selected rules on one file and returns findings and counted work.
+#[doc(hidden)]
+#[must_use]
+pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
+    let mut findings = Vec::new();
+    let work = run_file(rules, path, bytes, &mut findings);
+    sort_findings(&mut findings);
+    (findings, work)
+}
+
+fn sort_findings(findings: &mut [Finding]) {
+    findings
+        .sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
+}
+
+fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
+    let (decoded, malformed) = decode(bytes);
+    let nul = decoded.find('\0');
+    let stripped = nul.map(|_| decoded.replace('\0', ""));
+    let text = stripped.as_deref().unwrap_or(&decoded);
+    let (mut hits, work) = match (source_type(path), malformed, nul) {
+        (Some(_), Some(at), _) => {
+            let nuls = decoded[..at].bytes().filter(|&b| b == 0).count();
+            Err((at - nuls, "Malformed source encoding".to_owned()))
+        }
+        (Some(_), None, Some(at)) => Err((at, "NUL in source text".to_owned())),
+        (Some(kind), None, None) => parsed_hits(rules, path, text, kind),
+        (None, _, _) => Ok((collect(rules, path, text, Ok(None)), 0)),
+    }
+    .unwrap_or_else(|error| (collect(rules, path, text, Err(&error)), 0));
+    // A parse failure at the first NUL precedes matches at the same stripped offset.
+    hits.sort_by_key(|(offset, rule, _)| (*offset, !matches!(rule.run, Run::ParseError)));
+    let mut chars = decoded.chars().peekable();
+    let (mut matched, mut line, mut col) = (0, 1, 1);
+    for (offset, rule, note) in hits {
+        let at_nul =
+            malformed.is_none() && matches!(rule.run, Run::ParseError) && nul == Some(offset);
+        while matched < offset || (!at_nul && chars.peek() == Some(&'\0')) {
+            let ch = chars.next().expect("finding offset exceeds decoded text");
+            if ch != '\0' {
+                matched += ch.len_utf8();
+            }
+            if is_line_terminator(ch) && !(ch == '\r' && chars.peek() == Some(&'\n')) {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        result.push(Finding {
+            rule: rule.id,
+            gate: rule.gate,
+            path: path.to_owned(),
+            line,
+            col,
+            note,
+        });
+    }
+    work
 }
 
 #[cfg(test)]

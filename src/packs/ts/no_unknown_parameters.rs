@@ -15,7 +15,7 @@ pub(crate) const RULE: Rule = Rule {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let resolution = Resolution::default();
     let nodes = ctx.semantic.nodes();
-    for (id, n) in nodes.iter_enumerated() {
+    for (id, n) in ctx.nodes_with_ids() {
         resolution.begin_candidate();
         let Some((name, ty)) = parameter(n.kind()) else {
             continue;
@@ -27,7 +27,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let owner = nodes.parent_kind(nodes.parent_id(id));
         if returns(owner)
             .and_then(predicate_subject)
-            .is_some_and(|subject| name.is_some_and(|n| n == subject))
+            .is_some_and(|subject| name.is_some_and(|n| super::values::same_key(ctx, n, subject)))
         {
             continue;
         }

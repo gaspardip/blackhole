@@ -19,12 +19,7 @@ pub(super) struct NamedExports {
 fn named_exports<'ctx>(ctx: &'ctx TsCtx<'_>) -> &'ctx NamedExports {
     ctx.resolution.named_exports.get_or_init(|| {
         let mut exports = NamedExports::default();
-        for node in ctx
-            .semantic
-            .nodes()
-            .iter()
-            .take_while(|_| ctx.resolution.take_work(1))
-        {
+        for node in ctx.bounded_nodes() {
             let value = match node.kind() {
                 AstKind::ExportNamedDeclaration(decl) => {
                     for spec in &decl.specifiers {
@@ -32,14 +27,10 @@ fn named_exports<'ctx>(ctx: &'ctx TsCtx<'_>) -> &'ctx NamedExports {
                             continue;
                         };
                         let scoping = ctx.semantic.scoping();
-                        let binding = if ctx.resolution.has_work_limit() {
-                            scoping
-                                .scope_ancestors(node.scope_id())
-                                .take_while(|_| ctx.resolution.take_string_work(local.name.len()))
-                                .find_map(|scope| scoping.get_binding(scope, local.name))
-                        } else {
-                            scoping.find_binding(node.scope_id(), local.name)
-                        };
+                        let binding = scoping
+                            .scope_ancestors(node.scope_id())
+                            .take_while(|_| ctx.take_string_work(local.name.len()))
+                            .find_map(|scope| scoping.get_binding(scope, local.name));
                         if let Some(symbol) = binding {
                             if decl.export_kind.is_type() || spec.export_kind.is_type() {
                                 exports.types.insert(symbol);
@@ -78,17 +69,12 @@ pub(super) fn is_local(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
 
 fn is_exported(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
     let declaration = ctx.semantic.symbol_declaration(symbol);
-    ctx.semantic
-        .nodes()
-        .ancestor_kinds(declaration.id())
-        .take(2)
-        .any(|kind| {
-            matches!(
-                kind,
-                AstKind::ExportNamedDeclaration(_)
-                    | AstKind::ExportDefaultDeclaration(_)
-                    | AstKind::ExportDeclaration(_)
-            )
-        })
-        || named_exports(ctx).values.contains(&symbol)
+    ctx.ancestors(declaration.id()).take(2).any(|node| {
+        matches!(
+            node.kind(),
+            AstKind::ExportNamedDeclaration(_)
+                | AstKind::ExportDefaultDeclaration(_)
+                | AstKind::ExportDeclaration(_)
+        )
+    }) || named_exports(ctx).values.contains(&symbol)
 }

@@ -32,7 +32,7 @@ impl ArrayEvidence {
     pub(super) fn array_type<'a>(&mut self, ctx: &TsCtx<'a>, mut ty: &'a TSType<'a>) -> ArrayType {
         let mut path = Vec::new();
         let result = loop {
-            if !ctx.resolution.take_work(1) {
+            if !ctx.take_work(1) {
                 return ArrayType::Other;
             }
             match ty {
@@ -101,7 +101,7 @@ impl ArrayEvidence {
     pub(super) fn known<'a>(&mut self, ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> bool {
         let mut path = Vec::new();
         let result = loop {
-            if !ctx.resolution.take_work(1) {
+            if !ctx.take_work(1) {
                 return false;
             }
             expr = unwrapped(ctx, expr);
@@ -233,7 +233,7 @@ fn same_receiver<'a>(
 ) -> bool {
     let mut seen = HashSet::new();
     loop {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return false;
         }
         left = resolve(ctx, left);
