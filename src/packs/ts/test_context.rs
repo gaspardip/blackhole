@@ -362,7 +362,7 @@ fn annotated_string_title<'a>(ctx: &TsCtx<'a>, mut expr: &'a Expression<'a>) -> 
     let mut seen = std::collections::HashSet::new();
     let mut annotated = false;
     loop {
-        let value = unwrapped(expr);
+        let value = unwrapped(ctx, expr);
         let Some(id) = value.get_identifier_reference() else {
             return annotated && value.is_function();
         };
@@ -430,7 +430,7 @@ fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
     let mut pending = vec![arg];
     let mut seen = std::collections::HashSet::new();
     while let Some(expr) = pending.pop() {
-        let expr = unwrapped(expr);
+        let expr = unwrapped(ctx, expr);
         if !seen.insert(expr.span()) {
             continue;
         }
@@ -443,7 +443,7 @@ fn string_title<'a>(ctx: &TsCtx<'a>, arg: &'a Expression<'a>) -> bool {
                 return true;
             }
             if let Some(init) = binding.initializer
-                && unwrapped(init).get_identifier_reference().is_some()
+                && unwrapped(ctx, init).get_identifier_reference().is_some()
                 && symbol(ctx, id)
                     .is_some_and(|s| ctx.semantic.scoping().symbol_flags(s).is_const_variable())
             {
@@ -649,7 +649,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                             continue;
                         }
                         for arg in site.call.args.iter().flatten() {
-                            if unwrapped(arg).get_identifier_reference().is_some()
+                            if unwrapped(ctx, arg).get_identifier_reference().is_some()
                                 && let Some(callback) = callback_kind(ctx, arg)
                             {
                                 sites

@@ -36,6 +36,7 @@ pub struct Rule {
 pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
+    TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     ParseError,
 }
 
@@ -98,6 +99,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_known_value_widening::RULE,
         crate::packs::ts::no_non_null_assertion::RULE,
         crate::packs::ts::no_object_parameters::RULE,
+        crate::packs::ts::no_reduce_accumulator_copy::RULE,
         crate::packs::ts::no_reflect_apply::RULE,
         crate::packs::ts::no_reflect_get::RULE,
         crate::packs::ts::no_runtime_typeof::RULE,
@@ -233,13 +235,14 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     text: &str,
-    parsed: Result<Option<&TsCtx<'_>>, &(usize, String)>,
+    parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
-    let ts = parsed.ok().flatten();
+    let error = parsed.as_ref().err().copied();
+    let mut ts = parsed.ok().flatten();
     let ctx = FileCtx {
         path,
         text,
-        comments: ts.map(|ts| ts.comments),
+        comments: ts.as_deref().map(|ts| ts.comments),
     };
     let mut hits = Vec::new();
     for rule in rules {
@@ -247,12 +250,22 @@ fn collect<'r>(
         match rule.run {
             Run::File(check) => check(&ctx, &mut findings),
             Run::Ts(check) => {
-                if let Some(ts) = ts {
+                if let Some(ts) = ts.as_deref() {
                     check(ts, &mut findings);
                 }
             }
+            Run::TsConservative(check) => {
+                if let Some(ts) = ts.as_deref_mut() {
+                    let resolution = std::mem::replace(
+                        &mut ts.resolution,
+                        crate::packs::ts::values::Resolution::conservative(),
+                    );
+                    check(ts, &mut findings);
+                    ts.resolution = resolution;
+                }
+            }
             Run::ParseError => {
-                if let Err((at, message)) = parsed {
+                if let Some((at, message)) = error {
                     findings.report(*at, Some(message));
                 }
             }
@@ -275,8 +288,8 @@ fn parsed_hits<'r>(
             .stack_size(STACK_BYTES)
             .spawn_scoped(scope, || {
                 let arena = Allocator::default();
-                let ts = parse(&arena, path, text, kind)?;
-                Ok(collect(rules, path, text, Ok(Some(&ts))))
+                let mut ts = parse(&arena, path, text, kind)?;
+                Ok(collect(rules, path, text, Ok(Some(&mut ts))))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()

@@ -840,3 +840,55 @@ fn wrapped_const_selectors_scale_linearly() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn reducer_resolution_scales_with_repeated_reads() {
+    let rule = registry()
+        .iter()
+        .find(|rule| rule.id == "ts/no-reduce-accumulator-copy")
+        .unwrap();
+    for shape in ["aliases", "callbacks", "fresh targets"] {
+        let [small, large] = [600, 2400].map(|n| {
+            let (source, expected) = match shape {
+                "aliases" => {
+                    let mut text = String::from("function fold(acc) { const alias0 = acc;");
+                    for i in 1..=n {
+                        writeln!(text, "const alias{i} = alias{};", i - 1).unwrap();
+                    }
+                    for i in 0..n {
+                        writeln!(text, "const copy{i} = [...alias{n}];").unwrap();
+                    }
+                    text.push_str("return acc; } rows.reduce(fold, []);");
+                    (text, n)
+                }
+                "callbacks" => {
+                    let mut text = String::from("function fold(acc) { const copy = [...acc];");
+                    for _ in 0..n {
+                        text.push_str("acc = other;");
+                    }
+                    text.push_str("return copy; }");
+                    for _ in 0..n {
+                        text.push_str("rows.reduce(fold, []);");
+                    }
+                    (text, 1)
+                }
+                _ => (
+                    "rows.reduce(acc => { var next = {}; return Object.assign(next, acc); }, {});"
+                        .repeat(n),
+                    n,
+                ),
+            };
+            best_of_three(|| {
+                let start = Instant::now();
+                let hits = run(std::slice::from_ref(rule), [("rows.ts", source.as_bytes())]);
+                let elapsed = start.elapsed();
+                assert_eq!(hits.len(), expected, "{shape} at {n}");
+                elapsed
+            })
+        });
+        assert!(
+            large < small * 6 + Duration::from_millis(25),
+            "{shape}: 600 took {small:?}, 2400 took {large:?}"
+        );
+    }
+}

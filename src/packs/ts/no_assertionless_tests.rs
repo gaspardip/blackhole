@@ -10,13 +10,13 @@ pub(crate) const RULE: Rule = Rule {
     fix: "Assert the behaviour the test names, on a value the code under test produced.",
     run: Run::Ts(check),
 };
-fn literal(e: &Expression<'_>) -> bool {
-    let e = super::values::unwrapped(e);
+fn literal(ctx: &TsCtx<'_>, e: &Expression<'_>) -> bool {
+    let e = super::values::unwrapped(ctx, e);
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
 fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
     use super::values::{resolve, symbol, unwrapped};
-    let (a, b) = (unwrapped(a), unwrapped(b));
+    let (a, b) = (unwrapped(ctx, a), unwrapped(ctx, b));
     match (a, b) {
         (Expression::Identifier(_), Expression::Identifier(_)) => {
             let (a, b) = (resolve(ctx, a), resolve(ctx, b));
@@ -36,7 +36,7 @@ fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bo
             x.value.to_bits() == y.value.to_bits()
         }
         (Expression::BigIntLiteral(x), Expression::BigIntLiteral(y)) => x.value == y.value,
-        (x, y) if literal(x) && literal(y) => {
+        (x, y) if literal(ctx, x) && literal(ctx, y) => {
             x.span().source_text(ctx.text) == y.span().source_text(ctx.text)
         }
         _ => false,
@@ -50,7 +50,7 @@ fn tautology<'a>(
     use super::values::{call_expr, invoked, receiver, resolve};
     let first = call.arg(0);
     if parts == ["assert"] {
-        return first.is_some_and(literal);
+        return first.is_some_and(|arg| literal(ctx, arg));
     }
     if parts.first() == Some(&"assert") {
         return first.zip(call.arg(1)).is_some_and(|(a, b)| same(ctx, a, b));
@@ -70,12 +70,12 @@ fn tautology<'a>(
         super::test_context::runner(ctx, &expect).short(),
         Some(["expect"] | ["expect", "soft"])
     ) && expect.arg(0).is_some_and(|subject| {
-        literal(resolve(ctx, subject))
+        literal(ctx, resolve(ctx, subject))
             && call.unreadable_args.is_none()
             && call
                 .args
                 .iter()
-                .all(|arg| arg.is_some_and(|value| literal(resolve(ctx, value))))
+                .all(|arg| arg.is_some_and(|value| literal(ctx, resolve(ctx, value))))
             || first.is_some_and(|arg| same(ctx, subject, arg))
     })
 }
@@ -137,7 +137,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 if parts == ["expect"]
                     && inv
                         .arg(0)
-                        .is_some_and(|value| literal(super::values::resolve(ctx, value)))
+                        .is_some_and(|value| literal(ctx, super::values::resolve(ctx, value)))
                     && super::values::outer(ctx, n.id())
                         .and_then(|kind| kind.as_member_expression_kind())
                         .is_none()

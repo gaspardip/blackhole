@@ -17,7 +17,7 @@ fn recorder<'a>(ctx: &TsCtx<'a>, mut e: &'a Expression<'a>) -> Option<bool> {
     let mut reads = false;
     let mut seen = HashSet::new();
     loop {
-        e = unwrapped(e);
+        e = unwrapped(ctx, e);
         let resolved = resolve(ctx, e);
         if resolved.get_member_expr().is_some() {
             e = resolved;

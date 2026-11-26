@@ -9,6 +9,7 @@ pub mod ledger;
 pub mod objections;
 mod packs {
     pub(crate) mod ts {
+        mod array_methods;
         mod bindings;
         mod config_responses;
         pub(crate) mod dictionary_types;
@@ -27,6 +28,7 @@ mod packs {
         pub(crate) mod no_known_value_widening;
         pub(crate) mod no_non_null_assertion;
         pub(crate) mod no_object_parameters;
+        pub(crate) mod no_reduce_accumulator_copy;
         pub(crate) mod no_reflect_apply;
         pub(crate) mod no_reflect_get;
         pub(crate) mod no_runtime_typeof;
@@ -42,6 +44,7 @@ mod packs {
         pub(crate) mod no_widen_then_assert;
         mod playwright;
         pub(crate) mod reflect_method;
+        mod regions;
         mod saved_methods;
         pub(crate) mod strict_msw;
         mod test_context;
