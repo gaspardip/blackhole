@@ -1,7 +1,10 @@
 #[path = "common/agent.rs"]
 mod agent;
+#[path = "common/cli.rs"]
+mod cli;
 pub mod common;
-use agent::{repo, run};
+use agent::run;
+use cli::repo;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 use tempfile::tempdir;
@@ -15,7 +18,7 @@ fn hook(root: &Path, event: &str, payload: &Value, status: i32) -> Vec<u8> {
 }
 
 fn check(root: &Path, paths: &[&str], status: i32) -> Vec<u8> {
-    run(root, &[&["check"], paths].concat(), "", status, false).stdout
+    cli::check(root, paths, status).stdout
 }
 
 fn patch(text: &str) -> Value {
@@ -609,6 +612,7 @@ fn edits_check_both_path_readings() {
     let external = outside.path().join("a/b");
     fs::create_dir_all(&external).unwrap();
     symlink(external, root.join("real/deep/out")).unwrap();
+    fs::create_dir(root.join(".git/info")).unwrap();
     fs::write(root.join(".git/info/exclude"), "/loop\n").unwrap();
     // Every listed name that reads the written file is reported, so the links to red.py come with it.
     let red = ["inside.py", "inside.txt", "red.py"].as_slice();
@@ -667,6 +671,7 @@ fn a_name_git_still_holds_is_checked_through_a_new_link() {
     fs::write(root.join("d/file.py"), "pass").unwrap();
     common::git(root, &["add", "d/file.py"]).unwrap();
     fs::rename(root.join("d"), root.join("real")).unwrap();
+    fs::create_dir(root.join(".git/info")).unwrap();
     fs::write(root.join(".git/info/exclude"), "/real\n").unwrap();
     std::os::unix::fs::symlink("real", root.join("d")).unwrap();
     fs::write(root.join("d/file.py"), "# noqa").unwrap();

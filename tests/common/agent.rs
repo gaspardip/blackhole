@@ -1,4 +1,4 @@
-use crate::common::{command, git};
+use crate::common::command;
 use std::{
     io::{self, Write},
     path::Path,
@@ -38,13 +38,4 @@ pub fn run_input(cmd: &mut Command, data: &[u8], status: i32, partial: bool) -> 
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(status), "{out:?}");
     out
-}
-
-/// # Panics
-/// Panics if the temporary repository cannot be initialized.
-#[must_use]
-pub fn repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    git(dir.path(), &["init", "-q"]).unwrap();
-    dir
 }

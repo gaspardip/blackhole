@@ -1,7 +1,10 @@
 #[path = "common/agent.rs"]
 mod agent;
+#[path = "common/cli.rs"]
+mod cli;
 pub mod common;
-use agent::{repo, run};
+use agent::run;
+use cli::{check, repo};
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 use tempfile::tempdir;
@@ -92,7 +95,7 @@ fn generated_hooks_use_the_checkout_install_or_the_global_binary() {
     fs::write(root.join(".gitignore"), "/node_modules/\n").unwrap();
     init(root, true);
     fs::write(root.join("red.py"), "# noqa").unwrap();
-    let red = run(root, &["check", "red.py"], "", 1, false).stdout;
+    let red = check(root, &["red.py"], 1).stdout;
     assert!(red.starts_with(b"red.py:1:1 "));
 
     let other = repo();
@@ -378,7 +381,7 @@ fn initial_ledger_banks_only_allowable_findings() {
         fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
         "blackhole-ledger 1\ncore/no-suppression\t1\tordinary.py\n"
     );
-    let out = run(root, &["check"], "", 1, false);
+    let out = check(root, &[], 1);
     let findings = String::from_utf8(out.stdout).unwrap();
     assert!(findings.contains("core/unparseable"));
     assert!(!findings.contains("ordinary.py"));
