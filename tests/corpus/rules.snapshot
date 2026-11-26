@@ -1108,6 +1108,9 @@ rules/ts/no-test-doubles/reject/upstream-accept-allows-real-implementations-and-
 rules/ts/no-test-doubles/reject/upstream-accept-allows-real-or-unrelated-reader-and-observer-behavior-13.fixture.tsx:1:32 ts/no-test-doubles
 rules/ts/no-test-doubles/reject/wrapped-route.test.ts:1:97 ts/no-test-doubles
 rules/ts/no-test-doubles/reject/wrapped-with-env.test.ts:1:52 ts/no-test-doubles
+rules/ts/no-test-removal/reject/destructured-todo/head/values.test.ts:2:1 ts/no-skipped-tests
+rules/ts/no-test-removal/reject/todo/head/values.test.ts:1:4 ts/no-skipped-tests
+rules/ts/no-test-removal/reject/unparseable/head/values.test.ts:2:23 core/unparseable Unexpected token
 rules/ts/no-unknown-parameters/reject/invalid-01.ts:1:23 ts/no-unknown-parameters
 rules/ts/no-unknown-parameters/reject/invalid-01.ts:1:31 ts/no-explicit-return-types
 rules/ts/no-unknown-parameters/reject/invalid-02.ts:1:23 ts/no-unknown-parameters

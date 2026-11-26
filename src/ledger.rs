@@ -1,4 +1,4 @@
-use crate::engine::{Finding, Gate, Rule, Run, registry};
+use crate::engine::{Finding, Gate, Rule, registry};
 use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
@@ -36,7 +36,7 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         };
         let rule = rules
             .iter()
-            .find(|r| r.id == rule && !matches!(r.run, Run::ParseError))
+            .find(|r| r.id == rule && r.run.can_allow())
             .ok_or_else(|| error("unknown or prohibited rule"))?;
         let count = count_of(count).ok_or_else(|| error("invalid count"))?;
         if invalid_path(path) {
@@ -107,7 +107,10 @@ pub fn excess(counts: &Counts, allowed: &Counts) -> Counts {
 /// The base counts, each under the path a rename gave its file.
 #[must_use]
 pub fn moved(base: &Counts, renames: &[(&str, &str)]) -> Counts {
-    let renames: BTreeMap<_, _> = renames.iter().copied().collect();
+    moved_by(base, &renames.iter().copied().collect())
+}
+
+pub(crate) fn moved_by(base: &Counts, renames: &BTreeMap<&str, &str>) -> Counts {
     let mut moved = Counts::new();
     for ((rule, path), &n) in base {
         let dest = renames.get(path.as_str()).copied().unwrap_or(path);

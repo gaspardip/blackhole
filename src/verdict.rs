@@ -62,6 +62,13 @@ impl Change {
         }
     }
 }
+pub(crate) fn renames(changes: &[Change]) -> BTreeMap<&str, &str> {
+    changes
+        .iter()
+        .filter_map(|c| Some((c.old()?, c.path.as_str())))
+        .collect()
+}
+
 pub struct Inputs<'a> {
     pub approved: bool,
     pub today: Date,
@@ -72,6 +79,7 @@ pub struct Inputs<'a> {
     pub base_rows: &'a Rows,
     pub head_rows: Result<&'a Rows, &'a io::Error>,
     pub findings: &'a [Finding],
+    pub test_removals: &'a [Finding],
 }
 #[derive(Default)]
 pub struct Verdict {
@@ -174,22 +182,26 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
 /// # Errors
 /// Propagates diagnostic formatting errors.
 pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
-    judge_with_guard(i, &GlobSet::empty())
+    judge_with_guard(i, &GlobSet::empty(), &renames(i.changes))
 }
 
-pub(crate) fn judge_with_guard(i: &Inputs<'_>, guard: &GlobSet) -> io::Result<Verdict> {
+pub(crate) fn judge_with_guard(
+    i: &Inputs<'_>,
+    guard: &GlobSet,
+    renames: &BTreeMap<&str, &str>,
+) -> io::Result<Verdict> {
     let mut v = Verdict::default();
     let empty = Counts::new();
     let head = i.head_ledger.unwrap_or(&empty);
     let mut allowed = head.clone();
+    let mut removal_lines = Vec::new();
     if !i.approved {
-        let renames: Vec<_> = i
-            .changes
-            .iter()
-            .filter_map(|c| Some((c.old()?, c.path.as_str())))
-            .collect();
-        let moved = ledger::moved(i.base_ledger, &renames);
+        let moved = ledger::moved_by(i.base_ledger, renames);
         protected(i, &moved, guard, &mut v)?;
+        if !i.test_removals.is_empty() {
+            v.gates.insert("tests");
+            crate::print_findings(i.test_removals, &mut removal_lines)?;
+        }
         // A count that grew without an approval would otherwise excuse its own findings.
         for (key, n) in &mut allowed {
             *n = (*n).min(moved.get(key).copied().unwrap_or(0));
@@ -211,5 +223,6 @@ pub(crate) fn judge_with_guard(i: &Inputs<'_>, guard: &GlobSet) -> io::Result<Ve
         v.gates.insert("findings");
     }
     crate::report(i.findings, &over, &mut v.lines)?;
+    v.lines.append(&mut removal_lines);
     Ok(v)
 }

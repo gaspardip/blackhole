@@ -15,8 +15,11 @@ use oxc::span::GetSpan;
 use oxc::syntax::{node::NodeId, operator::BinaryOperator};
 
 pub(super) fn test_file(ctx: &TsCtx<'_>) -> bool {
-    let path = ctx.path;
-    ctx.record_string_work(path.len());
+    ctx.record_string_work(ctx.path.len());
+    test_file_path(ctx.path)
+}
+
+pub(super) fn test_file_path(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
     file.split('.').any(|part| {
@@ -184,6 +187,7 @@ impl<'a> Runner<'a> {
             *slot = name;
         }
         self.skipped |= self.length > 0 && modifier(name);
+        self.todo |= name == "todo";
         self.length += 1;
         self.last = Some(name);
     }
@@ -244,12 +248,11 @@ pub(super) fn runner<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> Runner<'a> {
         return Runner::default();
     };
     let mut cache = ctx.resolution.runners.borrow_mut();
-    for (span, key) in steps.into_iter().rev() {
+    for (span, key) in ctx.counted(steps.into_iter().rev()) {
         if let Some((key, at)) = key {
             if modifier(key) {
                 result.skip_at = Some(at);
             }
-            result.todo |= key == "todo";
             result.push(key);
         }
         cache.insert(span, result);

@@ -108,6 +108,7 @@ fn gate_table() {
             base_rows: &Rows::new(),
             head_rows: Ok(&Rows::new()),
             findings: &findings,
+            test_removals: &[],
         })
         .unwrap();
         assert_eq!(
@@ -150,6 +151,7 @@ fn a_move_git_reports_as_two_changes_is_protected() {
             base_rows: &Rows::new(),
             head_rows: Ok(&Rows::new()),
             findings: &[],
+            test_removals: &[],
         })
         .unwrap();
         assert_eq!(
@@ -205,6 +207,7 @@ fn objection_transitions() {
             base_rows: &rows(old),
             head_rows: Ok(&rows(new)),
             findings: &findings,
+            test_removals: &[],
         })
         .unwrap();
         assert_eq!(

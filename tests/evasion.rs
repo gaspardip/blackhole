@@ -1,41 +1,13 @@
 mod common;
+mod trees;
 use common::{Result, git};
-use std::{fs, io, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
-
-fn copy(src: &Path, dest: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(src)? {
-        let e = entry?;
-        let p = dest.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            fs::create_dir(&p)?;
-            copy(&e.path(), &p)?;
-        } else if e.file_name() != ".keep" {
-            fs::copy(e.path(), p)?;
-        }
-    }
-    Ok(())
-}
-
-fn commit(case: &Path, root: &Path, side: &str) -> Result<String> {
-    copy(&case.join(side), root)?;
-    git(root, &["add", "-A"])?;
-    git(root, &["commit", "--allow-empty", "-qm", side])?;
-    git(root, &["rev-parse", "HEAD"])
-}
-
-fn revisions(case: &Path, root: &Path) -> Result<(String, String)> {
-    git(root, &["init", "-q"])?;
-    let base = commit(case, root, "base")?;
-    git(root, &["rm", "-rq", "--ignore-unmatch", "."])?;
-    let head = commit(case, root, "head")?;
-    Ok((base, head))
-}
 
 fn run(case: &Path) -> Result<()> {
     let temp = tempdir()?;
     let root = temp.path();
-    let (base, head) = revisions(case, root)?;
+    let (base, head) = trees::revisions(case, root)?;
     let expected = fs::read_to_string(case.join("expect"))?;
     let mut lines = expected.lines();
     let gates = lines.next().ok_or("missing verdict")?;
@@ -152,7 +124,7 @@ fn coverage_follows_repository_paths_in_subdirectories_and_bare_clones() -> Resu
     let repo = tempdir()?;
     let root = repo.path();
     let case = Path::new("evasion/coverage-changed");
-    let (base, head) = revisions(case, root)?;
+    let (base, head) = trees::revisions(case, root)?;
     let artifacts = tempdir()?;
     let dir = artifacts.path().join(&head).join("reports");
     fs::create_dir_all(&dir)?;
@@ -184,7 +156,7 @@ fn coverage_follows_repository_paths_in_subdirectories_and_bare_clones() -> Resu
 fn coverage_requires_complete_line_records_for_the_changed_source() -> Result<()> {
     let repo = tempdir()?;
     let root = repo.path();
-    let (base, head) = revisions(Path::new("evasion/coverage-changed"), root)?;
+    let (base, head) = trees::revisions(Path::new("evasion/coverage-changed"), root)?;
     let artifacts = tempdir()?;
     let dir = artifacts.path().join(&head).join("reports");
     fs::create_dir_all(&dir)?;
@@ -225,7 +197,7 @@ fn coverage_reads_only_the_external_artifact_for_the_exact_head() -> Result<()> 
     let root = temp.path().join("repo");
     fs::create_dir(&root)?;
     let case = Path::new("evasion/coverage-changed");
-    let (base, head) = revisions(case, &root)?;
+    let (base, head) = trees::revisions(case, &root)?;
     let stale = temp.path().join(&base).join("reports");
     fs::create_dir_all(&stale)?;
     fs::copy(case.join("lcov.info"), stale.join("lcov.info"))?;

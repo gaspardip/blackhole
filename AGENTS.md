@@ -49,7 +49,8 @@ Only `blackhole ledger` writes it. Allowances can only shrink.
 
 Only the root `blackhole.toml` sets repository-relative `exclude` globs.
 File an overage with `blackhole object <rule> <path> <reason>`. Objections last through day 30 and accept one renewal with `--renew`.
-`blackhole ci --base <sha> --head <sha>` judges behind, protected, objections, ledger, findings and configured changed-line coverage from commit objects.
+`blackhole ci --base <sha> --head <sha>` judges behind, protected, objections, ledger, findings, test removals and configured changed-line coverage from commit objects.
+A test file deletion or a drop in its test case or assertion count needs the same approval as a protected change. See the [test removal contract](docs/contracts/ts/no-test-removal.md).
 Standard repository judge files and base-configured `[guard] paths` also require approval.
 These changes are protected: a change to `.github/`, `blackhole.toml` or anything under `.blackhole/` except the ledger; a change to the ledger that leaves it unreadable or allowing more than the base does once renames are followed; a file that arrives under an excluded path while a judged one leaves. A protected change is red unless `--approvals <file>` shows an approval of the head commit by someone with write access who wrote none of the change: that person's last review in the file, comments aside, must approve the head. See [GitHub judge](README.md#github-judge) for how this repository publishes its verdict.
 Add an evasion case with base/ and head/ trees, an expect file listing every red gate in sorted order or green, and optional approvals.json. A case-level lcov.info supplies external coverage evidence at reports/lcov.info for the head. Use .keep for an empty tree.

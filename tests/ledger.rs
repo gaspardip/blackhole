@@ -30,6 +30,7 @@ fn malformed() {
         (HEADER.trim_end().into(), 1),
         (format!("{HEADER}{row}{row}"), 3),
         (format!("{HEADER}{row}{RULE}\t1\ta\n"), 3),
+        (format!("{HEADER}ts/no-test-removal\t1\tx\n"), 2),
         (format!("{HEADER}unknown\t1\tx\n"), 2),
     ];
     for suffix in [

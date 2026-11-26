@@ -106,6 +106,12 @@ paths = ["tools/lint/**"]
 lcov = "reports/lcov.info"
 ```
 
+`blackhole ci` also requires independent head approval when a judged test
+file disappears or its test case or assertion count drops. The judge
+compares counts per file and follows renames reported by Git. See the
+[test removal contract](docs/contracts/ts/no-test-removal.md) for the
+recognized forms.
+
 With coverage enabled on the base, CI compares the two commits and requires
 a hit on each added or modified instrumented line in recognized non-test
 source and scripts with a shebang. It uses base exclusions even when the head
@@ -138,7 +144,7 @@ On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from th
 tip of `main` when the event fired, in a job without secrets or token permissions. It fetches
 the PR head into a fresh bare Git repository and judges it as commit data.
 The verdict excludes review data. The workflow omits `--approvals`, so a
-protected change stays red and requires a maintainer merge.
+protected change or test removal stays red and requires a maintainer merge.
 
 If a head branch name that looks like a commit SHA prevents `pull_request_target`
 from running, push the commits to a branch with another name and open a new PR

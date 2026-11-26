@@ -77,6 +77,12 @@ enum Entry {
     Link(String),
     Other,
 }
+enum Blob<'a> {
+    File(&'a str),
+    Absent,
+    UnresolvedLink,
+}
+
 pub(crate) struct Tree(BTreeMap<String, Entry>);
 impl Tree {
     pub(crate) fn load(sha: &str) -> io::Result<Self> {
@@ -114,15 +120,34 @@ impl Tree {
         self.blob(path, batch)?.map(|id| batch.read(id)).transpose()
     }
     pub(crate) fn blob(&self, path: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
-        Ok(match self.0.get(path) {
-            Some(Entry::File(id)) => Some(id.as_str()),
-            Some(Entry::Link(_)) => self.follow(path, batch)?,
-            _ => None,
-        })
+        match self.resolve_blob(path, batch)? {
+            Blob::File(id) => Ok(Some(id)),
+            Blob::Absent => Ok(None),
+            Blob::UnresolvedLink => Err(io::Error::other("link target is not in the commit")),
+        }
     }
-    // A target the commit does not hold could hide a file from the judge, so it is an error.
-    fn follow(&self, link: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
-        let lost = || io::Error::other("link target is not in the commit");
+
+    // A base link without a target has no inventory to compare.
+    pub(crate) fn historical_blob(
+        &self,
+        path: &str,
+        batch: &mut Batch,
+    ) -> io::Result<Option<&str>> {
+        match self.resolve_blob(path, batch)? {
+            Blob::File(id) => Ok(Some(id)),
+            Blob::Absent | Blob::UnresolvedLink => Ok(None),
+        }
+    }
+
+    fn resolve_blob(&self, path: &str, batch: &mut Batch) -> io::Result<Blob<'_>> {
+        match self.0.get(path) {
+            Some(Entry::File(id)) => Ok(Blob::File(id)),
+            Some(Entry::Link(_)) => self.follow(path, batch),
+            _ => Ok(Blob::Absent),
+        }
+    }
+
+    fn follow(&self, link: &str, batch: &mut Batch) -> io::Result<Blob<'_>> {
         let mut pending: Vec<String> = link.rsplit('/').map(str::to_owned).collect();
         let mut done: Vec<String> = Vec::new();
         let mut hops = 0;
@@ -130,7 +155,9 @@ impl Tree {
             match part.as_str() {
                 "" | "." => continue,
                 ".." => {
-                    done.pop().ok_or_else(lost)?;
+                    if done.pop().is_none() {
+                        return Ok(Blob::UnresolvedLink);
+                    }
                     continue;
                 }
                 _ => done.push(part),
@@ -138,21 +165,23 @@ impl Tree {
             match (self.0.get(&done.join("/")), pending.is_empty()) {
                 (Some(Entry::Link(id)), _) => {
                     hops += 1;
-                    let target = String::from_utf8(batch.read(id)?).map_err(|_| lost())?;
+                    let Ok(target) = String::from_utf8(batch.read(id)?) else {
+                        return Ok(Blob::UnresolvedLink);
+                    };
                     // Linux gives up after forty links too.
                     if hops > 40 || target.starts_with('/') {
-                        return Err(lost());
+                        return Ok(Blob::UnresolvedLink);
                     }
                     done.pop();
                     pending.extend(target.rsplit('/').map(str::to_owned));
                 }
-                (Some(Entry::File(id)), true) => return Ok(Some(id)),
-                (Some(Entry::Other), true) => return Ok(None),
+                (Some(Entry::File(id)), true) => return Ok(Blob::File(id)),
+                (Some(Entry::Other), true) => return Ok(Blob::Absent),
                 (Some(Entry::Other), false) => {}
-                _ => return Err(lost()),
+                _ => return Ok(Blob::UnresolvedLink),
             }
         }
-        Ok(None)
+        Ok(Blob::Absent)
     }
 }
 

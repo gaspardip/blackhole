@@ -1,9 +1,13 @@
-use blackhole_check::engine::{Rule, registry, run};
+mod common;
+mod trees;
+
+use blackhole_check::engine::{Rule, Run, registry, run};
 use std::{
     collections::BTreeSet,
     fmt::Write,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 fn entries(path: &Path) -> BTreeSet<PathBuf> {
@@ -67,29 +71,93 @@ impl Case {
             rules,
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
-        let Some(expected) = &self.expect else {
-            assert!(hits.is_empty(), "{}", path.display());
-            return;
-        };
-        assert!(!hits.is_empty(), "no finding for {}", path.display());
-        let mut actual = String::new();
-        for hit in hits {
-            if self.directory {
-                write!(actual, "{}:", hit.path).unwrap();
-            }
-            writeln!(actual, "{}:{}", hit.line, hit.col).unwrap();
-        }
-        if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
-            fs::write(expected, actual).unwrap();
-        } else {
-            assert_eq!(
-                fs::read_to_string(expected).unwrap(),
-                actual,
-                "{}",
-                path.display()
-            );
-        }
+        verify_locations(
+            self.expect.as_deref(),
+            path,
+            hits.into_iter().map(|hit| {
+                let prefix = if self.directory {
+                    hit.path
+                } else {
+                    String::new()
+                };
+                (prefix, hit.line, hit.col)
+            }),
+        );
     }
+}
+
+fn verify_locations(
+    expected: Option<&Path>,
+    path: &Path,
+    hits: impl IntoIterator<Item = (String, usize, usize)>,
+) {
+    let mut actual = String::new();
+    for (name, line, col) in hits {
+        if !name.is_empty() {
+            write!(actual, "{name}:").unwrap();
+        }
+        writeln!(actual, "{line}:{col}").unwrap();
+    }
+    verify_snapshot(expected, path, &actual);
+}
+
+fn verify_snapshot(expected: Option<&Path>, path: &Path, actual: &str) {
+    let Some(expected) = expected else {
+        assert!(actual.is_empty(), "{}: {actual}", path.display());
+        return;
+    };
+    assert!(!actual.is_empty(), "no finding for {}", path.display());
+    if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
+        fs::write(expected, actual).unwrap();
+    } else {
+        assert_eq!(
+            fs::read_to_string(expected).unwrap(),
+            actual,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+fn diff_case(path: &Path, side: &str, rule: &Rule) -> common::Result<()> {
+    let expected = (side == "reject").then(|| path.join("expect"));
+    let mut required = BTreeSet::from([path.join("base"), path.join("head")]);
+    required.extend(expected.iter().cloned());
+    assert_eq!(entries(path), required, "{}", path.display());
+
+    let temp = tempfile::tempdir()?;
+    let (base, head) = trees::revisions(path, temp.path())?;
+    let out = Command::new(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(temp.path())
+        .args([
+            "ci",
+            "--base",
+            &base,
+            "--head",
+            &head,
+            "--today",
+            "2026-11-18",
+        ])
+        .output()?;
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(expected.is_some())),
+        "{}: {out:?}",
+        path.display()
+    );
+    assert!(out.stderr.is_empty(), "{}: {out:?}", path.display());
+
+    let stdout = String::from_utf8(out.stdout)?;
+    let marker = format!(" {} ", rule.id);
+    let mut actual = String::new();
+    for (location, note) in stdout.lines().filter_map(|line| line.split_once(&marker)) {
+        if path.ends_with("rename-fewer-cases") {
+            assert_eq!(note, "test cases 3 -> 2, assertions 3 -> 2");
+        }
+        writeln!(actual, "{location}")?;
+    }
+    verify_snapshot(expected.as_deref(), path, &actual);
+    Ok(())
 }
 
 fn verify(rule: &Rule, dir: &Path) {
@@ -115,7 +183,11 @@ fn verify(rule: &Rule, dir: &Path) {
                 assert!(folder.join(name).is_file(), "orphan {}", path.display());
                 continue;
             }
-            Case::load(&path, side).verify(&path, rule);
+            if matches!(rule.run, Run::Diff(_)) {
+                diff_case(&path, side, rule).unwrap();
+            } else {
+                Case::load(&path, side).verify(&path, rule);
+            }
         }
     }
 }

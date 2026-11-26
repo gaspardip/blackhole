@@ -1,5 +1,6 @@
 use crate::{
     config,
+    engine::{self, DiffCtx, DiffFindings, Run},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
@@ -29,6 +30,18 @@ fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
         day,
     )
 }
+
+fn diff_rules(ctx: &mut DiffCtx<'_>) -> io::Result<DiffFindings> {
+    let mut findings = DiffFindings::default();
+    for rule in engine::registry() {
+        if let Run::Diff(check) = rule.run {
+            check(ctx, &mut findings)?;
+        }
+    }
+    engine::sort_findings(&mut findings.removals);
+    Ok(findings)
+}
+
 fn evaluate(
     base: &str,
     head: &str,
@@ -55,23 +68,37 @@ fn evaluate(
     let head_ledger = ledger(&head_tree, &mut batch);
     let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
+    let mut ctx = DiffCtx {
+        base: &base_tree,
+        head: &head_tree,
+        changes: &changes,
+        renames: &verdict::renames(&changes),
+        base_excludes: &base_config.exclude,
+        head_excludes: excludes,
+        approved,
+        batch: &mut batch,
+    };
+    let diff = diff_rules(&mut ctx)?;
     let findings = crate::scan_files(
+        diff.diagnostics,
         head_tree.paths().filter(|p| !excludes.is_match(p)),
-        |path| head_tree.read(path, &mut batch),
+        |path| head_tree.read(path, ctx.batch),
     )?;
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,
             today,
             excludes,
-            changes: &changes,
+            changes: ctx.changes,
             base_ledger: &base_ledger,
             head_ledger: head_ledger.as_ref(),
             base_rows: &base_rows,
             head_rows: head_rows.as_ref(),
             findings: &findings,
+            test_removals: &diff.removals,
         },
         &base_config.guard,
+        ctx.renames,
     )?;
     if let Some(lcov) = &base_config.lcov {
         let delta = crate::coverage::changed(

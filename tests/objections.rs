@@ -48,6 +48,7 @@ fn strict_rows() {
     let row = "core/no-suppression\ta.py\t1\t2026-11-18\t-\treason\n";
     for (from, to) in [
         ("core/no-suppression", "unknown"),
+        ("core/no-suppression", "ts/no-test-removal"),
         ("a.py", "../a.py"),
         ("\t1\t", "\t0\t"),
         ("\t1\t", "\t+1\t"),
