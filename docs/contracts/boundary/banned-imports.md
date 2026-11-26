@@ -65,13 +65,15 @@ Advisory until the resolution cases under Does not catch are addressed. Findings
   (`package-aliases`, the clean `#unused` import). A selected `null` stops
   runtime conditional lookup. TypeScript type lookups continue to later
   conditions (`package_import_conditions_stop_at_null`).
-- Wildcard `imports` keys whose prefix and suffix overlap the specifier
-  (such as `#x*end` against `#xend`) and legacy folder keys can select a
-  different key than Node's precedence rules.
+- A wildcard `imports` key with an empty capture (such as `#x*end`
+  against `#xend`) can select a different target from Node. The rule may
+  also select legacy folder keys that Node skips.
 - In an alias target array, an entry Node rejects as invalid (such as a
   `node:` URL target) is taken instead of falling through to the next entry.
-- A TypeScript `paths` entry for a full alias with a `?` or `#` suffix does
-  not take precedence over `package.json` imports.
+- The rule gives `package.json` imports precedence over a TypeScript
+  `paths` entry for a full alias with a `?` suffix.
+- When several `extends` entries disagree on `verbatimModuleSyntax`,
+  the rule uses the first parent's value. TypeScript uses the last.
 - A standalone `require.resolve(name)` or
   `createRequire(base).resolve(name)`, even with an unknown base or
   dynamic name. A lookup loads nothing (`resolve-only`,
