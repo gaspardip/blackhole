@@ -165,6 +165,42 @@ fn package_import_conditions_stop_at_null() {
 }
 
 #[test]
+fn inline_type_specifiers_load_under_verbatim_module_syntax() {
+    let source = "import { type X } from '#alias';\nexport { type X } from '#alias';\nimport type { Y } from '#alias';\nexport type { Y } from '#alias';";
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            (
+                "package.json",
+                r##"{"imports":{"#alias":{"types":"./ok.d.ts","default":"restricted"}}}"##,
+            ),
+            ("ok.d.ts", "export type X = string; export type Y = string;"),
+            (
+                "base.json",
+                r#"{"compilerOptions":{"verbatimModuleSyntax":true}}"#,
+            ),
+            ("verbatim/tsconfig.json", r#"{"extends":"../base.json"}"#),
+            ("verbatim/a.mts", source),
+            ("ordinary/a.mts", source),
+        ],
+        &[],
+        1,
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains(" boundary/banned-imports "))
+            .collect::<Vec<_>>(),
+        [
+            "verbatim/a.mts:1:24 boundary/banned-imports restricted",
+            "verbatim/a.mts:2:24 boundary/banned-imports restricted",
+        ]
+    );
+}
+
+#[test]
 fn loader_sources_share_the_base_check() {
     for (file, declaration, callee, own_base) in [
         ("a.cjs", "", "require.main.require", false),

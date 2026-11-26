@@ -3,7 +3,7 @@ mod declarations;
 use super::RepositoryPaths;
 use oxc_resolver::{
     FileMetadata, FileSystem, PackageJson, PackageType, ResolveError, ResolveOptions,
-    ResolverGeneric, TsconfigDiscovery,
+    ResolverGeneric, TsConfig, TsconfigDiscovery,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -89,16 +89,22 @@ impl<'a> Reader<'a> {
         file: &Path,
         name: &str,
     ) -> Result<bool, String> {
-        if loader
-            .resolver
-            .find_tsconfig(file)
-            .map_err(|e| e.to_string())?
-            .is_some()
-        {
+        if loader.tsconfig(file)?.is_some() {
             resolve(&loader.aliases, tree, file, name)
         } else {
             Ok(false)
         }
+    }
+    pub(super) fn verbatim_module_syntax(
+        &self,
+        loaders: &Loaders<'_, 'a>,
+        file: &Path,
+    ) -> Result<bool, String> {
+        self.bounded(|| {
+            Ok(loaders.types[0]
+                .tsconfig(file)?
+                .is_some_and(|config| config.compiler_options.verbatim_module_syntax == Some(true)))
+        })
     }
     fn bounded<T>(&self, lookup: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         self.reads.store(0, Ordering::Relaxed);
@@ -250,6 +256,12 @@ type Loader<'tree, 'source> = ResolverGeneric<Tree<'tree, 'source>>;
 pub(super) struct SourceLoader<'tree, 'source> {
     resolver: Loader<'tree, 'source>,
     aliases: Loader<'tree, 'source>,
+}
+
+impl SourceLoader<'_, '_> {
+    fn tsconfig(&self, file: &Path) -> Result<Option<Arc<TsConfig>>, String> {
+        self.resolver.find_tsconfig(file).map_err(|e| e.to_string())
+    }
 }
 
 pub(super) struct Loaders<'tree, 'source> {

@@ -271,21 +271,34 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
             Ok(None)
         }
     });
+    let verbatim = if imports.iter().any(|i| i.verbatim_only) {
+        let reader = repo.tree.reader.expect("repository context has a reader");
+        importer
+            .as_deref()
+            .map_err(Clone::clone)
+            .and_then(|path| reader.verbatim_module_syntax(&repo.loaders, path))
+    } else {
+        Ok(false)
+    };
     let mut last = None;
     for import in &imports {
         ts.take_work(1);
         if last == Some(import.offset) {
             continue;
         }
-        let note = note(
-            repo,
-            import,
-            importer.as_deref(),
-            module.as_ref().copied(),
-            extension,
-            ts_extension,
-        )
-        .unwrap_or_else(Some);
+        let note = match (import.verbatim_only, &verbatim) {
+            (true, Ok(false)) => continue,
+            (true, Err(error)) => Some(error.clone()),
+            _ => note(
+                repo,
+                import,
+                importer.as_deref(),
+                module.as_ref().copied(),
+                extension,
+                ts_extension,
+            )
+            .unwrap_or_else(Some),
+        };
         if let Some(note) = note {
             findings.report(import.offset as usize, Some(&note));
             last = Some(import.offset);

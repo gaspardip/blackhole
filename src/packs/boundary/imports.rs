@@ -72,6 +72,7 @@ pub(super) struct Import {
     pub name: Option<String>,
     pub kind: Kind,
     pub filename_base: Option<PackageType>,
+    pub verbatim_only: bool,
 }
 
 impl Import {
@@ -87,6 +88,7 @@ impl Import {
             name: name.map(str::to_owned),
             kind,
             filename_base: None,
+            verbatim_only: false,
         }
     }
     fn argument<'a>(kinds: &Kinds<'_, 'a>, expr: &'a Expression<'a>, kind: Kind) -> Self {
@@ -130,6 +132,7 @@ fn declaration_readings(
     source: &StringLiteral<'_>,
     kind: impl Fn(bool) -> Kind,
     type_only: bool,
+    can_emit_verbatim: bool,
     bindings: impl Iterator<Item = bool>,
 ) -> impl Iterator<Item = Import> {
     let mut present = [false; 2];
@@ -144,6 +147,12 @@ fn declaration_readings(
         .zip(present)
         .filter(|&(_, present)| present)
         .map(move |(types, _)| Import::literal(source, kind(types)))
+        .chain(
+            (can_emit_verbatim && !type_only && !present[0]).then(|| Import {
+                verbatim_only: true,
+                ..Import::literal(source, Kind::Static)
+            }),
+        )
 }
 
 fn call_use<'a>(kinds: &Kinds<'_, 'a>, c: &'a CallExpression<'a>) -> Option<Import> {
@@ -265,6 +274,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
     let mut imports = Vec::new();
     let kinds = Kinds::new(ctx);
     let exported = type_exports(ctx);
+    let can_emit_verbatim = ctx.program.source_type.is_typescript() && !in_declaration;
     for (id, node) in ctx.nodes_with_ids() {
         let kind = node.kind();
         let start = kind.span().start;
@@ -295,6 +305,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
                     &d.source,
                     |types| Kind::declaration(ctx, types, d.with_clause.as_deref()),
                     d.import_kind.is_type(),
+                    can_emit_verbatim,
                     bindings,
                 ));
                 continue;
@@ -304,6 +315,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
                     &d.source,
                     |types| Kind::declaration(ctx, types, d.with_clause.as_deref()),
                     d.export_kind.is_type(),
+                    can_emit_verbatim,
                     ctx.counted(d.specifiers.iter())
                         .map(|s| s.export_kind.is_type()),
                 ));
@@ -327,6 +339,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
                     &reference.expression,
                     Kind::require_declaration,
                     type_only,
+                    false,
                     [Some(type_only), exported.contains(&id).then_some(true)]
                         .into_iter()
                         .flatten(),
