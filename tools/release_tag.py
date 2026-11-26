@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
+from itertools import count
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -16,7 +17,7 @@ TAG = re.compile(rf"v({NUMBER}\.{NUMBER}\.{NUMBER})(?:-rc\.({NUMBER}))?")
 VERSION_FILES = {"Cargo.toml": "[package]", "Cargo.lock": "[[package]]"}
 
 
-def verify_tag(repo: Path, tag: str, published_prerelease: Callable[[str], bool]) -> str:
+def verify_tag(repo: Path, tag: str, successful_release: Callable[[str, str], bool]) -> str:
     def git_bytes(*args: str) -> bytes:
         return subprocess.check_output(["git", *args], cwd=repo)
 
@@ -66,30 +67,34 @@ def verify_tag(repo: Path, tag: str, published_prerelease: Callable[[str], bool]
         if candidate is None or candidate.group(1) != match.group(1):
             continue
         base = git("rev-parse", f"refs/tags/{rc}^{{commit}}").strip()
-        if ancestor(base, head) and only_version_changes(rc, base, head) and published_prerelease(rc):
+        if ancestor(base, head) and only_version_changes(rc, base, head) and successful_release(rc, base):
             return "latest"
-    raise ValueError("final tag needs a published GitHub prerelease ancestor with a version-only diff")
+    raise ValueError("final tag needs a successfully released candidate ancestor with a version-only diff")
 
 
-def github_prerelease(tag: str) -> bool:
+def github_candidate_succeeded(tag: str, sha: str) -> bool:
     api = os.environ["GITHUB_API_URL"]
     repo = os.environ["GITHUB_REPOSITORY"]
-    request = Request(f"{api}/repos/{repo}/releases/tags/{tag}", headers={
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-    })
-    try:
-        with urlopen(request, timeout=30) as response:
-            release = json.load(response)
-    except HTTPError as error:
-        if error.code == 404:
+    url = f"{api}/repos/{repo}/actions/workflows/release.yml/runs"
+    for page in count(1):
+        request = Request(f"{url}?event=push&head_sha={sha}&status=success&per_page=100&page={page}", headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+        })
+        try:
+            with urlopen(request, timeout=30) as response:
+                runs = json.load(response)["workflow_runs"]
+        except HTTPError as error:
+            raise ValueError(f"GitHub workflow run lookup failed (HTTP {error.code})") from error
+        if any(run["head_branch"] == tag and run["head_sha"] == sha
+               and run["event"] == "push" and run["conclusion"] == "success" for run in runs):
+            return True
+        if len(runs) < 100:
             return False
-        raise ValueError(f"GitHub release lookup failed (HTTP {error.code})") from None
-    return release["tag_name"] == tag and release["prerelease"] is True and release["draft"] is False
 
 
 if __name__ == "__main__":
     try:
-        print(verify_tag(Path.cwd(), sys.argv[1], github_prerelease))
+        print(verify_tag(Path.cwd(), sys.argv[1], github_candidate_succeeded))
     except (ValueError, subprocess.CalledProcessError) as error:
         sys.exit(f"release: {error}")

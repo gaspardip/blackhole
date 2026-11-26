@@ -104,7 +104,7 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
    matching package entry in `Cargo.lock` to `X.Y.Z-rc.N`. After that commit
    lands on `main`, tag it `vX.Y.Z-rc.N` and push the tag. The workflow
    publishes to npm's `next` dist-tag and creates a GitHub prerelease.
-4. After that prerelease is published, change only those two version values to
+4. After that candidate's release workflow succeeds, change only those two version values to
    `X.Y.Z`. Once the promotion commit lands on `main`, tag it `vX.Y.Z` and
    push the tag. The workflow verifies the version-only diff from the
    prerelease and publishes to npm's `latest` dist-tag.
