@@ -257,14 +257,20 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
             .as_array_mut()
             .ok_or_else(invalid)?;
         let matcher = (event != "Stop").then_some(matcher);
-        let legacy = format!("blackhole hook {cmd}");
         let launcher = |root| {
             format!(
                 r#"if root=$({root} 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; exec blackhole hook {cmd}"#
             )
         };
-        let previous = launcher(PREVIOUS_ROOT);
-        let command = launcher(ISOLATED_ROOT);
+        // `core.worktree` can point git elsewhere, so the local binary must sit beside the nearest `.git`.
+        let command = format!(
+            r#"if root=$({ISOLATED_ROOT} 2>/dev/null) && top=$(cd -P -- "$root" && pwd -P) && dir=$(pwd -P) && while [ "$dir" != / ] && [ ! -e "$dir/.git" ] && [ ! -L "$dir/.git" ]; do dir=${{dir%/*}}; dir=${{dir:-/}}; done && {{ [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; }} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; exec blackhole hook {cmd}"#
+        );
+        let known = [
+            format!("blackhole hook {cmd}"),
+            launcher(PREVIOUS_ROOT),
+            launcher(ISOLATED_ROOT),
+        ];
         let mut found = false;
         for group in entries.iter_mut().filter_map(Json::as_object_mut) {
             if group.get("matcher").and_then(Json::as_str) != matcher {
@@ -284,7 +290,7 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                 }
                 let Some(installed) = hook.get_mut("command").filter(|installed| {
                     installed.as_str().is_some_and(|current| {
-                        current == legacy || current == previous || current == command
+                        current == command || known.iter().any(|old| old == current)
                     })
                 }) else {
                     continue;

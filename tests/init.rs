@@ -11,10 +11,22 @@ use tempfile::tempdir;
 
 const HOOK_FILES: [&str; 2] = [".claude/settings.json", ".codex/hooks.json"];
 
-fn previous_launcher(event: &str) -> String {
+const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
+while IFS= read -r name; do
+    [ -z "$name" ] || unset "$name" || exit
+done <<BLACKHOLE_GIT_ENV
+$names
+BLACKHOLE_GIT_ENV
+exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
+
+fn old_launcher(root: &str, event: &str) -> String {
     format!(
-        r#"if root=$(git --no-lazy-fetch rev-parse --show-toplevel 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {event}; fi; exec blackhole hook {event}"#
+        r#"if root=$({root} 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {event}; fi; exec blackhole hook {event}"#
     )
+}
+
+fn previous_launcher(event: &str) -> String {
+    old_launcher("git --no-lazy-fetch rev-parse --show-toplevel", event)
 }
 
 fn init(root: &Path, success: bool) -> String {
@@ -35,6 +47,7 @@ fn installs_and_merges_once() {
                 {"hooks":[
                     {"type":"command","command":"blackhole hook stop"},
                     {"type":"command","command":previous_launcher("stop")},
+                    {"type":"command","command":old_launcher(ISOLATED_ROOT, "stop")},
                     {"type":"command","command":"second"}
                 ]}
             ],
@@ -66,8 +79,9 @@ fn installs_and_merges_once() {
         let stop = &doc["hooks"]["Stop"][1]["hooks"][0]["command"];
         assert_ne!(stop, "blackhole hook stop");
         assert_ne!(stop, &Value::String(previous_launcher("stop")));
+        assert_ne!(stop, &Value::String(old_launcher(ISOLATED_ROOT, "stop")));
         let mut upgraded = original.clone();
-        for index in [0, 1] {
+        for index in [0, 1, 2] {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
         }
         for event in ["PreToolUse", "PostToolUse"] {
@@ -81,6 +95,22 @@ fn installs_and_merges_once() {
         init(root, true);
         assert_eq!(fs::read(p).unwrap(), bytes);
     }
+}
+
+// A PATH directory that holds git and nothing else.
+fn git_only_path() -> tempfile::TempDir {
+    let ambient = tempdir().unwrap();
+    let git = common::command("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(git.status.success());
+    std::os::unix::fs::symlink(
+        String::from_utf8(git.stdout).unwrap().trim_end(),
+        ambient.path().join("git"),
+    )
+    .unwrap();
+    ambient
 }
 
 #[test]
@@ -119,17 +149,7 @@ fn generated_hooks_use_the_checkout_install_or_the_global_binary() {
     );
     assert!(direct.stderr.starts_with(&red));
 
-    let ambient = tempdir().unwrap();
-    let git = common::command("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .unwrap();
-    assert!(git.status.success());
-    symlink(
-        String::from_utf8(git.stdout).unwrap().trim_end(),
-        ambient.path().join("git"),
-    )
-    .unwrap();
+    let ambient = git_only_path();
 
     let local = root.join("node_modules/.bin/blackhole");
     fs::create_dir_all(local.parent().unwrap()).unwrap();
@@ -629,6 +649,69 @@ fn unwritable_stderr_keeps_the_exit_code() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn generated_hooks_skip_the_local_binary_of_another_root() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let outside = tempdir().unwrap();
+    common::git(
+        root,
+        &["config", "core.worktree", outside.path().to_str().unwrap()],
+    )
+    .unwrap();
+    let fake = outside.path().join("node_modules/.bin/blackhole");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(&fake, "#!/bin/sh\n: >\"$0.ran\"\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let ambient = git_only_path();
+    for global in [false, true] {
+        if global {
+            symlink(
+                env!("CARGO_BIN_EXE_blackhole"),
+                ambient.path().join("blackhole"),
+            )
+            .unwrap();
+        }
+        for name in HOOK_FILES {
+            let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+            for (event, input) in [
+                (
+                    "PreToolUse",
+                    json!({"tool_name":"Write","cwd":root,"tool_input":{"file_path":"a.py"}}),
+                ),
+                ("Stop", json!({})),
+            ] {
+                let command = doc["hooks"][event][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap();
+                let output = agent::run_input(
+                    common::command("/bin/sh")
+                        .args(["-c", command])
+                        .current_dir(root)
+                        .env("PATH", ambient.path()),
+                    input.to_string().as_bytes(),
+                    2,
+                    false,
+                );
+                let error = String::from_utf8(output.stderr).unwrap();
+                assert_eq!(error.lines().count(), 1, "{name} {event}: {error}");
+                if global {
+                    assert!(error.contains("checkout root mismatch"), "{error}");
+                }
+                assert!(
+                    !outside
+                        .path()
+                        .join("node_modules/.bin/blackhole.ran")
+                        .exists()
+                );
+            }
+        }
+    }
 }
 
 // Each event ends with init's own guard after the existing groups, which stay as they were.

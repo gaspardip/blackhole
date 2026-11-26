@@ -19,8 +19,9 @@ them.
 Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
 `blackhole hook post-edit` reports findings in the edited files. At the end of
 a turn, `blackhole hook stop` checks the whole repository. The launchers use the
-checkout's executable `node_modules/.bin/blackhole` when available and use
-`blackhole` from PATH otherwise.
+checkout's executable `node_modules/.bin/blackhole` when available and the root
+git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
+With neither, the hook blocks.
 
 Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
 Pre-edit compares the ledger path case-insensitively, but it does not catch
