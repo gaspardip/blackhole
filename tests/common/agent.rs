@@ -8,14 +8,14 @@ use std::{
 /// # Panics
 /// Panics when the process cannot run or returns an unexpected status.
 #[must_use]
-pub fn run(root: &Path, args: &[&str], data: &str, status: i32) -> Output {
+pub fn run(root: &Path, args: &[&str], data: &str, status: i32, partial: bool) -> Output {
     run_input(
         command(env!("CARGO_BIN_EXE_blackhole"))
             .current_dir(root)
             .args(args),
         data.as_bytes(),
         status,
-        false,
+        partial,
     )
 }
 

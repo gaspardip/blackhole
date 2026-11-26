@@ -15,8 +15,7 @@ fn previous_launcher(event: &str) -> String {
 }
 
 fn init(root: &Path, success: bool) -> String {
-    let out = run(root, &["init"], "", if success { 0 } else { 2 });
-    assert_eq!(out.status.success(), success, "{out:?}");
+    let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
     // A run that fails reports no file as written.
     assert!(success || out.stdout.is_empty(), "{out:?}");
     String::from_utf8(if success { out.stdout } else { out.stderr }).unwrap()
@@ -93,7 +92,7 @@ fn generated_hooks_use_the_checkout_install_or_the_global_binary() {
     fs::write(root.join(".gitignore"), "/node_modules/\n").unwrap();
     init(root, true);
     fs::write(root.join("red.py"), "# noqa").unwrap();
-    let red = run(root, &["check", "red.py"], "", 1).stdout;
+    let red = run(root, &["check", "red.py"], "", 1, false).stdout;
     assert!(red.starts_with(b"red.py:1:1 "));
 
     let other = repo();
@@ -179,37 +178,23 @@ fn generated_hooks_use_the_checkout_install_or_the_global_binary() {
 #[test]
 fn invalid_settings_are_preserved() {
     for (file, other) in [
-        (".codex/hooks.json", ".claude/settings.json"),
-        (".claude/settings.json", ".codex/hooks.json"),
+        (HOOK_FILES[0], HOOK_FILES[1]),
+        (HOOK_FILES[1], HOOK_FILES[0]),
     ] {
         let dir = repo();
         let root = dir.path();
         fs::create_dir(root.join(file).parent().unwrap()).unwrap();
-        for (bad, reason) in [
-            ("{", "EOF"),
-            (
-                r#"{"$serde_json::private::Number":"1.25"}"#,
-                "unexpected hooks configuration",
-            ),
-            (
-                r#"{"other":{"\u0024serde_json::private::Number":"1.25"}}"#,
-                "unexpected hooks configuration",
-            ),
-            (
-                r#"{"other":[{"$serde_json::private::RawValue":"hi"}]}"#,
-                "unexpected hooks configuration",
-            ),
-            (r#"{"hooks":[]}"#, "unexpected hooks configuration"),
-            (r#"{"hooks":{"Stop":{}}}"#, "unexpected hooks configuration"),
-            (
-                r#"{"extra":[{"x":1,"\u0078":2}]}"#,
-                "unexpected hooks configuration",
-            ),
-            (
-                r#"{"hooks":{"Stop":[{"hooks":[{"type":"command"}]}]}}"#,
-                "unexpected hooks configuration",
-            ),
-        ] {
+        let invalid = [
+            r#"{"$serde_json::private::Number":"1.25"}"#,
+            r#"{"other":{"\u0024serde_json::private::Number":"1.25"}}"#,
+            r#"{"other":[{"$serde_json::private::RawValue":"hi"}]}"#,
+            r#"{"hooks":[]}"#,
+            r#"{"hooks":{"Stop":{}}}"#,
+            r#"{"extra":[{"x":1,"\u0078":2}]}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command"}]}]}}"#,
+        ];
+        let configuration = invalid.map(|text| (text, "unexpected hooks configuration"));
+        for (bad, reason) in [("{", "EOF")].into_iter().chain(configuration) {
             let p = root.join(file);
             fs::write(&p, bad).unwrap();
             let message = init(root, false);
@@ -243,10 +228,8 @@ fn initializes_empty_repository_and_keeps_first_ledger() {
         ".claude/settings.json",
         ".codex/hooks.json",
     ] {
-        assert_eq!(
-            report.lines().filter(|line| line.ends_with(path)).count(),
-            1
-        );
+        let matches = report.lines().filter(|line| line.ends_with(path));
+        assert_eq!(matches.count(), 1);
     }
     assert_eq!(fs::read(root.join("blackhole.toml")).unwrap(), b"");
     fs::write(root.join("new.py"), "# noqa").unwrap();
@@ -319,13 +302,11 @@ fn initial_ledger_banks_only_allowable_findings() {
         fs::read_to_string(root.join(".blackhole/ledger")).unwrap(),
         "blackhole-ledger 1\ncore/no-suppression\t1\tordinary.py\n"
     );
-    let out = run(root, &["check"], "", 1);
-    assert_eq!(out.status.code(), Some(1));
+    let out = run(root, &["check"], "", 1, false);
     let findings = String::from_utf8(out.stdout).unwrap();
     assert!(findings.contains("core/unparseable"));
     assert!(!findings.contains("ordinary.py"));
-    let stop = run(root, &["hook", "stop"], "{}", 2);
-    assert_eq!(stop.status.code(), Some(2));
+    let stop = run(root, &["hook", "stop"], "{}", 2, false);
     assert!(stop.stderr.starts_with(findings.as_bytes()));
 }
 
