@@ -106,9 +106,9 @@ independently approved head supplies a new limit. See the
 [file-size contract](docs/contracts/boundary/file-size.md) for counting and
 selection details.
 
-`boundary/banned-imports` blocks configured module names and their slash
-subpaths in TypeScript and JavaScript. Use the same `[boundaries]` table for
-both boundary settings.
+`boundary/banned-imports` reports configured module names and their slash
+subpaths in TypeScript and JavaScript as advisory findings that do not change
+the verdict. Use the same `[boundaries]` table for both boundary settings.
 
 ```toml
 [boundaries]
