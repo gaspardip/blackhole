@@ -88,6 +88,30 @@ same tarball by installing offline with scripts disabled and running the CLI.
 After all four pass, the `distribution-<commit SHA>` workflow artifact holds
 the tested npm tarball, verified crate and `SHA256SUMS` for release.
 
+## Releasing
+
+1. Bootstrap once. Publish the first crate by hand with a short-lived
+   crates.io API token and revoke it afterward. Publish the first npm version
+   by hand while logged in. Then configure trusted publishers for both packages
+   with the repository, workflow filename `release.yml` and environment
+   `release`. Allow direct publishing for the npm trusted publisher.
+   [crates.io setup](https://crates.io/docs/trusted-publishing) ·
+   [npm setup](https://docs.npmjs.com/trusted-publishers/)
+2. Before pushing a release tag, create the GitHub `release` environment with
+   a required reviewer. Add `BLACKHOLE_BANNED` as an environment secret.
+3. For a release candidate, set the package version in `Cargo.toml` and the
+   matching package entry in `Cargo.lock` to `X.Y.Z-rc.N`. After that commit
+   lands on `main`, tag it `vX.Y.Z-rc.N` and push the tag. The workflow
+   publishes to npm's `next` dist-tag and creates a GitHub prerelease.
+4. After that prerelease is published, change only those two version values to
+   `X.Y.Z`. Once the promotion commit lands on `main`, tag it `vX.Y.Z` and
+   push the tag. The workflow verifies the version-only diff from the
+   prerelease and publishes to npm's `latest` dist-tag.
+
+To roll back, the maintainer runs
+`npm dist-tag add @gaspardip/blackhole@<previous> latest` while logged in
+(the configured publisher only publishes) and `cargo yank` for the crate.
+
 ## Repository checks
 
 Advisory rules report findings without affecting the verdict.
