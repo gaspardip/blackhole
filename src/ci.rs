@@ -57,12 +57,13 @@ fn evaluate(
     let mut batch = Batch::start()?;
     let base_config = configuration(&base_tree, &mut batch)?;
     let head_config;
-    let excludes = if approved {
+    let scan_config = if approved {
         head_config = configuration(&head_tree, &mut batch)?;
-        &head_config.exclude
+        &head_config
     } else {
-        &base_config.exclude
+        &base_config
     };
+    let excludes = &scan_config.exclude;
     let base_ledger = ledger(&base_tree, &mut batch)?;
     let base_rows = rows(&base_tree, &mut batch, today)?;
     let head_ledger = ledger(&head_tree, &mut batch);
@@ -80,6 +81,7 @@ fn evaluate(
     };
     let diff = diff_rules(&mut ctx)?;
     let findings = crate::scan_files(
+        scan_config,
         diff.diagnostics,
         head_tree.paths().filter(|p| !excludes.is_match(p)),
         |path| head_tree.read(path, ctx.batch),

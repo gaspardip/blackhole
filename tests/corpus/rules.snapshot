@@ -1,3 +1,6 @@
+rules/boundary/file-size/reject/endings/tree/a.txt:3:1 boundary/file-size 3 lines, limit 2
+rules/boundary/file-size/reject/endings/tree/b.txt:3:1 boundary/file-size 3 lines, limit 2
+rules/boundary/file-size/reject/endings/tree/c.txt:3:1 boundary/file-size 3 lines, limit 2
 rules/core/no-suppression/reject/Containerfile:1:3 core/no-suppression
 rules/core/no-suppression/reject/Dockerfile.dev:1:3 core/no-suppression
 rules/core/no-suppression/reject/Dockerfile:1:3 core/no-suppression

@@ -1,4 +1,5 @@
 use crate::{
+    config::Config,
     git::{Batch, Tree},
     verdict::Change,
 };
@@ -10,7 +11,10 @@ use oxc::{
     parser::{ParseOptions, Parser},
     semantic::{AstNode, Semantic, SemanticBuilder},
     span::SourceType,
-    syntax::{line_terminator::is_line_terminator, node::NodeId},
+    syntax::{
+        line_terminator::{LineTerminatorSplitter, is_line_terminator},
+        node::NodeId,
+    },
 };
 use std::{cell::Cell, collections::BTreeMap, io};
 
@@ -44,6 +48,7 @@ pub enum Run {
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
+    Lines,
     ParseError,
 }
 
@@ -172,6 +177,7 @@ pub fn registry() -> &'static [Rule] {
         UNPARSEABLE,
         #[cfg(test)]
         crate::advisory_tests::RULE,
+        crate::packs::boundary::SIZE,
         crate::packs::ts::no_assertionless_tests::RULE,
         crate::packs::ts::no_chained_type_assertions::RULE,
         crate::packs::ts::no_comments::RULE,
@@ -348,6 +354,7 @@ fn collect<'r>(
                     ts.resolution = resolution;
                 }
             }
+            Run::Lines => {}
             Run::ParseError => {
                 if let Some((at, message)) = error {
                     findings.report(*at, Some(message));
@@ -494,9 +501,40 @@ pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
+    run_configured(rules, &Config::default(), files)
+}
+
+/// Applies configured rules to files already selected by the caller.
+///
+/// # Panics
+/// Panics if a rule reports an offset past the end of its input.
+pub fn run_configured<'a>(
+    rules: &[Rule],
+    config: &Config,
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Vec<Finding> {
+    let line_limit = config.max_lines.map(std::num::NonZeroUsize::get);
     let mut result = Vec::new();
     for (path, bytes) in files {
-        run_file(rules, path, bytes, &mut result);
+        let source = Source::new(bytes);
+        // Stripping NULs can join two line terminators into a single CRLF.
+        if let Some(limit) = line_limit
+            && source.malformed.is_none()
+            && let lines = LineTerminatorSplitter::new(&source.decoded).count()
+            && lines > limit
+        {
+            for rule in rules.iter().filter(|r| matches!(r.run, Run::Lines)) {
+                result.push(Finding {
+                    rule: rule.id,
+                    gate: rule.gate,
+                    path: path.to_owned(),
+                    line: limit + 1,
+                    col: 1,
+                    note: Some(format!("{lines} lines, limit {limit}")),
+                });
+            }
+        }
+        run_file(rules, path, &source, &mut result);
     }
     sort_findings(&mut result);
     result
@@ -507,15 +545,14 @@ pub fn run<'a>(
 #[must_use]
 pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
-    let work = run_file(rules, path, bytes, &mut findings);
+    let work = run_file(rules, path, &Source::new(bytes), &mut findings);
     sort_findings(&mut findings);
     (findings, work)
 }
 
-fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
-    let source = Source::new(bytes);
+fn run_file(rules: &[Rule], path: &str, source: &Source, result: &mut Vec<Finding>) -> u64 {
     let (hits, work) = match source_type(path) {
-        Some(kind) => parsed_hits(rules, path, &source, kind)
+        Some(kind) => parsed_hits(rules, path, source, kind)
             .unwrap_or_else(|error| (collect(rules, path, source.text(), Err(&error)), 0)),
         None => (collect(rules, path, source.text(), Ok(None)), 0),
     };

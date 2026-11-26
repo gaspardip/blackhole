@@ -92,6 +92,20 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
 
 Advisory rules report findings without affecting the verdict.
 
+`boundary/file-size` reports files that exceed a repository-wide line limit.
+Set a positive integer in the root `blackhole.toml` to enable the limit.
+
+```toml
+[boundaries]
+max-lines = 500
+```
+
+The limit applies to decoded text, including generated files within the scan.
+Root `exclude` patterns apply. In CI, the base limit applies until an
+independently approved head supplies a new limit. See the
+[file-size contract](docs/contracts/boundary/file-size.md) for counting and
+selection details.
+
 `blackhole ci` requires the existing independent head approval for changes to
 conventional TypeScript, lint, formatter, test, coverage and Git hook configs,
 including `package.json` and conventional local ESLint rule directories. For
