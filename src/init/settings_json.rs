@@ -2,13 +2,14 @@ use serde::{
     de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor},
     ser::{Serialize, SerializeMap, Serializer},
 };
-use serde_json::Value;
-use std::{collections::HashSet, fmt};
+use serde_json::{Number, Value};
+use std::{collections::HashSet, fmt, iter};
 
 pub(super) enum Json {
     Object(Object),
     Array(Vec<Self>),
     Scalar(Value),
+    Number(String),
 }
 
 #[derive(Default)]
@@ -19,8 +20,15 @@ impl Object {
         self.0.iter().find(|(name, _)| name == key).map(|(_, v)| v)
     }
 
-    pub(super) fn values(&self) -> impl Iterator<Item = &Json> {
-        self.0.iter().map(|(_, v)| v)
+    pub(super) fn get_mut(&mut self, key: &str) -> Option<&mut Json> {
+        self.0
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, v)| v)
+    }
+
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&str, &Json)> {
+        self.0.iter().map(|(key, value)| (key.as_str(), value))
     }
 
     pub(super) fn entry(&mut self, key: &str, default: impl FnOnce() -> Json) -> &mut Json {
@@ -34,6 +42,56 @@ impl Object {
 }
 
 impl Json {
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        let mut doc: Self = serde_json::from_slice(bytes)?;
+        let mut tokens = number_tokens(bytes);
+        doc.restore_numbers(&mut tokens);
+        Ok(doc)
+    }
+
+    fn restore_numbers<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a [u8]>) {
+        match self {
+            Self::Object(Object(entries)) => {
+                for (_, value) in entries {
+                    value.restore_numbers(tokens);
+                }
+            }
+            Self::Array(items) => {
+                for value in items {
+                    value.restore_numbers(tokens);
+                }
+            }
+            Self::Number(token) => {
+                *token = String::from_utf8_lossy(tokens.next().expect("validated JSON number"))
+                    .into_owned();
+            }
+            Self::Scalar(_) => {}
+        }
+    }
+
+    pub(super) fn is_null(&self) -> bool {
+        matches!(self, Self::Scalar(Value::Null))
+    }
+
+    pub(super) fn is_bool(&self) -> bool {
+        matches!(self, Self::Scalar(Value::Bool(_)))
+    }
+
+    pub(super) fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Number(token) if token != "-0" => token.parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub(super) fn is_toml_value(&self) -> bool {
+        match self {
+            Self::Array(values) => values.iter().all(Self::is_toml_value),
+            Self::Object(values) => values.entries().all(|(_, value)| value.is_toml_value()),
+            _ => !self.is_null() && self.as_u64().is_none_or(|n| i64::try_from(n).is_ok()),
+        }
+    }
+
     pub(super) fn object(entries: impl IntoIterator<Item = (&'static str, Self)>) -> Self {
         Self::Object(Object(
             entries
@@ -87,6 +145,10 @@ impl Serialize for Json {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Scalar(value) => value.serialize(serializer),
+            // The JSON parser validated these tokens before their original spellings were restored.
+            Self::Number(token) => {
+                Number::from_string_unchecked(token.clone()).serialize(serializer)
+            }
             Self::Array(items) => items.serialize(serializer),
             Self::Object(object) => {
                 let mut map = serializer.serialize_map(Some(object.0.len()))?;
@@ -119,11 +181,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
         let mut entries = Vec::new();
         while let Some(key) = map.next_key::<Key>()? {
             let Key::Object(key) = key else {
-                let token: String = map.next_value()?;
-                let number = token
-                    .parse::<serde_json::Number>()
-                    .map_err(A::Error::custom)?;
-                return Ok(Json::Scalar(Value::Number(number)));
+                return map.next_value().map(Json::Number);
             };
             if !keys.insert(key.clone()) {
                 return Err(A::Error::custom(super::INVALID_HOOKS));
@@ -154,11 +212,11 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_i64<E>(self, value: i64) -> Result<Json, E> {
-        Ok(Json::Scalar(Value::from(value)))
+        Ok(Json::Number(value.to_string()))
     }
 
     fn visit_u64<E>(self, value: u64) -> Result<Json, E> {
-        Ok(Json::Scalar(Value::from(value)))
+        Ok(Json::Number(value.to_string()))
     }
 }
 
@@ -190,4 +248,34 @@ impl<'de> Visitor<'de> for KeyVisitor {
     fn visit_borrowed_str<E: serde::de::Error>(self, _: &'de str) -> Result<Key, E> {
         Ok(Key::Number)
     }
+}
+
+// The parser normalizes exponent spellings, so recover number tokens from the already validated input.
+fn number_tokens(input: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut i = 0;
+    iter::from_fn(move || {
+        while let Some(&byte) = input.get(i) {
+            let start = i;
+            i += 1;
+            match byte {
+                b'"' => {
+                    while input[i] != b'"' {
+                        i += if input[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+                b'-' | b'0'..=b'9' => {
+                    while matches!(
+                        input.get(i),
+                        Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                    ) {
+                        i += 1;
+                    }
+                    return Some(&input[start..i]);
+                }
+                _ => {}
+            }
+        }
+        None
+    })
 }

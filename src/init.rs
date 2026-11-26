@@ -1,6 +1,6 @@
 mod settings_json;
 
-use settings_json::Json;
+use settings_json::{Json, Object};
 use std::{
     io::{self, Write},
     path::Path,
@@ -103,7 +103,7 @@ fn settings<'a>(root: &Path, path: &'a str, matcher: &str) -> io::Result<Setting
     let read = || {
         let entered = crate::enter(root, dir, false)?;
         let previous = crate::policy(entered, name)?;
-        let merged = merge(previous.as_deref(), matcher)?;
+        let merged = merge(previous.as_deref(), matcher, path == CODEX)?;
         Ok::<_, io::Error>(Settings {
             path,
             previous,
@@ -113,46 +113,132 @@ fn settings<'a>(root: &Path, path: &'a str, matcher: &str) -> io::Result<Setting
     read().map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
 }
 
-fn valid_groups(groups: &Json) -> bool {
+fn optional(value: Option<&Json>, valid: impl FnOnce(&Json) -> bool) -> bool {
+    value.is_none_or(|value| value.is_null() || valid(value))
+}
+
+fn string(value: &Json) -> bool {
+    value.as_str().is_some()
+}
+
+fn valid_hook(hook: &Json, codex: bool) -> bool {
+    let Some(hook) = hook.as_object() else {
+        return false;
+    };
+    let kind = hook.get("type").and_then(Json::as_str);
+    if !codex {
+        return kind
+            .is_some_and(|kind| kind != "command" || hook.get("command").is_some_and(string));
+    }
+    let valid_timeout = || optional(hook.get("timeout"), |value| value.as_u64().is_some());
+    let valid_status = || optional(hook.get("statusMessage"), string);
+    match kind {
+        Some("command") => {
+            hook.get("command").is_some_and(string)
+                && optional(
+                    hook.get("commandWindows")
+                        .or_else(|| hook.get("command_windows")),
+                    string,
+                )
+                && !(hook.get("commandWindows").is_some() && hook.get("command_windows").is_some())
+                && valid_timeout()
+                && valid_status()
+                && hook.get("async").is_none_or(Json::is_bool)
+                && optional(hook.get("additionalContextLimit"), |value| {
+                    value.as_u64().is_some_and(|n| usize::try_from(n).is_ok())
+                })
+        }
+        Some("mcp_tool") => {
+            hook.get("server").is_some_and(string)
+                && hook.get("tool").is_some_and(string)
+                && hook
+                    .get("input")
+                    .is_none_or(|value| value.as_object().is_some() && value.is_toml_value())
+                && valid_timeout()
+                && valid_status()
+        }
+        Some("prompt" | "agent") => true,
+        _ => false,
+    }
+}
+
+fn valid_groups(groups: &Json, codex: bool) -> bool {
     groups.as_array().is_some_and(|groups| {
         groups.iter().all(|group| {
             let Some(group) = group.as_object() else {
                 return false;
             };
-            group
-                .get("matcher")
-                .is_none_or(|matcher| matcher.as_str().is_some())
-                && group
-                    .get("hooks")
-                    .and_then(Json::as_array)
-                    .is_some_and(|hooks| {
-                        hooks.iter().all(|hook| {
-                            let Some(hook) = hook.as_object() else {
-                                return false;
-                            };
-                            hook.get("type").and_then(Json::as_str).is_some_and(|kind| {
-                                kind != "command"
-                                    || hook.get("command").and_then(Json::as_str).is_some()
-                            })
-                        })
-                    })
+            let matcher = group.get("matcher");
+            let valid_matcher = if codex {
+                optional(matcher, string)
+            } else {
+                matcher.is_none_or(string)
+            };
+            valid_matcher
+                && match group.get("hooks") {
+                    None => codex,
+                    Some(hooks) => hooks
+                        .as_array()
+                        .is_some_and(|hooks| hooks.iter().all(|hook| valid_hook(hook, codex))),
+                }
         })
     })
 }
 
-fn merge(bytes: Option<&[u8]>, matcher: &str) -> io::Result<Option<Vec<u8>>> {
+fn codex_keys(doc: &Object) -> io::Result<()> {
+    for (key, value) in doc.entries() {
+        match key {
+            "hooks" => {}
+            "description" if value.is_null() || string(value) => {}
+            "description" => return Err(io::Error::other(INVALID_HOOKS)),
+            _ => {
+                let key = crate::diagnostic_text(key);
+                return Err(io::Error::other(format!("unknown top-level key {key}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Codex validates known events and ignores unrecognized entries in the event map.
+fn codex_event(event: &str) -> bool {
+    matches!(
+        event,
+        "PreModelRequest"
+            | "PostModelRequest"
+            | "PreToolUse"
+            | "PermissionRequest"
+            | "PostToolUse"
+            | "PreCompact"
+            | "PostCompact"
+            | "SessionStart"
+            | "SessionEnd"
+            | "UserPromptSubmit"
+            | "SubagentStart"
+            | "SubagentStop"
+            | "Stop"
+            | "Interrupt"
+    )
+}
+
+fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<Vec<u8>>> {
     let mut doc = match bytes {
-        Some(bytes) => serde_json::from_slice::<Json>(bytes)?,
+        Some(bytes) => Json::parse(bytes)?,
         None => Json::object([]),
     };
     let invalid = || io::Error::other(INVALID_HOOKS);
-    let hooks = doc
-        .as_object_mut()
-        .ok_or_else(invalid)?
+    let doc_object = doc.as_object_mut().ok_or_else(invalid)?;
+    if codex {
+        codex_keys(doc_object)?;
+    }
+    let hooks = doc_object
         .entry("hooks", || Json::object([]))
         .as_object_mut()
         .ok_or_else(invalid)?;
-    if !hooks.values().all(valid_groups) {
+    if !hooks
+        .entries()
+        .all(|(event, groups)| (codex && !codex_event(event)) || valid_groups(groups, codex))
+    {
         return Err(invalid());
     }
     let mut changed = false;
@@ -179,10 +265,9 @@ fn merge(bytes: Option<&[u8]>, matcher: &str) -> io::Result<Option<Vec<u8>>> {
             if group.get("matcher").and_then(Json::as_str) != matcher {
                 continue;
             }
-            let commands = group
-                .entry("hooks", || Json::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(invalid)?;
+            let Some(commands) = group.get_mut("hooks").and_then(Json::as_array_mut) else {
+                continue;
+            };
             for hook in commands.iter_mut().filter_map(Json::as_object_mut) {
                 if hook.get("type").and_then(Json::as_str) != Some("command") {
                     continue;

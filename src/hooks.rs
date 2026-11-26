@@ -28,10 +28,10 @@ pub fn run(event: Event) -> ExitCode {
                 "blackhole: {}",
                 crate::diagnostic_text(&error.to_string())
             );
-            if matches!(event, Event::PreEdit) && crate::files::root().is_ok() {
-                ExitCode::from(2)
-            } else {
-                ExitCode::FAILURE
+            match event {
+                Event::PreEdit if crate::files::root().is_ok() => ExitCode::from(2),
+                Event::Stop if crate::files::in_checkout() => ExitCode::from(2),
+                _ => ExitCode::FAILURE,
             }
         }
     }
@@ -111,21 +111,34 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         return edits.check(&root, out);
     }
     let ledger = root.join(crate::files::LEDGER_PATH);
+    let mut seen = None;
+    let protected = resolve(&ledger, &mut seen)?;
     let identity = if ledger.try_exists()? {
         crate::files::identity(&ledger)
     } else {
         None
     };
-    let matches_ledger =
+    let same_file =
         |path: &Path| identity.is_some_and(|id| crate::files::identity(path) == Some(id));
-    let mut seen = None;
+    let matches_protected = |p: &Path| p == ledger || protected.as_deref() == Some(p);
+    let mut alternate = None;
     for name in &names {
         let path = cwd.join(name);
         let physical = resolve(&path, &mut seen)?;
+        // A missing parent followed by `..` does not name a writable destination.
+        let reachable = physical.as_ref().is_some_and(|p| {
+            !p.components()
+                .any(|part| part == std::path::Component::ParentDir)
+        });
         if physical
-            .as_ref()
-            .is_some_and(|p| p == &ledger || matches_ledger(p))
-            || edits.normalized(name).any(|p| matches_ledger(&p))
+            .as_deref()
+            .is_some_and(|p| matches_protected(p) || same_file(p))
+            || edits.normalized(name).any(|p| {
+                same_file(&p)
+                    || (reachable
+                        && resolve(&p, &mut alternate)
+                            .is_ok_and(|real| real.as_deref().is_some_and(matches_protected)))
+            })
         {
             return Err(io::Error::other(
                 "The ledger only changes through blackhole ledger. Fix code to shrink it, or file an exception with blackhole object.",
@@ -199,8 +212,11 @@ impl EditNames<'_> {
 
     fn check(&self, root: &Path, out: &mut HookOutput<'_>) -> io::Result<bool> {
         let policy = crate::Policy::load(root)?;
-        let (selected, written) = self.validate(root, policy.paths())?;
-        let paths = select(root, selected, &written)?;
+        let (mut selected, written) = self.validate(root, policy.paths())?;
+        if !selected.is_empty() && !written.is_empty() {
+            select_aliases(root, &mut selected, &written, policy.paths())?;
+        }
+        let paths: Vec<_> = selected.into_iter().collect();
         if paths.is_empty() {
             return Ok(false);
         }
@@ -283,65 +299,35 @@ fn resolve(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<Path
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io::Error::new(
             e.kind(),
-            format!("Cannot resolve edit target: {e}"),
+            format!("Cannot resolve edit target {}: {e}", path.display()),
         )),
     }
 }
 
-fn select(
+fn select_aliases<'a>(
     root: &Path,
-    mut selected: HashSet<PathBuf>,
+    selected: &mut HashSet<PathBuf>,
     written: &HashSet<PathBuf>,
-) -> io::Result<Vec<PathBuf>> {
-    if !selected.is_empty() && !written.is_empty() {
-        let identities: HashSet<_> = written
-            .iter()
-            .filter_map(|path| crate::files::identity(path))
-            .collect();
-        let matches =
-            |path: &Path| crate::files::identity(path).is_some_and(|id| identities.contains(&id));
-        let hard_links = written
-            .iter()
-            .any(|path| crate::files::has_hard_links(path));
-        let mut directories = vec![root.to_owned()];
-        let mut linked = Vec::new();
-        while let Some(dir) = directories.pop() {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                if entry.file_name() == ".git" {
-                    continue;
-                }
-                let kind = entry.file_type()?;
-                let path = entry.path();
-                if kind.is_dir() {
-                    directories.push(path);
-                } else if kind.is_symlink() && path.is_dir() {
-                    if hard_links
-                        || fs::canonicalize(&path)
-                            .is_ok_and(|dir| written.iter().any(|target| target.starts_with(&dir)))
-                    {
-                        linked.push(path);
-                    }
-                } else if (kind.is_symlink() || hard_links) && matches(&path) {
-                    selected.insert(path);
-                }
-            }
-        }
-        let names = crate::files::listed(
-            root,
-            linked.iter().filter_map(|p| p.strip_prefix(root).ok()),
-        )?;
-        let mut seen = None;
-        for name in names {
-            let path = root.join(name);
-            if crate::files::resolve(&path, &mut seen).is_ok_and(|real| written.contains(&real))
-                || matches(&path)
-            {
-                selected.insert(path);
-            }
-        }
-    }
-    Ok(selected.into_iter().collect())
+    rows: impl Iterator<Item = &'a str>,
+) -> io::Result<()> {
+    let identities: HashSet<_> = written
+        .iter()
+        .filter_map(|path| crate::files::identity(path))
+        .collect();
+    let mut seen = None;
+    let mut matches = |name: &Path| {
+        let path = root.join(name);
+        crate::files::resolve(&path, &mut seen).is_ok_and(|real| written.contains(&real))
+            || crate::files::identity(&path).is_some_and(|id| identities.contains(&id))
+    };
+    selected.extend(
+        rows.map(Path::new)
+            .filter(|name| matches(name))
+            .map(|name| root.join(name)),
+    );
+    let names = crate::files::listed_matching(root, [Path::new(".")], matches)?;
+    selected.extend(names.into_iter().map(|name| root.join(name)));
+    Ok(())
 }
 
 #[cfg(test)]

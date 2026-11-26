@@ -15,10 +15,6 @@ pub(crate) type Seen = Option<(PathBuf, PathBuf)>;
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
 // Directories that are gone stay as written too, so the ledger rows under them can still be selected.
 pub(crate) fn resolve(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
-    existing(path, seen).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
-}
-
-fn existing(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
     let absent = |e: &io::Error| {
         matches!(
             e.kind(),
@@ -61,15 +57,34 @@ pub(crate) fn root() -> io::Result<PathBuf> {
         .map_err(io::Error::other)?;
     let top = fs::canonicalize(top)?;
     // `core.worktree` can send git anywhere, so its answer must be where the nearest `.git` sits.
+    if let Some(dir) = nearest_checkout(&cwd)?
+        && fs::canonicalize(dir)? == top
+    {
+        return Ok(top);
+    }
+    Err(io::Error::other("checkout root mismatch"))
+}
+
+pub(crate) fn in_checkout() -> bool {
+    env::current_dir().is_ok_and(|cwd| {
+        nearest_checkout(&cwd).is_ok_and(|dir| {
+            dir.is_some_and(|dir| {
+                let git = dir.join(".git");
+                git.is_file() || git.join("HEAD").is_file()
+            })
+        })
+    })
+}
+
+fn nearest_checkout(cwd: &Path) -> io::Result<Option<&Path>> {
     for dir in cwd.ancestors() {
         match dir.join(".git").symlink_metadata() {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
-            Ok(_) if fs::canonicalize(dir)? == top => return Ok(top),
-            Ok(_) => break,
+            Ok(_) => return Ok(Some(dir)),
         }
     }
-    Err(io::Error::other("checkout root mismatch"))
+    Ok(None)
 }
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.
@@ -122,19 +137,6 @@ pub(crate) fn identity(path: &Path) -> Option<PathBuf> {
     fs::canonicalize(path)
         .ok()
         .filter(|target| target.is_file())
-}
-
-pub(crate) fn has_hard_links(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        fs::metadata(path).is_ok_and(|meta| meta.nlink() > 1)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        false
-    }
 }
 
 #[cfg(unix)]
@@ -206,7 +208,10 @@ pub(crate) fn list<'a>(
     let mut seen = None;
     for path in paths {
         let named = cwd.join(path);
-        let real = resolve(&named, &mut seen)?;
+        let real = resolve(&named, &mut seen).map_err(|e| {
+            let path = named.to_string_lossy();
+            io::Error::new(e.kind(), format!("{}: {e}", crate::diagnostic_text(&path)))
+        })?;
         let literal = named.strip_prefix(root).ok().filter(|p| {
             !p.components()
                 .any(|part| part == std::path::Component::ParentDir)
@@ -253,9 +258,14 @@ pub(crate) fn list<'a>(
     })
 }
 
-pub(crate) fn listed<'a>(
+fn listed<'a>(root: &Path, paths: impl IntoIterator<Item = &'a Path>) -> io::Result<Vec<String>> {
+    listed_matching(root, paths, |_| true)
+}
+
+pub(crate) fn listed_matching<'a>(
     root: &Path,
     paths: impl IntoIterator<Item = &'a Path>,
+    mut matches: impl FnMut(&Path) -> bool,
 ) -> io::Result<Vec<String>> {
     let paths: Vec<_> = paths
         .into_iter()
@@ -280,9 +290,20 @@ pub(crate) fn listed<'a>(
                 .args(paths),
         )?;
         for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                if !matches(Path::new(std::ffi::OsStr::from_bytes(name))) {
+                    continue;
+                }
+            }
             let name = std::str::from_utf8(name).map_err(|_| {
                 io::Error::other(format!("path is not valid UTF-8: {}", name.escape_ascii()))
             })?;
+            #[cfg(not(unix))]
+            if !matches(Path::new(name)) {
+                continue;
+            }
             selected.push(name.to_owned());
         }
     }

@@ -199,6 +199,82 @@ fn absent_ledger_aliases_are_not_refused() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn resolved_directory_spellings_cannot_create_the_ledger() {
+    use std::os::unix::fs::symlink;
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join("real/nested")).unwrap();
+    symlink("real", root.join(".blackhole")).unwrap();
+    symlink("real/nested", root.join("alias")).unwrap();
+    for path in [
+        "alias/../ledger",
+        "alias/../.blackhole/ledger",
+        "real/ledger",
+        ".blackhole/ledger",
+    ] {
+        refuses(root, Path::new(path));
+    }
+    assert!(!root.join("real/ledger").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn post_edit_matches_check_with_an_unreadable_ignored_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo();
+    let root = dir.path();
+    let ignored = root.join("ignored");
+    fs::write(root.join(".gitignore"), "/ignored/\n").unwrap();
+    fs::write(root.join("red.py"), "# noqa").unwrap();
+    fs::create_dir(&ignored).unwrap();
+    fs::set_permissions(&ignored, fs::Permissions::from_mode(0o000)).unwrap();
+    let expected = check(root, &[], 1);
+    assert!(expected.starts_with(b"red.py:1:1 "));
+    let actual = hook(root, "post-edit", &edit("Write", "red.py"), 2);
+    fs::set_permissions(&ignored, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn stop_blocks_when_the_checkout_check_cannot_complete() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
+    let error = String::from_utf8(hook(root, "stop", &json!({}), 2)).unwrap();
+    assert!(error.starts_with("blackhole: blackhole.toml:"));
+    assert_eq!(error.lines().count(), 1);
+}
+
+#[test]
+fn stop_blocks_when_git_reports_the_wrong_checkout_root() {
+    let dir = repo();
+    let root = dir.path();
+    let outside = tempdir().unwrap();
+    common::git(
+        root,
+        &["config", "core.worktree", outside.path().to_str().unwrap()],
+    )
+    .unwrap();
+    let error = String::from_utf8(hook(root, "stop", &json!({}), 2)).unwrap();
+    assert!(error.contains("checkout root mismatch"));
+    assert_ne!(hook(outside.path(), "stop", &json!({}), 1), b"");
+}
+
+#[cfg(unix)]
+#[test]
+fn check_resolution_errors_escape_the_path() {
+    let dir = repo();
+    let root = dir.path();
+    std::os::unix::fs::symlink("loop\n", root.join("loop\n")).unwrap();
+    let out = run(root, &["check", "loop\n/file.py"], "", 2, false);
+    assert_eq!(out.stdout, b"");
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.contains(r"loop\n/file.py"), "{error:?}");
+    assert_eq!(error.lines().count(), 1);
+}
+
 #[test]
 fn ignored_tools_outside_git_are_silent() {
     let dir = tempdir().unwrap();

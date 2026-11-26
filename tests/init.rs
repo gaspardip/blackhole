@@ -25,7 +25,7 @@ fn installs_and_merges_once() {
     let dir = repo();
     let root = dir.path();
     let original = json!({
-        "other":42,
+        "description":"Existing settings",
         "hooks":{
             "Stop":[
                 {"hooks":[{"type":"command","command":"first"}]},
@@ -329,6 +329,78 @@ fn settings_keep_number_precision_and_key_order() {
 }
 
 #[test]
+fn settings_keep_original_number_tokens() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".claude")).unwrap();
+    let file = root.join(".claude/settings.json");
+    let prefix = r#"{
+  "values": [
+    1E2,
+    1e2,
+    -0,
+    -0.0,
+    "ignore \"2E3\"",
+    1.50,
+    12345678901234567890123
+  ]"#;
+    fs::write(&file, format!("{prefix}\n}}\n")).unwrap();
+    init(root, true);
+    let text = fs::read_to_string(file).unwrap();
+    assert!(
+        text.starts_with(&format!("{prefix},\n  \"hooks\":")),
+        "{text}"
+    );
+}
+
+#[test]
+fn codex_accepts_null_matcher() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".codex")).unwrap();
+    let file = root.join(HOOK_FILES[1]);
+    let original = json!({"matcher":null,"hooks":[{"type":"command","command":"existing"}]});
+    fs::write(&file, json!({"hooks":{"Stop":[original]}}).to_string()).unwrap();
+    init(root, true);
+    let installed: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(installed["hooks"]["Stop"][0], original);
+    assert_eq!(installed["hooks"]["Stop"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn codex_accepts_omitted_group_hooks() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".codex")).unwrap();
+    let file = root.join(HOOK_FILES[1]);
+    let original = json!({});
+    fs::write(&file, json!({"hooks":{"Stop":[original]}}).to_string()).unwrap();
+    init(root, true);
+    let installed: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    assert_eq!(installed["hooks"]["Stop"][0], original);
+    assert_eq!(installed["hooks"]["Stop"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn codex_rejects_unknown_top_level_keys() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".codex")).unwrap();
+    let file = root.join(HOOK_FILES[1]);
+    let original = r#"{"unexpected\nkey":42}"#;
+    fs::write(&file, original).unwrap();
+    let error = init(root, false);
+    assert!(
+        error.contains(r"unknown top-level key unexpected\nkey"),
+        "{error:?}"
+    );
+    assert_eq!(error.lines().count(), 1);
+    assert_eq!(fs::read_to_string(file).unwrap(), original);
+    assert!(!root.join(HOOK_FILES[0]).exists());
+    assert!(!root.join("blackhole.toml").exists());
+}
+
+#[test]
 fn unrepresentable_names_remain_red() {
     let dir = repo();
     let root = dir.path();
@@ -357,7 +429,7 @@ fn late_init_error_preserves_settings() {
     let root = dir.path();
     invalidate_objections(root);
     fs::create_dir(root.join(".codex")).unwrap();
-    let original = b"{ \"other\": true }";
+    let original = b"{ \"description\": \"Original\" }";
     fs::write(root.join(".codex/hooks.json"), original).unwrap();
     init(root, false);
     assert!(!root.join(".claude/settings.json").exists());
@@ -456,7 +528,7 @@ fn failed_status_write_leaves_complete_install() {
 fn failed_settings_write_removes_temporary() {
     let dir = repo();
     let root = dir.path();
-    let large = json!({"data":"x".repeat(4096)}).to_string();
+    let large = json!({"description":"x".repeat(4096)}).to_string();
     let files = [
         (".claude", "settings.json", "{}"),
         (".codex", "hooks.json", large.as_str()),
