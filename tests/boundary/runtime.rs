@@ -23,6 +23,38 @@ fn named_builtin_member_selected_at_import() {
 }
 
 #[test]
+fn require_cache_allows_only_key_enumeration() {
+    findings(
+        "a.cjs",
+        "Object.keys(require.cache);\nObject['getOwnPropertyNames']((require.cache));\nrequire.cache[path].exports;\nObject.values(require.cache);\nfunction inspect(Object) { Object.keys(require.cache); }",
+        &[(3, 1, UNKNOWN), (4, 15, UNKNOWN), (5, 40, UNKNOWN)],
+    );
+}
+
+#[test]
+fn source_map_support_is_not_a_loader() {
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            (
+                "a.mjs",
+                "import { getSourceMapsSupport } from 'node:module';\ngetSourceMapsSupport();",
+            ),
+            (
+                "b.mjs",
+                "import * as modules from 'node:module';\nmodules.getSourceMapsSupport();",
+            ),
+        ],
+        &[],
+        0,
+    );
+    assert!(out.is_empty(), "{out}");
+}
+
+#[test]
 fn jsx_runtime_members() {
     findings(
         "a.tsx",

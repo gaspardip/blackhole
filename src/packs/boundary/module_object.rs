@@ -93,7 +93,7 @@ impl Value {
             (Module, Some("filename" | "loaded" | "id" | "path" | "isPreloading" | "hot")) => Data,
             (Data | Metadata | UnreadMember | Promise(_), _)
             | (Global | Process, Some(_))
-            | (Class, Some("builtinModules" | "isBuiltin"))
+            | (Class, Some("builtinModules" | "getSourceMapsSupport" | "isBuiltin"))
             | (Resolve, Some("paths"))
             | (Module, Some("exports")) => return None,
             _ => UnreadMember,
@@ -356,10 +356,7 @@ impl<'ctx, 'a> Kinds<'ctx, 'a> {
         }
     }
 
-    fn discarded_global_assign(&self, call: &CallExpression<'_>, span: oxc::span::Span) -> bool {
-        let [target, source] = call.arguments.as_slice() else {
-            return false;
-        };
+    fn object_call(&self, call: &CallExpression<'_>, names: &[&str]) -> bool {
         let Some(method) = values::unwrapped(self.ctx, &call.callee).as_member_expression() else {
             return false;
         };
@@ -368,9 +365,17 @@ impl<'ctx, 'a> Kinds<'ctx, 'a> {
         };
         method
             .static_property_name()
-            .is_some_and(|key| key == "assign")
+            .and_then(oxc::str::JSStr::as_str)
+            .is_some_and(|key| names.contains(&key))
             && object.name == "Object"
             && self.runtime_global(object)
+    }
+
+    fn discarded_global_assign(&self, call: &CallExpression<'_>, span: oxc::span::Span) -> bool {
+        let [target, source] = call.arguments.as_slice() else {
+            return false;
+        };
+        self.object_call(call, &["assign"])
             && target.span().contains_inclusive(span)
             && matches!(
                 source
@@ -393,7 +398,8 @@ impl<'ctx, 'a> Kinds<'ctx, 'a> {
         let is_callee =
             matches!(parent,AstKind::CallExpression(c) if c.callee.span().contains_inclusive(span));
         if value == Value::UnreadMember {
-            return is_callee && self.unknown_base_lookup(nodes.kind(id));
+            return matches!(parent, AstKind::CallExpression(call)
+                if self.unread_member_call(nodes.kind(id), call));
         }
         if let AstKind::VariableDeclarator(v) = parent
             && matches!(
@@ -465,13 +471,24 @@ impl<'ctx, 'a> Kinds<'ctx, 'a> {
             _ => false,
         }
     }
-    fn unknown_base_lookup(&self, node: AstKind<'a>) -> bool {
+    fn unread_member_call(&self, node: AstKind<'a>, call: &CallExpression<'_>) -> bool {
         let (object, key) = match node {
             AstKind::StaticMemberExpression(m) => (&m.object, Some(m.property.name.as_str())),
             AstKind::ComputedMemberExpression(m) => (&m.object, self.values.literal(&m.expression)),
             _ => return false,
         };
-        key == Some("resolve") && self.kind_of(object) == Some(Value::Loader(LoaderBase::Unknown))
+        let span = node.span();
+        match (self.kind_of(object), key) {
+            (Some(Value::Loader(LoaderBase::Unknown)), Some("resolve")) => {
+                call.callee.span().contains_inclusive(span)
+            }
+            (Some(Value::Loader(_)), Some("cache")) => {
+                matches!(call.arguments.as_slice(), [arg]
+                    if arg.as_expression().is_some_and(|arg| arg.span().contains_inclusive(span)))
+                    && self.object_call(call, &["keys", "getOwnPropertyNames"])
+            }
+            _ => false,
+        }
     }
 }
 fn loader_base<'a>(kinds: &Kinds<'_, 'a>, call: &'a CallExpression<'a>) -> LoaderBase {

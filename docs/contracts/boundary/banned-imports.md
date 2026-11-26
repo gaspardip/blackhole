@@ -65,6 +65,11 @@
   `resolve-unknown-base`, `destructuring_a_lookup_does_not_load_anything` and
   `require_resolve_reports_only_when_the_result_reaches_a_loader` in
   `tests/boundary.rs`).
+- Enumerating `require.cache` with `Object.keys` or
+  `Object.getOwnPropertyNames` stays clean. Reading a cached module still
+  reports (`require_cache_allows_only_key_enumeration`).
+- Named and namespace calls to `getSourceMapsSupport` from an allowed
+  `node:module` stay clean (`source_map_support_is_not_a_loader`).
 - Known false positive: destructuring `resolve` from a loader with an
   untrusted base reports “specifier is not a literal”
   (`destructuring_a_lookup_with_an_untrusted_base_reports_at_the_binding`).
