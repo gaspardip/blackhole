@@ -445,6 +445,7 @@ fn walk_target<T>(
             })
             .find_map(|(_, target)| try_target(target)),
         Value::Array(targets) if !targets.is_empty() => targets.iter().find_map(try_target),
+        Value::Null if mode.is_type() => return Ok(Target::Unmatched),
         Value::Array(_) | Value::Null => return Ok(Target::Blocked),
         _ => None,
     };

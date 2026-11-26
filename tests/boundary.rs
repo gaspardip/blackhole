@@ -157,7 +157,10 @@ fn package_import_conditions_stop_at_null() {
         out.lines()
             .filter(|line| line.contains(" boundary/banned-imports "))
             .collect::<Vec<_>>(),
-        ["a.mjs:3:8 boundary/banned-imports restricted"]
+        [
+            "a.mjs:3:8 boundary/banned-imports restricted",
+            "c.mts:1:26 boundary/banned-imports restricted",
+        ]
     );
 }
 
