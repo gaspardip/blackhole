@@ -667,6 +667,42 @@ class Event(Repo):
                 self.assertIn("banned name #1", done.stderr)
 
 
+class Artifacts(Repo):
+    def scan(self, banned: str | None = WORDS) -> subprocess.CompletedProcess[str]:
+        return run(
+            ["artifacts", "archive", "SHA256SUMS", "notes.md"], self.dir, banned=banned
+        )
+
+    def test_clean_artifacts_pass(self) -> None:
+        self.write("archive/src/lib.rs", "fn main() {}")
+        self.write("SHA256SUMS", "abc  package.crate")
+        self.write("notes.md", "Release notes")
+        done = self.scan()
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_artifact_names_contents_checksums_and_notes_are_scanned(self) -> None:
+        self.write("archive/quokka/file", "ordinary")
+        self.write("archive/file", "ordinary\nQuokka")
+        self.write("SHA256SUMS", "abc  quokka.crate")
+        self.write("notes.md", "Quokka")
+        done = self.scan()
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("file name [banned]:1 banned name #1", done.stderr)
+        self.assertIn("file:2 banned name #1", done.stderr)
+        self.assertIn("SHA256SUMS:1 banned name #1", done.stderr)
+        self.assertIn("notes.md:1 banned name #1", done.stderr)
+        self.assertNotIn("quokka", (done.stdout + done.stderr).lower())
+
+    def test_artifacts_require_the_environment_list(self) -> None:
+        self.write("archive/file", "ordinary")
+        self.write("SHA256SUMS", "abc  package.crate")
+        self.write("notes.md", "Release notes")
+        self.write("no-such-list", "quokka\n")
+        for banned in (None, ""):
+            with self.subTest(banned=banned):
+                self.assertEqual(self.scan(banned).returncode, 2)
+
+
 class Errors(Repo):
     def test_a_git_failure_does_not_echo_its_input(self) -> None:
         self.commit("chore: start")

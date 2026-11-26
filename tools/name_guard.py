@@ -43,7 +43,7 @@ WRITERS = frozenset({"OWNER", "COLLABORATOR"})
 STRANGERS = frozenset(
     {"CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "MEMBER", "NONE"}
 )
-USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event"
+USAGE = "usage: name_guard.py staged | message <file> | push | range <base> <head> | tree | text | event | artifacts <directory> <checksums> <notes>"
 
 
 class CannotRun(Exception):
@@ -54,9 +54,11 @@ def normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold()
 
 
-def load_patterns() -> list[re.Pattern[str]]:
+def load_patterns(*, environment_only: bool = False) -> list[re.Pattern[str]]:
     raw = os.environ.get("BLACKHOLE_BANNED")
     if raw is None:
+        if environment_only:
+            raise CannotRun("no banned list: set BLACKHOLE_BANNED")
         path = Path(os.environ.get("BLACKHOLE_BANNED_FILE", DEFAULT_LIST))
         if not path.is_file():
             raise CannotRun("no banned list: set BLACKHOLE_BANNED or create the list file")
@@ -187,6 +189,18 @@ class Guard:
         # Blobs are read by id, so a path git prints differently than we decode it cannot hide one.
         # shortcut: one git process per blob; switch to `cat-file --batch` when the hook gets slow.
         self.scan(f"{origin}{entry.path}", decode(git("cat-file", "blob", entry.blob)))
+
+    def artifact(self, path: Path, name: str) -> None:
+        self.name("file name", name)
+        if path.is_symlink():
+            raise CannotRun("artifact contains a symbolic link")
+        if path.is_dir():
+            for child in sorted(path.iterdir()):
+                self.artifact(child, f"{name}/{child.name}")
+        elif path.is_file():
+            self.scan(name, decode(path.read_bytes()))
+        else:
+            raise CannotRun("artifact entry is not a regular file or directory")
 
     def env_text(self) -> None:
         for key in sorted(os.environ):
@@ -328,7 +342,7 @@ class Guard:
 
 
 def run(argv: list[str]) -> int:
-    guard = Guard(load_patterns())
+    guard = Guard(load_patterns(environment_only=argv[:1] == ["artifacts"]))
     match argv:
         case ["staged"]:
             guard.staged()
@@ -343,6 +357,16 @@ def run(argv: list[str]) -> int:
             guard.tree()
         case ["text"]:
             guard.env_text()
+        case ["artifacts", directory, checksums, notes]:
+            root = Path(directory)
+            if root.is_symlink() or not root.is_dir():
+                raise CannotRun("missing extracted artifact directory")
+            for child in sorted(root.iterdir()):
+                guard.artifact(child, child.name)
+            for path in map(Path, (checksums, notes)):
+                if path.is_symlink() or not path.is_file():
+                    raise CannotRun("missing artifact metadata file")
+                guard.artifact(path, path.name)
         case ["event"]:
             guard.event(*load_event())
         case _:
