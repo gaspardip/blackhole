@@ -108,7 +108,7 @@ fn config_retries<'a>(
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
-    for n in ctx.semantic.nodes().iter() {
+    for n in ctx.nodes() {
         match n.kind() {
             AstKind::ExportDefaultDeclaration(export)
                 if super::config_responses::config(ctx.path) =>

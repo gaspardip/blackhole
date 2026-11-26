@@ -11,7 +11,7 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         let start = match node.kind() {
             AstKind::TSNonNullExpression(n) => {
                 findings.report(n.span.end as usize - 1, None);

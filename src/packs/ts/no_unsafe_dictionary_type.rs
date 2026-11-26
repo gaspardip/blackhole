@@ -31,7 +31,7 @@ pub(super) fn check_with_resolution(
 ) {
     let nodes = ctx.semantic.nodes();
     let mut dictionaries = std::collections::HashMap::new();
-    for (id, node) in nodes.iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         resolution.begin_candidate();
         let kind = node.kind();
         if let AstKind::TSIndexSignature(n) = kind {
@@ -56,7 +56,7 @@ pub(super) fn check_with_resolution(
             continue;
         }
         let mut needs_alias = resolution.is_bare_alias_use(ctx, kind);
-        let hidden = nodes.ancestor_ids(id).any(|id| {
+        let hidden = ctx.counted(nodes.ancestor_ids(id)).any(|id| {
             let parent = nodes.kind(id);
             if matches!(parent, AstKind::TSTypeAliasDeclaration(_)) {
                 needs_alias = false;

@@ -102,7 +102,7 @@ fn delegates<'a>(ctx: &TsCtx<'a>, f: &'a Function<'a>, original: SymbolId) -> bo
 pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut saved = Vec::new();
     let mut assignments = Vec::new();
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         match node.kind() {
             AstKind::VariableDeclarator(v) => {
                 if let Some(m) = v.init.as_ref().and_then(Expression::get_member_expr)

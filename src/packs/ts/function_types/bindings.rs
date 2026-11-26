@@ -83,9 +83,7 @@ impl<T: Copy> ConstBindings<T> {
             };
             var.kind == VariableDeclarationKind::Const
                 && ctx
-                    .semantic
-                    .scoping()
-                    .get_resolved_references(symbol)
+                    .counted(ctx.semantic.scoping().get_resolved_references(symbol))
                     .all(|r| !r.is_write())
         })
     }

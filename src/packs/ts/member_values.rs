@@ -37,7 +37,7 @@ struct KeyIds<'a> {
 
 impl<'a> KeyIds<'a> {
     fn intern(&mut self, ctx: &TsCtx<'a>, key: JSStr<'a>) -> Option<usize> {
-        if !ctx.resolution.take_string_work(key.len()) {
+        if !ctx.take_string_work(key.len()) {
             return None;
         }
         // Retain only fixed-size hashes in the table so growth cannot reread the keys.
@@ -45,14 +45,11 @@ impl<'a> KeyIds<'a> {
         let head = self.heads.get(&hash).copied();
         let mut candidate = head;
         while let Some(id) = candidate {
-            if !ctx.resolution.take_work(1) {
+            if !ctx.take_work(1) {
                 return None;
             }
             let (stored, next) = self.entries[id];
-            if ctx
-                .resolution
-                .same_string_bytes(stored.as_bytes(), key.as_bytes())
-            {
+            if super::same_string_bytes(ctx, stored.as_bytes(), key.as_bytes()) {
                 return Some(id);
             }
             candidate = next;
@@ -112,7 +109,7 @@ pub(in crate::packs::ts) fn const_initializer<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<&'a Expression<'a>> {
-    ctx.resolution.record_work(1);
+    ctx.record_work(1);
     if blocks_identifier_resolution(ctx, id.node_id.get()) {
         return None;
     }
@@ -138,8 +135,7 @@ fn blocks_identifier_resolution(ctx: &TsCtx<'_>, id: NodeId) -> bool {
 
 fn has_eval_mention(ctx: &TsCtx<'_>) -> bool {
     *ctx.resolution.eval_mention.get_or_init(|| {
-        ctx.semantic.nodes().iter().any(|node| {
-            ctx.resolution.record_work(1);
+        ctx.nodes().any(|node| {
             let name = match node.kind() {
                 AstKind::IdentifierReference(id) => Some(id.name.as_js_str()),
                 AstKind::IdentifierName(id) => Some(id.name.as_js_str()),
@@ -151,7 +147,7 @@ fn has_eval_mention(ctx: &TsCtx<'_>) -> bool {
                 AstKind::TemplateLiteral(template) => template.single_quasi(),
                 _ => None,
             };
-            name.is_some_and(|name| ctx.resolution.same_string_bytes(name.as_bytes(), b"eval"))
+            name.is_some_and(|name| super::same_string_bytes(ctx, name.as_bytes(), b"eval"))
         })
     })
 }
@@ -165,8 +161,7 @@ fn inside_with(ctx: &TsCtx<'_>, id: NodeId) -> bool {
         let scoping = ctx.semantic.scoping();
         let mut inside = Vec::with_capacity(scoping.scopes_len());
         // Oxc assigns scope IDs in parent-first order.
-        for scope in scoping.scope_descendants_from_root() {
-            ctx.resolution.record_work(1);
+        for scope in ctx.counted(scoping.scope_descendants_from_root()) {
             let inherited = scoping
                 .scope_parent_id(scope)
                 .is_some_and(|parent| inside[parent.index()]);
@@ -207,15 +202,15 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
     };
     let scope = ctx.semantic.scoping();
     if !is_local(ctx, sym)
-        || !scope.get_resolved_references(sym).all(|reference| {
-            ctx.resolution.take_work(1) && readonly_member(ctx, reference.node_id())
-        })
+        || !ctx
+            .counted(scope.get_resolved_references(sym))
+            .all(|reference| ctx.take_work(1) && readonly_member(ctx, reference.node_id()))
     {
         return None;
     }
     let mut fields = HashMap::new();
     for field in &object.properties {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         let ObjectPropertyKind::ObjectProperty(field) = field else {
@@ -231,11 +226,11 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
                 PropertyKey::BigIntLiteral(_) => return None,
                 PropertyKey::NumericLiteral(number) => plain_decimal_key(ctx, number)?,
                 PropertyKey::RegExpLiteral(regex) => {
-                    if !ctx.resolution.take_string_work(regex.span.size() as usize) {
+                    if !ctx.take_string_work(regex.span.size() as usize) {
                         return None;
                     }
                     let name = field.key.static_name()?;
-                    if !ctx.resolution.take_string_work(name.as_js_str().len()) {
+                    if !ctx.take_string_work(name.as_js_str().len()) {
                         return None;
                     }
                     name.into_js_str_in(&ctx.arena)
@@ -243,10 +238,7 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
                 _ => field.key.static_name()?.into_js_str_in(&ctx.arena),
             }
         };
-        if ctx
-            .resolution
-            .same_string_bytes(key.as_bytes(), b"__proto__")
-        {
+        if super::same_string_bytes(ctx, key.as_bytes(), b"__proto__") {
             return None;
         }
         fields.insert(ctx.resolution.member_values.key_id(ctx, key)?, &field.value);
@@ -258,7 +250,7 @@ fn plain_decimal_key<'a>(ctx: &TsCtx<'_>, number: &NumericLiteral<'a>) -> Option
     let raw = number.raw?;
     if raw.len() > 16
         || !(0.0..9_007_199_254_740_992.0).contains(&number.value)
-        || !ctx.resolution.take_string_work(raw.len())
+        || !ctx.take_string_work(raw.len())
     {
         return None;
     }
@@ -273,9 +265,7 @@ fn plain_decimal_key<'a>(ctx: &TsCtx<'_>, number: &NumericLiteral<'a>) -> Option
 fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     let nodes = ctx.semantic.nodes();
     let mut child = nodes.kind(id).span();
-    let mut parents = nodes
-        .ancestors(id)
-        .take_while(|_| ctx.resolution.take_work(1));
+    let mut parents = nodes.ancestors(id).take_while(|_| ctx.take_work(1));
     let Some(member) = parents.find(|node| !transparent(&node.kind())) else {
         return false;
     };

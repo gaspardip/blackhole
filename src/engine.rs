@@ -1,11 +1,13 @@
+use std::cell::Cell;
+
 use oxc::{
     allocator::Allocator,
     ast::ast::{Comment, Program},
     diagnostics::{LabeledSpan, OxcDiagnostic},
     parser::{ParseOptions, Parser},
-    semantic::{Semantic, SemanticBuilder},
+    semantic::{AstNode, Semantic, SemanticBuilder},
     span::SourceType,
-    syntax::line_terminator::is_line_terminator,
+    syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
 
 pub enum Family {
@@ -47,6 +49,7 @@ pub struct FileCtx<'a> {
 }
 
 pub struct TsCtx<'a> {
+    work: Cell<u64>,
     pub(crate) arena: &'a Allocator,
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
@@ -54,6 +57,48 @@ pub struct TsCtx<'a> {
     pub program: &'a Program<'a>,
     pub semantic: Semantic<'a>,
     pub comments: &'a [Comment],
+}
+
+impl<'a> TsCtx<'a> {
+    pub(crate) fn record_work(&self, steps: usize) {
+        self.work.set(self.work.get().saturating_add(steps as u64));
+    }
+
+    pub(crate) fn record_string_work(&self, bytes: usize) {
+        self.record_work(bytes.max(1));
+    }
+
+    pub(crate) fn take_work(&self, steps: usize) -> bool {
+        self.record_work(steps);
+        self.resolution.take_work(steps)
+    }
+
+    pub(crate) fn take_string_work(&self, bytes: usize) -> bool {
+        self.record_string_work(bytes);
+        self.resolution.take_work(bytes.max(1))
+    }
+
+    pub(crate) fn counted<I: Iterator>(
+        &self,
+        items: I,
+    ) -> std::iter::Inspect<I, impl FnMut(&I::Item)> {
+        items.inspect(|_| self.record_work(1))
+    }
+
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = &AstNode<'a>> {
+        self.counted(self.semantic.nodes().iter())
+    }
+
+    pub(crate) fn nodes_with_ids(&self) -> impl Iterator<Item = (NodeId, &AstNode<'a>)> {
+        self.nodes().map(|node| (node.id(), node))
+    }
+
+    pub(crate) fn bounded_nodes(&self) -> impl Iterator<Item = &AstNode<'a>> {
+        self.semantic
+            .nodes()
+            .iter()
+            .take_while(|_| self.take_work(1))
+    }
 }
 
 #[derive(Default)]
@@ -210,6 +255,7 @@ fn parse<'a>(
         return Err(diagnostic(error));
     }
     Ok(TsCtx {
+        work: Cell::new(0),
         arena,
         resolution: crate::packs::ts::values::Resolution::default(),
         path,
@@ -230,7 +276,6 @@ fn source_type(path: &str) -> Option<SourceType> {
 }
 
 type Hit<'a> = (usize, &'a Rule, Option<String>);
-type MeasuredHits<'a> = (Vec<Hit<'a>>, u64);
 
 fn collect<'r>(
     rules: &'r [Rule],
@@ -257,8 +302,10 @@ fn collect<'r>(
             }
             Run::TsConservative(check) => {
                 if let Some(ts) = ts.as_deref_mut() {
-                    let conservative = ts.resolution.conservative();
-                    let resolution = std::mem::replace(&mut ts.resolution, conservative);
+                    let resolution = std::mem::replace(
+                        &mut ts.resolution,
+                        crate::packs::ts::values::Resolution::conservative(),
+                    );
                     check(ts, &mut findings);
                     ts.resolution = resolution;
                 }
@@ -279,7 +326,7 @@ fn parsed_hits<'r>(
     path: &str,
     text: &str,
     kind: SourceType,
-) -> Result<MeasuredHits<'r>, (usize, String)> {
+) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
     const STACK_BYTES: usize = 768 * 1024 * 1024;
     std::thread::scope(|scope| {
@@ -289,7 +336,7 @@ fn parsed_hits<'r>(
                 let arena = Allocator::default();
                 let mut ts = parse(&arena, path, text, kind)?;
                 let hits = collect(rules, path, text, Ok(Some(&mut ts)));
-                Ok((hits, ts.resolution.work.get()))
+                Ok((hits, ts.work.get()))
             })
             .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
             .join()
@@ -369,8 +416,7 @@ fn run_file(rules: &[Rule], path: &str, bytes: &[u8], result: &mut Vec<Finding>)
             note,
         });
     }
-    // Input bytes account for the initial decode and parse before the rule walks.
-    work.saturating_add(bytes.len() as u64)
+    work
 }
 
 #[cfg(test)]

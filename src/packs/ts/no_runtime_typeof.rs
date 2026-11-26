@@ -15,8 +15,7 @@ pub(crate) const RULE: Rule = Rule {
 };
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let nodes = ctx.semantic.nodes();
-    for (id, node) in nodes.iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         let AstKind::UnaryExpression(n) = node.kind() else {
             continue;
         };

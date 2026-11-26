@@ -107,7 +107,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if test_file(ctx.path) {
         return;
     }
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         let span = match node.kind() {
             kind if let Some(m) = kind.as_member_expression_kind()
                 && MemberKeys(ctx).read_kind(m).is_some_and(|name| {

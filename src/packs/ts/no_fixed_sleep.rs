@@ -67,7 +67,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     if super::test_context::test_file(ctx.path) {
         super::values::tracked_uses::report(ctx, RULE.id, findings);
     }
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         let AstKind::AwaitExpression(wait) = node.kind() else {
             continue;
         };

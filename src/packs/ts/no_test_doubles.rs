@@ -147,18 +147,14 @@ fn runner_import<'a>(ctx: &TsCtx<'a>, kind: AstKind<'a>) -> bool {
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let test_code = super::test_context::test_file(ctx.path)
-        || ctx
-            .semantic
-            .nodes()
-            .iter()
-            .any(|n| runner_import(ctx, n.kind()));
+        || ctx.nodes().any(|n| runner_import(ctx, n.kind()));
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     if test_code {
         super::saved_methods::check(ctx, findings);
     }
     let mut reported = std::collections::HashSet::new();
     let config = super::config_responses::config(ctx.path);
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         if test_code && let Some(at) = super::transports::report(ctx, node.kind(), &mut reported) {
             findings.report(at, None);
         }

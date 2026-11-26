@@ -14,11 +14,7 @@ use oxc::{
         symbol::{SymbolFlags, SymbolId},
     },
 };
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Class {
@@ -235,23 +231,16 @@ enum Children {
 }
 struct Budget {
     remaining: Option<usize>,
-    work: Option<Rc<Cell<u64>>>,
 }
 impl Budget {
     fn new(steps: usize) -> Self {
         Self {
             remaining: Some(steps),
-            work: None,
         }
     }
 
     fn for_file<'a>(budget: &'a mut Option<Self>, ctx: &TsCtx<'_>) -> &'a mut Self {
-        let budget =
-            budget.get_or_insert_with(|| Self::new(ctx.semantic.nodes().len().saturating_mul(128)));
-        budget
-            .work
-            .get_or_insert_with(|| Rc::clone(&ctx.resolution.work));
-        budget
+        budget.get_or_insert_with(|| Self::new(ctx.semantic.nodes().len().saturating_mul(128)))
     }
 
     fn unparen<'a>(&mut self, mut ty: &'a TSType<'a>) -> Option<&'a TSType<'a>> {
@@ -264,9 +253,6 @@ impl Budget {
         Some(ty)
     }
     fn take(&mut self, steps: usize) -> bool {
-        if let Some(work) = &self.work {
-            work.set(work.get().saturating_add(steps as u64));
-        }
         self.remaining = self.remaining.and_then(|left| left.checked_sub(steps));
         self.remaining.is_some()
     }
@@ -282,13 +268,10 @@ struct Solver {
     test_allowance: Option<usize>,
 }
 impl Solver {
-    fn charge_identity(&mut self, steps: usize) -> Judged<()> {
-        self.budget
-            .as_mut()
-            .ok_or(Unjudged)?
-            .take(steps)
-            .then_some(())
-            .ok_or(Unjudged)
+    fn charge_identity(&mut self, ctx: &TsCtx<'_>, steps: usize) -> Judged<()> {
+        let budget = self.budget.as_mut().ok_or(Unjudged)?;
+        ctx.record_work(steps.min(budget.remaining.unwrap_or(0)));
+        budget.take(steps).then_some(()).ok_or(Unjudged)
     }
 
     fn syntax_children(&mut self, ctx: &TsCtx<'_>, root: NodeId) -> Judged<Vec<NodeId>> {
@@ -296,7 +279,7 @@ impl Solver {
         if !self.syntax_children.contains_key(&root) {
             let mut children = HashMap::<NodeId, Vec<NodeId>>::from([(root, Vec::new())]);
             for index in root.index() + 1..nodes.len() {
-                self.charge_identity(1)?;
+                self.charge_identity(ctx, 1)?;
                 let child = NodeId::new(index);
                 let parent = nodes.parent_id(child);
                 if parent < root {
@@ -307,7 +290,7 @@ impl Solver {
             }
             self.syntax_children.extend(children);
         }
-        self.charge_identity(self.syntax_children[&root].len())?;
+        self.charge_identity(ctx, self.syntax_children[&root].len())?;
         Ok(self.syntax_children[&root].clone())
     }
 
@@ -337,7 +320,7 @@ impl Solver {
         if a.params.len() != b.params.len() {
             return Ok(false);
         }
-        self.charge_identity(a.params.len())?;
+        self.charge_identity(ctx, a.params.len())?;
         for (x, y) in a.params.iter().zip(&b.params) {
             let identity = Goal::root(x.name.node_id.get(), Query::Identity).term;
             for (term, parameter) in [(&mut *left, x), (&mut *right, y)] {
@@ -354,10 +337,12 @@ impl Solver {
     fn solve(&mut self, ctx: &TsCtx<'_>, goal: Goal) -> Judged<Class> {
         // shortcut: 128 steps per syntax node and a minimum of 128 per candidate; revisit if ordinary inputs exhaust both.
         let budget = Budget::for_file(&mut self.budget, ctx);
-        evaluate(&mut self.memo, goal, budget, |g, b| {
+        let before = budget.remaining.unwrap_or(0);
+        let result = evaluate(&mut self.memo, goal, budget, |g, b| {
             self.envs.plan(ctx, g, b)
-        })
-        .ok_or(Unjudged)
+        });
+        ctx.record_work(before - budget.remaining.unwrap_or(0));
+        result.ok_or(Unjudged)
     }
 }
 
@@ -373,10 +358,7 @@ fn plan_root(
     plan: impl FnOnce(&mut Budget) -> Plan,
 ) -> Option<Plan> {
     let available = budget.remaining.unwrap_or(0);
-    let mut planning = Budget {
-        remaining: Some(available),
-        work: budget.work.clone(),
-    };
+    let mut planning = Budget::new(available);
     let root = plan(&mut planning);
     let Some(remaining) = planning.remaining else {
         budget.remaining = None;
@@ -1800,7 +1782,9 @@ impl Resolution {
             && let Some(decl) = {
                 let mut solver = self.0.borrow_mut();
                 let budget = Budget::for_file(&mut solver.budget, ctx);
+                let before = budget.remaining.unwrap_or(0);
                 let result = alias_declaration(ctx, sym, budget);
+                ctx.record_work(before - budget.remaining.unwrap_or(0));
                 budget.remaining.ok_or(Unjudged)?;
                 result
             }
@@ -1872,7 +1856,7 @@ impl Resolution {
             let (mut a, mut b) = match (a, b) {
                 (Class::Declaration(a, mut x), Class::Declaration(b, mut y)) if a == b => {
                     while x != y {
-                        solver.charge_identity(1)?;
+                        solver.charge_identity(ctx, 1)?;
                         let (Some(left_binding), Some(right_binding)) = (
                             x.checked_sub(1).map(|n| solver.envs.frames[n]),
                             y.checked_sub(1).map(|n| solver.envs.frames[n]),
@@ -1907,7 +1891,7 @@ impl Resolution {
             if a == b {
                 continue;
             }
-            solver.charge_identity(1)?;
+            solver.charge_identity(ctx, 1)?;
             if std::mem::discriminant(&ak) != std::mem::discriminant(&bk) {
                 return Ok(false);
             }
@@ -2383,7 +2367,7 @@ mod tests {
             }
             source.push_str(&"guard(v4000);\n".repeat(4000));
             let (hits, work) = run_with_work(&[guard::<0, 0>()], "guard.ts", source.as_bytes());
-            let cap = source.len() as u64 * 32;
+            let cap = (source.len() / 3) as u64;
             assert!(work <= cap, "{work} work exceeds {cap}");
             assert_eq!(hits.len(), 4000);
             for (i, hit) in hits.iter().enumerate() {

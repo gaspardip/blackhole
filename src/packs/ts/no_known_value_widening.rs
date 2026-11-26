@@ -168,8 +168,7 @@ fn typed_flow<'a>(
         AstKind::AccessorProperty(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
         AstKind::ReturnStatement(n) => (
             n.argument.as_ref()?,
-            nodes
-                .ancestor_ids(id)
+            ctx.counted(nodes.ancestor_ids(id))
                 .find_map(|a| signature(nodes.kind(a)))?
                 .1?,
         ),
@@ -223,7 +222,7 @@ pub(super) fn check_with_resolution(
     let mut bindings = ConstBindings::default();
     // Guard calls use declared types as evidence, so their cached origins belong to a separate walk.
     let mut guard_bindings = ConstBindings::default();
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         resolution.begin_candidate();
         let candidate = match node.kind() {
             AstKind::CallExpression(call) => {

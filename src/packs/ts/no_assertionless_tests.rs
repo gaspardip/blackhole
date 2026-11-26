@@ -60,7 +60,7 @@ fn tautology<'a>(
     };
     let mut object = resolve(ctx, object);
     while let Some(m) = object.get_member_expr() {
-        ctx.resolution.record_work(1);
+        ctx.record_work(1);
         object = m.object().get_inner_expression();
     }
     let Some(expect) = call_expr(object) else {
@@ -84,7 +84,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut assertions = BTreeMap::<u32, Option<usize>>::new();
     let mut helpers = BTreeMap::new();
     let mut tests = Vec::new();
-    for n in ctx.semantic.nodes().iter() {
+    for n in ctx.nodes() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };
@@ -184,18 +184,18 @@ fn report_assertions(
         let mut seen = std::collections::HashSet::new();
         let mut asserted = false;
         while let Some(body) = pending.pop() {
-            ctx.resolution.record_work(1);
+            ctx.record_work(1);
             if !seen.insert(body) {
                 continue;
             }
             let mut scope = assertions.range(body.start..body.end).peekable();
             asserted |= scope.peek().is_some();
             at.extend(scope.filter_map(|(_, &finding)| {
-                ctx.resolution.record_work(1);
+                ctx.record_work(1);
                 finding
             }));
             pending.extend(helpers.range(body.start..body.end).map(|(_, &helper)| {
-                ctx.resolution.record_work(1);
+                ctx.record_work(1);
                 helper
             }));
         }

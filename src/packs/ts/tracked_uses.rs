@@ -138,9 +138,8 @@ fn inspect_value<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, escapes: &mut V
 }
 
 fn escapes(ctx: &TsCtx<'_>) -> Vec<Escape> {
-    let nodes = ctx.semantic.nodes();
     let mut targets = HashSet::new();
-    for node in nodes.iter() {
+    for node in ctx.nodes() {
         if let Some(site) = super::site(ctx, node.kind()) {
             targets.extend(site.call.intrinsic_targets.iter().copied());
         }
@@ -149,7 +148,7 @@ fn escapes(ctx: &TsCtx<'_>) -> Vec<Escape> {
     let mut inspect = |value| inspect_value(ctx, value, &mut escapes);
     let mut fields = Vec::new();
     let mut projections = HashSet::new();
-    for node in nodes.iter() {
+    for node in ctx.nodes() {
         if let Some(m) = node.kind().as_member_expression_kind()
             && let Some(prop) = MemberKeys(ctx)
                 .read_kind(m)

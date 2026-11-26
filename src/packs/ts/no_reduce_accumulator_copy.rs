@@ -61,7 +61,7 @@ fn incoming_until(ctx: &TsCtx<'_>, callback: NodeId, accumulator: SymbolId) -> O
     let (scoping, nodes) = (ctx.semantic.scoping(), ctx.semantic.nodes());
     let mut until = u32::MAX;
     for reference in scoping.get_resolved_references(accumulator) {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         if !reference.is_write() {
@@ -71,18 +71,18 @@ fn incoming_until(ctx: &TsCtx<'_>, callback: NodeId, accumulator: SymbolId) -> O
         let target = nodes.kind(at).span();
         let assignment = nodes
             .ancestors(at)
-            .take_while(|_| ctx.resolution.take_work(1))
+            .take_while(|_| ctx.take_work(1))
             .find_map(|n| n.kind().as_assignment_expression())
             .filter(|e| e.operator == AssignmentOperator::Assign && e.left.span() == target)?;
         let statement = nodes
             .ancestors(assignment.node_id.get())
-            .take_while(|_| ctx.resolution.take_work(1))
+            .take_while(|_| ctx.take_work(1))
             .map(AstNode::kind)
             .find(|kind| !matches!(kind, AstKind::ParenthesizedExpression(_)));
         let statement = matches!(statement, Some(AstKind::ExpressionStatement(_)));
         let nested = nodes
             .ancestors(at)
-            .take_while(|n| n.id() != callback && ctx.resolution.take_work(1))
+            .take_while(|n| n.id() != callback && ctx.take_work(1))
             .any(|n| {
                 n.kind().is_iteration_statement()
                     || matches!(
@@ -158,7 +158,7 @@ fn target_declarator<'a>(ctx: &TsCtx<'a>, symbol: SymbolId) -> Option<&'a Variab
     let nodes = ctx.semantic.nodes();
     let mut initialized = None;
     for redeclaration in redeclarations {
-        if !ctx.resolution.take_work(1) {
+        if !ctx.take_work(1) {
             return None;
         }
         // A name shared with a type is ambiguous; `as_variable_declarator` rejects it.
@@ -189,7 +189,7 @@ impl<'a> FreshTargets<'a> {
         let scoping = ctx.semantic.scoping();
         scoping
             .get_resolved_references(symbol)
-            .any(|reference| !ctx.resolution.take_work(1) || reference.is_write())
+            .any(|reference| !ctx.take_work(1) || reference.is_write())
             || (!scoping.symbol_flags(symbol).is_const_variable()
                 && self.eval_scopes.contains(&scoping.symbol_scope_id(symbol)))
     }
@@ -200,14 +200,14 @@ impl<'a> FreshTargets<'a> {
                 let nodes = ctx.semantic.nodes();
                 let scoping = ctx.semantic.scoping();
                 let mut by_scope: HashMap<_, Vec<_>> = HashMap::new();
-                for node in nodes.iter().take_while(|_| ctx.resolution.take_work(1)) {
+                for node in ctx.bounded_nodes() {
                     if let AstKind::Function(f) = node.kind()
                         && f.is_function_declaration()
                         && let Some(id) = &f.id
                         && !matches!(nodes.parent_kind(node.id()), AstKind::FunctionBody(_))
                         && let Some(scope) = scoping
                             .scope_ancestors(node.scope_id())
-                            .take_while(|_| ctx.resolution.take_work(1))
+                            .take_while(|_| ctx.take_work(1))
                             .find(|&scope| scoping.scope_flags(scope).is_var())
                     {
                         by_scope.entry(scope).or_default().push(id.name.as_str());
@@ -219,7 +219,7 @@ impl<'a> FreshTargets<'a> {
             .is_some_and(|names| {
                 names
                     .iter()
-                    .take_while(|_| ctx.resolution.take_work(1))
+                    .take_while(|_| ctx.take_work(1))
                     .any(|other| same_key(ctx, name, other))
             })
     }
@@ -263,7 +263,7 @@ fn declared_fresh<'a>(
     // The read must run after the initializer: same function, inside the declaration's own block.
     let container = nodes
         .ancestors(statement)
-        .take_while(|_| ctx.resolution.take_work(1))
+        .take_while(|_| ctx.take_work(1))
         .find(|node| !matches!(node.kind(), AstKind::LabeledStatement(_)))?;
     let conditional_body = match container.kind() {
         AstKind::IfStatement(_)
@@ -283,7 +283,7 @@ fn declared_fresh<'a>(
     let mut same_block = false;
     let read_function = nodes
         .ancestors(id.node_id.get())
-        .take_while(|_| ctx.resolution.take_work(1))
+        .take_while(|_| ctx.take_work(1))
         .find(|node| {
             same_block |= node.id() == container.id();
             matches!(
@@ -391,10 +391,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut incoming = HashMap::new();
     let mut targets = FreshTargets::default();
     let scoping = ctx.semantic.scoping();
-    for node in nodes.iter() {
-        if !ctx.resolution.take_work(1) {
-            return;
-        }
+    for node in ctx.bounded_nodes() {
         let AstKind::CallExpression(c) = node.kind() else {
             continue;
         };
@@ -403,7 +400,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             && same_key(ctx, id.name.as_str(), "eval")
         {
             for scope in scoping.scope_ancestors(node.scope_id()) {
-                if !ctx.resolution.take_work(1) || !targets.eval_scopes.insert(scope) {
+                if !ctx.take_work(1) || !targets.eval_scopes.insert(scope) {
                     break;
                 }
             }
@@ -415,7 +412,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 .or_insert(context);
         }
     }
-    if reducers.is_empty() {
+    if !ctx.resolution.has_work() || reducers.is_empty() {
         return;
     }
     let mut regions = Regions::new(ctx);
@@ -440,10 +437,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             .uninterrupted(ctx, start, copy.end)
             .then_some((callback, reducer))
     };
-    for (id, node) in nodes.iter_enumerated() {
-        if !ctx.resolution.take_work(1) {
-            break;
-        }
+    for node in ctx.bounded_nodes() {
+        let id = node.id();
         let copying = match node.kind() {
             AstKind::CallExpression(c) => {
                 reducer_of(id, &mut regions).is_some_and(|(span, context)| {

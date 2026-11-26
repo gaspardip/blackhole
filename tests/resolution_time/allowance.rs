@@ -48,7 +48,7 @@ fn twenty_thousand_annotations_and_assertions_receive_their_own_allowance() {
         "allowance.ts",
         source.as_bytes(),
     );
-    let cap = source.len() as u64 * 96;
+    let cap = source.len() as u64;
     assert!(work <= cap, "{work} work exceeds {cap}");
     for rule in [
         &no_unsafe_dictionary_type::RULE,

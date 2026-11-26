@@ -44,7 +44,7 @@ fn broad<'a>(resolver: &Resolution, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Judg
 
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
     let nodes = ctx.semantic.nodes();
-    nodes.ancestor_ids(id).find(|p| {
+    ctx.counted(nodes.ancestor_ids(id)).find(|p| {
         matches!(
             nodes.kind(*p),
             AstKind::ArrowFunctionExpression(_) | AstKind::Function(_)
@@ -136,7 +136,7 @@ pub(super) fn check_with_resolution(
 ) {
     let nodes = ctx.semantic.nodes();
     let mut bindings = ConstBindings::default();
-    for (id, node) in nodes.iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         resolver.begin_candidate();
         let Some((expr, target)) = assertion(node.kind()) else {
             continue;

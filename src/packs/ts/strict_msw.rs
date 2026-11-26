@@ -134,7 +134,7 @@ fn strict<'a>(ctx: &TsCtx<'a>, opts: Option<&'a Expression<'a>>) -> bool {
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
-    for node in ctx.semantic.nodes().iter() {
+    for node in ctx.nodes() {
         let Some(c) = super::values::site(ctx, node.kind()) else {
             continue;
         };

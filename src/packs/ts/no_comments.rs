@@ -145,15 +145,15 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     let mut declarations = HashSet::new();
     let scoping = ctx.semantic.scoping();
     let mut bindings = HashSet::new();
-    for (id, node) in nodes
-        .iter_enumerated()
+    for (id, node) in ctx
+        .nodes_with_ids()
         .filter(|(id, _)| matches!(nodes.parent_kind(*id), AstKind::Program(_)))
     {
         let kind = node.kind();
         match kind {
             AstKind::ExportNamedDeclaration(n) => {
                 for spec in &n.specifiers {
-                    ctx.resolution.record_work(1);
+                    ctx.record_work(1);
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
                         bindings.extend(scoping.get_root_binding(r.name));
                     }
@@ -189,8 +189,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
     }
     // Semantic nodes are in preorder, so a node inherits its parent's top-level statement.
     let mut tops: Vec<NodeId> = Vec::with_capacity(nodes.len());
-    for (id, _) in nodes.iter_enumerated() {
-        ctx.resolution.record_work(1);
+    for (id, _) in ctx.nodes_with_ids() {
         let parent = nodes.parent_id(id);
         let top = match nodes.kind(parent) {
             AstKind::Program(_) => id,
@@ -199,8 +198,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
         tops.push(top);
     }
     for symbol in bindings {
-        for id in scoping.symbol_declarations(symbol) {
-            ctx.resolution.record_work(1);
+        for id in ctx.counted(scoping.symbol_declarations(symbol)) {
             declarations.insert(tops[id.index()]);
         }
     }
@@ -245,8 +243,7 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let mut references: HashMap<NodeId, HashSet<_>> = HashMap::new();
     let mut edges: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     // Semantic nodes are in preorder, so a node inherits its parent's enclosing declaration.
-    for (id, node) in nodes.iter_enumerated() {
-        ctx.resolution.record_work(1);
+    for (id, node) in ctx.nodes_with_ids() {
         let kind = node.kind();
         let parent = nodes.parent_id(id);
         let inherited = owners[parent.index()].filter(|_| !hidden(kind) && !matches!(nodes.kind(parent),AstKind::ArrowFunctionExpression(n) if n.body.node_id() == id));
@@ -271,10 +268,11 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
             references.entry(owner).or_default().insert(symbol);
         }
     }
+    let scoping = ctx.semantic.scoping();
     let mut expanded = HashSet::new();
     let mut pending: Vec<_> = public.iter().copied().collect();
     while let Some(owner) = pending.pop() {
-        ctx.resolution.record_work(1);
+        ctx.record_work(1);
         for symbol in references
             .remove(&owner)
             .into_iter()
@@ -282,13 +280,8 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
             .filter(|s| expanded.insert(*s))
         {
             pending.extend(
-                ctx.semantic
-                    .scoping()
-                    .symbol_declarations(symbol)
-                    .filter(|id| {
-                        ctx.resolution.record_work(1);
-                        type_declaration(nodes.kind(*id)) && public.insert(*id)
-                    }),
+                ctx.counted(scoping.symbol_declarations(symbol))
+                    .filter(|id| type_declaration(nodes.kind(*id)) && public.insert(*id)),
             );
         }
         if let Some(targets) = edges.remove(&owner) {
@@ -299,20 +292,13 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
 }
 
 fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Option<u32> {
-    let end = ctx.comments.partition_point(|c| {
-        ctx.resolution.record_work(1);
-        c.span.end <= start
-    });
-    for c in ctx.comments[..end].iter().rev() {
+    let end = ctx.comments.partition_point(|c| c.span.end <= start);
+    for c in ctx.counted(ctx.comments[..end].iter().rev()) {
         // From the back, so code in between ends the scan before a long gap is read again.
-        if !ctx.text[c.span.end as usize..start as usize]
-            .chars()
-            .rev()
-            .all(|ch| {
-                ctx.resolution.record_work(ch.len_utf8());
-                js_whitespace(ch)
-            })
-        {
+        let gap = &ctx.text[c.span.end as usize..start as usize];
+        let non_whitespace = gap.char_indices().rev().find(|&(_, ch)| !js_whitespace(ch));
+        ctx.record_string_work(non_whitespace.map_or(gap.len(), |(index, _)| gap.len() - index));
+        if non_whitespace.is_some() {
             return None;
         }
         if !directives.contains(&c.span.start) {
@@ -343,8 +329,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         return;
     }
     let directives: HashSet<_> = ctx
-        .comments
-        .iter()
+        .counted(ctx.comments.iter())
         .filter(|c| {
             directive(c.content_span().source_text(ctx.text))
                 && !suppressed_comment(c.span.source_text(ctx.text))
@@ -353,9 +338,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         .collect();
     let exposure = exposure(ctx);
     let documented: HashSet<_> = ctx
-        .semantic
-        .nodes()
-        .iter_enumerated()
+        .nodes_with_ids()
         .filter_map(|(id, n)| {
             let parent = ctx.semantic.nodes().parent_kind(id);
             let start = if let AstKind::ExportDefaultDeclaration(export) = parent
@@ -380,7 +363,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             doc_before(ctx, start, &directives)
         })
         .collect();
-    for c in ctx.comments {
+    for c in ctx.counted(ctx.comments.iter()) {
         if directives.contains(&c.span.start) {
             continue;
         }

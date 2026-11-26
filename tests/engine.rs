@@ -1,3 +1,6 @@
+#[path = "common/work.rs"]
+pub mod work;
+
 #[path = "common/run_rule.rs"]
 mod rule_runner;
 use blackhole_check::engine::{Family, FileCtx, Finding, Findings, Gate, Rule, Run, registry, run};
@@ -587,8 +590,7 @@ fn alias_verdicts_follow_original_reversed_and_rotated_declarations() {
 fn bounded_findings(path: &str, source: &str) -> Vec<Finding> {
     let (findings, work) =
         blackhole_check::engine::run_with_work(registry(), path, source.as_bytes());
-    let cap = source.len() as u64 * 12;
-    assert!(work <= cap, "{path}: {work} work exceeds {cap}");
+    work::assert_work(work, source.len(), 16, path);
     findings
 }
 

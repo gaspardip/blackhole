@@ -1,3 +1,7 @@
+#[path = "common/work.rs"]
+mod work;
+use work::{assert_growth, assert_work};
+
 use blackhole_check::engine::{registry, run, run_with_work};
 use std::fmt::Write;
 
@@ -69,20 +73,6 @@ fn source(shape: &str, n: usize) -> String {
     text
 }
 
-#[track_caller]
-fn assert_work(work: u64, bytes: usize, units_per_byte: u64, label: &str) {
-    let cap = bytes as u64 * units_per_byte;
-    assert!(work <= cap, "{label}: {work} work exceeds {cap}");
-}
-
-#[track_caller]
-fn assert_growth(small: u64, large: u64, factor: u64, label: &str) {
-    assert!(
-        large <= small * factor,
-        "work grew from {small} to {large} (limit {factor}x) {label}"
-    );
-}
-
 #[test]
 fn resolves_large_files() {
     // Parsing a long call chain needs a larger stack before resolution runs.
@@ -96,16 +86,16 @@ fn resolves_large_files() {
 
 fn check_shapes() {
     for (shape, units_per_byte) in [
-        ("object-spreads", 12),
-        ("aliased-spreads", 12),
-        ("array-spreads", 8),
-        ("overwrites", 16),
-        ("imported", 40),
-        ("letalias", 40),
-        ("fnhelper", 36),
-        ("callchain", 72),
-        ("chaincalls", 24),
-        ("chain", 6),
+        ("object-spreads", 22),
+        ("aliased-spreads", 24),
+        ("array-spreads", 17),
+        ("overwrites", 38),
+        ("imported", 55),
+        ("letalias", 54),
+        ("fnhelper", 47),
+        ("callchain", 86),
+        ("chaincalls", 33),
+        ("chain", 17),
     ] {
         let text = source(shape, 10_000);
         let (hits, work) = run_with_work(registry(), "large.test.ts", text.as_bytes());
@@ -128,7 +118,7 @@ fn sdk_transport_spreads_scale_with_distinct_objects() {
         hits.iter().map(|hit| hit.rule).collect::<Vec<_>>(),
         Vec::<&str>::new()
     );
-    assert_work(work, text.len(), 8, "SDK option spreads");
+    assert_work(work, text.len(), 14, "SDK option spreads");
 }
 
 #[test]
@@ -165,7 +155,7 @@ fn repeated_applications_share_their_default_bindings() {
             writeln!(source, "function f{i}(x: A) {{}}").unwrap();
         }
         let (hits, work) = run_with_work(registry(), "defaults.ts", source.as_bytes());
-        assert_work(work, source.len(), 8, "default bindings");
+        assert_work(work, source.len(), 28, "default bindings");
         assert_eq!(hits.len(), uses);
         for (index, h) in hits.iter().enumerate() {
             assert_eq!(
@@ -198,7 +188,7 @@ fn large_declarations_and_repeated_local_lookups_finish_within_budget() {
         for (path, source) in [("literal.ts", literal), ("namespace.ts", namespace)] {
             let (hits, work) = run_with_work(registry(), path, source.as_bytes());
             assert!(hits.is_empty(), "{path}: {} findings", hits.len());
-            assert_work(work, source.len(), 8, path);
+            assert_work(work, source.len(), 27, path);
         }
     }
 }
@@ -226,7 +216,7 @@ fn repeated_computed_keys_share_folded_prefixes() {
         assert_work(
             work,
             text.len(),
-            16,
+            26,
             if primed { "primed" } else { "unprimed" },
         );
     }
@@ -319,7 +309,7 @@ fn repeated_cyclic_key_prefixes_share_failed_folds() {
         assert_eq!(hits.len(), 1, "{label}");
         assert_eq!(hits[0].rule, "ts/no-shape-in-symbol-names");
         assert_eq!(hits[0].line, 5_002);
-        assert_work(work, text.len(), 16, label);
+        assert_work(work, text.len(), 28, label);
     }
 }
 
@@ -386,7 +376,7 @@ fn repeated_member_reads_do_not_rescan_other_effects() {
             text.push_str("box.key='shape';\nconsume({[box.key]:0});\n");
             let (hits, work) = run_with_work(registry(), "computed.ts", text.as_bytes());
             assert!(hits.is_empty(), "{label}");
-            assert_work(work, text.len(), 24, label);
+            assert_work(work, text.len(), 39, label);
             work
         });
         assert_growth(small, large, 8, label);
@@ -427,7 +417,7 @@ fn long_computed_key_chains_share_fold_results() {
             ("ts/no-shape-in-symbol-names", text.lines().count()),
             "{label}"
         );
-        assert_work(work, text.len(), 16, label);
+        assert_work(work, text.len(), 28, label);
     }
 }
 
@@ -630,7 +620,7 @@ fn early_empty_reads_in_nested_callbacks_scale_linearly() {
                 .iter()
                 .find(|r| r.id == "ts/no-conditional-empty-object-spread")
                 .unwrap();
-            let [(small, small_hits), (large, large_hits)] = [1_000, 4_000].map(|n| {
+            let [small, large] = [1_000, 4_000].map(|n| {
                 let source = format!(
                     "{}0{}; const empty = {{}};",
                     "wrap(() => ({ ...(flag ? empty : payload) }), ".repeat(n),
@@ -638,9 +628,9 @@ fn early_empty_reads_in_nested_callbacks_scale_linearly() {
                 );
                 let (findings, work) =
                     run_with_work(std::slice::from_ref(rule), "spread.ts", source.as_bytes());
-                (work, findings.len())
+                assert!(findings.is_empty());
+                work
             });
-            assert_eq!([small_hits, large_hits], [0, 0]);
             assert_growth(small, large, 6, "early reads in nested callbacks");
         })
         .unwrap()

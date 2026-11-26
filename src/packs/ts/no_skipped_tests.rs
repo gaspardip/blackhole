@@ -97,9 +97,8 @@ pub(super) fn skip_option<'a>(
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     let mut locations = BTreeSet::new();
-    let nodes = ctx.semantic.nodes();
     let is_test_file = test_file(ctx.path);
-    for (id, n) in nodes.iter_enumerated() {
+    for (id, n) in ctx.nodes_with_ids() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };

@@ -574,7 +574,7 @@ pub(super) fn returned_values<'a>(
     function: NodeId,
     pending: &mut Vec<&'a Expression<'a>>,
 ) {
-    for (id, node) in ctx.semantic.nodes().iter_enumerated() {
+    for (id, node) in ctx.nodes_with_ids() {
         if let AstKind::ReturnStatement(ret) = node.kind()
             && let Some(arg) = &ret.argument
             && super::values::enclosing_functions(ctx, id)
@@ -640,7 +640,7 @@ pub(super) fn callback_sites<'ctx, 'a>(
                 .named_callbacks
                 .get_or_init(|| {
                     let mut sites = std::collections::HashMap::<_, Vec<_>>::new();
-                    for node in ctx.semantic.nodes().iter() {
+                    for node in ctx.nodes() {
                         let Some(site) = super::values::site(ctx, node.kind()) else {
                             continue;
                         };

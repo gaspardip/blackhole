@@ -15,7 +15,7 @@ pub(crate) const RULE: Rule = Rule {
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let resolution = Resolution::default();
     let nodes = ctx.semantic.nodes();
-    for (id, n) in nodes.iter_enumerated() {
+    for (id, n) in ctx.nodes_with_ids() {
         resolution.begin_candidate();
         let Some((name, ty)) = parameter(n.kind()) else {
             continue;

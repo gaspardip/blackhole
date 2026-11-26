@@ -46,7 +46,7 @@ fn destination(ctx: &TsCtx<'_>, climbs: &mut Climbs, mut node: NodeId) -> Option
     let nodes = ctx.semantic.nodes();
     let mut path = Vec::new();
     let found = loop {
-        ctx.resolution.record_work(1);
+        ctx.record_work(1);
         // Arms of one nest share its way out, so each conditional is climbed once.
         if let Some(known) = climbs.get(&node) {
             break *known;
@@ -105,8 +105,7 @@ fn dependencies(ctx: &TsCtx<'_>, climbs: &mut Climbs, symbol: SymbolId) -> Optio
     let declaration_end = ctx.semantic.symbol_declaration(symbol).span().end;
     let scope = ctx.semantic.scoping();
     let mut aliases = Vec::new();
-    for r in scope.get_resolved_reference_ids(symbol) {
-        ctx.resolution.record_work(1);
+    for r in ctx.counted(scope.get_resolved_reference_ids(symbol).iter()) {
         let node = scope.get_reference(*r).node_id();
         if ctx.semantic.nodes().kind(node).span().start < declaration_end {
             return None;
@@ -137,7 +136,7 @@ impl<'a> Visibility<'a> {
         }
         let mut stack = vec![Visit::Enter(symbol)];
         while let Some(step) = stack.pop() {
-            ctx.resolution.record_work(1);
+            ctx.record_work(1);
             match step {
                 Visit::Enter(id) => {
                     if self.known.contains_key(&id) {
@@ -163,7 +162,7 @@ impl<'a> Visibility<'a> {
         let mut path = Vec::new();
         // The visibility check rejects alias cycles before the next initializer is followed.
         let terminal = loop {
-            ctx.resolution.record_work(1);
+            ctx.record_work(1);
             let Expression::Identifier(id) = expr else {
                 break Some(expr);
             };
@@ -191,7 +190,7 @@ impl<'a> Visibility<'a> {
     fn contains_empty(&mut self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> bool {
         let mut pending = vec![(expr, false)];
         while let Some((value, expanded)) = pending.pop() {
-            ctx.resolution.record_work(1);
+            ctx.record_work(1);
             let span = value.span();
             if !expanded && self.empty_arms.contains_key(&span) {
                 continue;
@@ -218,13 +217,12 @@ impl<'a> Visibility<'a> {
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     let mut visibility = Visibility::default();
-    for node in ctx.semantic.nodes().iter() {
-        ctx.resolution.record_work(1);
+    for node in ctx.nodes() {
         let AstKind::ObjectExpression(object) = node.kind() else {
             continue;
         };
         for property in &object.properties {
-            ctx.resolution.record_work(1);
+            ctx.record_work(1);
             if let ObjectPropertyKind::SpreadProperty(spread) = property
                 && matches!(
                     visibility.value(ctx, &spread.argument),

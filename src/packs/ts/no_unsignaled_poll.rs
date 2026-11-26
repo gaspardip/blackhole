@@ -95,14 +95,13 @@ fn assertion<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>) -> bool {
         })
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let nodes = ctx.semantic.nodes();
-    let length_subjects: HashSet<_> = nodes
-        .iter()
+    let length_subjects: HashSet<_> = ctx
+        .nodes()
         .filter_map(|n| n.kind().as_member_expression_kind())
         .filter(|&m| MemberKeys(ctx).read_kind(m) == Some("toHaveLength"))
         .filter_map(|m| call_expr(matcher_subject(ctx, member_object(m))).map(|call| call.span))
         .collect();
-    for n in nodes.iter() {
+    for n in ctx.nodes() {
         let Some(c) = super::values::site(ctx, n.kind()) else {
             continue;
         };

@@ -105,7 +105,7 @@ fn arguments<'a>(
     }) && let Some(index) = super::values::parameter_index(&f.params, symbol)
         && let Some(fn_id) = f.id.as_ref().and_then(|id| id.symbol_id.get())
     {
-        for reference in ctx.semantic.scoping().get_resolved_references(fn_id) {
+        for reference in ctx.counted(ctx.semantic.scoping().get_resolved_references(fn_id)) {
             if let AstKind::CallExpression(c) =
                 ctx.semantic.nodes().parent_kind(reference.node_id())
                 && c.callee.span() == ctx.semantic.nodes().get_node(reference.node_id()).span()
@@ -141,7 +141,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
     let mut results = Vec::new();
     let mut paths = FieldPaths::default();
     while let Some(step) = pending.pop() {
-        ctx.resolution.record_work(1);
+        ctx.record_work(1);
         let (e, fields) = match step {
             Step::Visit(e, path) => (resolve(ctx, e), path),
             Step::Leave(span) => {
@@ -180,7 +180,7 @@ pub(super) fn results<'a>(ctx: &TsCtx<'a>, initial: &'a Expression<'a>) -> Vec<&
             && let Some((parent, wanted)) = fields.map(|id| paths.entries[id])
         {
             for p in &o.properties {
-                ctx.resolution.record_work(1);
+                ctx.record_work(1);
                 match p {
                     ObjectPropertyKind::SpreadProperty(s) => {
                         pending.push(Step::Visit(&s.argument, fields));

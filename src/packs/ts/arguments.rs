@@ -69,7 +69,7 @@ impl<'a> Arguments<'a> {
     }
 
     fn next(&mut self, ctx: &TsCtx<'a>, distinct: bool) -> Option<Slot<'a>> {
-        while ctx.resolution.take_work(1)
+        while ctx.take_work(1)
             && let Some(part) = self.pending.pop()
         {
             match part {
@@ -100,7 +100,7 @@ impl<'a> Arguments<'a> {
                         self.pending.clear();
                         return None;
                     }
-                    if !ctx.resolution.take_work(array.elements.len()) {
+                    if !ctx.take_work(array.elements.len()) {
                         return None;
                     }
                     self.pending.push(Part::End(id, self.emitted));
