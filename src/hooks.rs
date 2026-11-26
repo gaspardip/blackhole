@@ -2,10 +2,10 @@ mod patch;
 
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -54,7 +54,7 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
     const LIMIT: u64 = 64 * 1024 * 1024;
 
     if matches!(event, Event::Stop) {
-        let red = crate::check_paths(&crate::files::root()?, crate::Targets::HookStop, out)?;
+        let red = crate::check(&[], out)?;
         if red {
             writeln!(
                 out,
@@ -69,14 +69,22 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         return Err(io::Error::other("hook payload exceeds 64 MiB"));
     }
     let envelope: Envelope = serde_json::from_slice(&bytes)?;
-    let tool = match envelope.tool_name.as_str() {
-        "Edit" | "Write" | "MultiEdit" => Tool::File,
-        "NotebookEdit" => Tool::NotebookEdit,
-        "apply_patch" => Tool::Patch,
+    let (field, is_patch): (fn(&Input) -> &Option<String>, _) = match envelope.tool_name.as_str() {
+        "Edit" | "Write" | "MultiEdit" => (|p| &p.file_path, false),
+        "NotebookEdit" => (|p| &p.notebook_path, false),
+        "apply_patch" => (|p| &p.command, true),
         _ => return Ok(false),
     };
     let payload: Payload = serde_json::from_slice(&bytes)?;
-    let mut names = payload.targets(tool)?;
+    let value = field(&payload.tool_input)
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| io::Error::other("cannot read edit target"))?;
+    let mut names = if is_patch {
+        patch::targets(value)?
+    } else {
+        vec![value]
+    };
     if names.is_empty() {
         return Ok(false);
     }
@@ -100,8 +108,7 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         names: &names,
     };
     if matches!(event, Event::PostEdit) {
-        let listed = edits.validate(&root)?.then_some(&edits);
-        return crate::check_paths(&root, crate::Targets::Edits(listed), out);
+        return edits.check(&root, out);
     }
     let ledger = root.join(crate::files::LEDGER_PATH);
     let identity = if ledger.try_exists()? {
@@ -146,13 +153,6 @@ struct Envelope {
     tool_name: String,
 }
 
-#[derive(Clone, Copy)]
-enum Tool {
-    File,
-    NotebookEdit,
-    Patch,
-}
-
 #[derive(Deserialize)]
 struct Payload {
     cwd: Option<String>,
@@ -167,25 +167,6 @@ struct Input {
     command: Option<String>,
 }
 
-impl Payload {
-    fn targets(&self, tool: Tool) -> io::Result<Vec<&str>> {
-        let field = match tool {
-            Tool::File => &self.tool_input.file_path,
-            Tool::NotebookEdit => &self.tool_input.notebook_path,
-            Tool::Patch => &self.tool_input.command,
-        };
-        let value = field
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| io::Error::other("cannot read edit target"))?;
-        if matches!(tool, Tool::Patch) {
-            patch::targets(value)
-        } else {
-            Ok(vec![value])
-        }
-    }
-}
-
 fn lexical(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
@@ -198,7 +179,7 @@ fn lexical(path: &Path) -> PathBuf {
     result
 }
 
-pub(super) struct EditNames<'a> {
+struct EditNames<'a> {
     cwd: &'a Path,
     spelling: &'a Path,
     names: &'a [&'a str],
@@ -216,141 +197,162 @@ impl EditNames<'_> {
         .map(move |base| lexical(&base.join(name)))
     }
 
-    // Outside edits defer the full listing to stop unless a target also has a checkout name.
-    fn validate(&self, root: &Path) -> io::Result<bool> {
-        let mut seen = Readings::default();
-        let mut in_root = false;
-        for name in self.names {
-            validate_target(&self.cwd.join(name))?;
-            if !in_root {
-                self.readings(name, &mut seen, |p| {
-                    in_root |= checkout_names(root, p).next().is_some();
-                })?;
-            }
+    fn check(&self, root: &Path, out: &mut HookOutput<'_>) -> io::Result<bool> {
+        let policy = crate::Policy::load(root)?;
+        let (selected, written) = self.validate(root, policy.paths())?;
+        let paths = select(root, selected, &written)?;
+        if paths.is_empty() {
+            return Ok(false);
         }
-        Ok(in_root)
+        let listed = crate::files::list(root, self.cwd, &paths, policy.paths())?;
+        if listed.names.is_empty() && listed.rows.as_ref().is_some_and(HashSet::is_empty) {
+            return Ok(false);
+        }
+        crate::check_paths(root, &policy, &listed, out)
     }
 
-    pub(super) fn select<'a>(
+    fn validate<'a>(
         &self,
         root: &Path,
-        names: &'a [String],
-        base: &'a crate::ledger::Counts,
-    ) -> io::Result<HashSet<&'a Path>> {
-        let mut candidates: HashSet<_> = names
-            .iter()
-            .chain(base.keys().map(|(_, path)| path))
-            .map(Path::new)
-            .collect();
+        rows: impl Iterator<Item = &'a str>,
+    ) -> io::Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
+        let mut seen = None;
+        let mut stored: HashMap<PathBuf, Vec<&str>> = HashMap::new();
+        for name in rows {
+            let path = root.join(name);
+            if let Ok(real) = crate::files::resolve(&path, &mut seen)
+                && real != path
+            {
+                stored.entry(real).or_default().push(name);
+            }
+            stored.entry(path).or_default().push(name);
+        }
         let mut selected = HashSet::new();
         let mut written = HashSet::new();
         self.visit(|path| {
-            selected.extend(
-                checkout_names(root, path).filter_map(|name| candidates.take(name.as_path())),
-            );
-            written.extend(crate::files::identity(path));
+            if let Some(rows) = stored.get(path) {
+                selected.extend(rows.iter().map(|name| root.join(name)));
+            }
+            if path.starts_with(root)
+                && path.symlink_metadata().is_ok_and(|m| !m.is_dir())
+                && !path.is_dir()
+            {
+                selected.insert(path.to_owned());
+            }
+            if let Ok(real) = fs::canonicalize(path)
+                && real.is_file()
+            {
+                if real.starts_with(root) {
+                    selected.insert(real.clone());
+                }
+                written.insert(real);
+            }
         })?;
-        if !written.is_empty() {
-            selected.extend(names.iter().map(Path::new).filter(|name| {
-                candidates.contains(name)
-                    && crate::files::identity(&root.join(name))
-                        .is_some_and(|id| written.contains(&id))
-            }));
-        }
-        Ok(selected)
+        Ok((selected, written))
     }
 
     fn visit(&self, mut visit: impl FnMut(&Path)) -> io::Result<()> {
-        let mut seen = Readings::default();
+        let mut physical = None;
+        let mut followed = [None, None];
         for name in self.names {
-            self.readings(name, &mut seen, &mut visit)?;
+            let path = self.cwd.join(name);
+            validate_target(&path)?;
+            let resolved = resolve(&path, &mut physical)?;
+            for (normalized, seen) in self.normalized(name).zip(&mut followed) {
+                if normalized != path
+                    && let Ok(Some(real)) = resolve(&normalized, seen)
+                    && Some(&real) != resolved.as_ref()
+                {
+                    visit(&real);
+                }
+                if Some(&normalized) != resolved.as_ref() {
+                    visit(&normalized);
+                }
+            }
+            if let Some(resolved) = resolved {
+                visit(&resolved);
+            }
         }
         Ok(())
     }
-
-    // Every path a target may go by: the caller matches departed files by name and written ones by what the path leads to.
-    fn readings(
-        &self,
-        name: &str,
-        seen: &mut Readings,
-        mut visit: impl FnMut(&Path),
-    ) -> io::Result<()> {
-        let path = self.cwd.join(name);
-        let resolved = resolve(&path, &mut seen.physical)?;
-        for (normalized, seen) in self.normalized(name).zip(&mut seen.followed) {
-            // A writer that normalizes first still follows the links left in the result; where they lead nowhere it wrote nothing.
-            if normalized != path
-                && let Ok(Some(followed)) = resolve(&normalized, seen)
-                && Some(&followed) != resolved.as_ref()
-            {
-                visit(&followed);
-            }
-            // Git or the ledger may hold the name from before a directory on it became a link.
-            if Some(&normalized) != resolved.as_ref() {
-                visit(&normalized);
-            }
-        }
-        if let Some(resolved) = resolved {
-            visit(&resolved);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct Readings {
-    physical: crate::files::Seen,
-    followed: [crate::files::Seen; 2],
-}
-
-fn unresolved(e: &io::Error) -> io::Error {
-    io::Error::new(e.kind(), format!("Cannot resolve edit target: {e}"))
 }
 
 fn resolve(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<PathBuf>> {
     match crate::files::resolve(path, seen) {
         Ok(p) => Ok(Some(p)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(unresolved(&e)),
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("Cannot resolve edit target: {e}"),
+        )),
     }
 }
 
-fn checkout_names<'a>(root: &'a Path, path: &'a Path) -> impl Iterator<Item = PathBuf> + 'a {
-    let direct = path.strip_prefix(root).ok().map(Path::to_owned);
-    // Preserve the suffix at each directory alias: the ledger can still name a departed file through it.
-    let aliases = path
-        .ancestors()
-        .filter(|prefix| prefix.is_symlink())
-        .flat_map(move |prefix| {
-            let suffix = path.strip_prefix(prefix).expect("ancestor is a prefix");
-            alias_spellings(prefix).filter_map(move |target| {
-                target.strip_prefix(root).ok().map(|name| name.join(suffix))
-            })
-        });
-    direct.into_iter().chain(aliases)
-}
-
-fn alias_spellings(link: &Path) -> impl Iterator<Item = PathBuf> {
-    let final_target = fs::canonicalize(link).ok();
-    let mut pending = final_target.as_ref().map(|_| link.to_owned());
-    let intermediate = std::iter::from_fn(move || {
-        let path = pending.take()?;
-        let mut prefix = PathBuf::new();
-        let mut parts = path.components();
-        while let Some(part) = parts.next() {
-            prefix.push(part);
-            if let Ok(target) = fs::read_link(&prefix) {
-                let parent = fs::canonicalize(prefix.parent()?).ok()?;
-                let suffix = parts.as_path();
-                pending = Some(parent.join(target).join(suffix));
-                return Some(parent.join(part).join(suffix));
+fn select(
+    root: &Path,
+    mut selected: HashSet<PathBuf>,
+    written: &HashSet<PathBuf>,
+) -> io::Result<Vec<PathBuf>> {
+    if !selected.is_empty() && !written.is_empty() {
+        let identities: HashSet<_> = written
+            .iter()
+            .filter_map(|path| crate::files::identity(path))
+            .collect();
+        let matches =
+            |path: &Path| crate::files::identity(path).is_some_and(|id| identities.contains(&id));
+        let hard_links = written
+            .iter()
+            .any(|path| crate::files::has_hard_links(path));
+        let mut directories = vec![root.to_owned()];
+        let mut linked = Vec::new();
+        while let Some(dir) = directories.pop() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let kind = entry.file_type()?;
+                let path = entry.path();
+                if kind.is_dir() {
+                    directories.push(path);
+                } else if kind.is_symlink() && path.is_dir() {
+                    if hard_links
+                        || fs::canonicalize(&path)
+                            .is_ok_and(|dir| written.iter().any(|target| target.starts_with(&dir)))
+                    {
+                        linked.push(path);
+                    }
+                } else if (kind.is_symlink() || hard_links) && matches(&path) {
+                    selected.insert(path);
+                }
             }
         }
-        None
-    });
-    // The filesystem limits link traversal, and a link can change after canonicalization.
-    intermediate
-        .take(40)
-        .filter(|path| !path.components().any(|part| part == Component::ParentDir))
-        .chain(final_target)
+        let names = crate::files::listed(
+            root,
+            linked.iter().filter_map(|p| p.strip_prefix(root).ok()),
+        )?;
+        let mut seen = None;
+        for name in names {
+            let path = root.join(name);
+            if crate::files::resolve(&path, &mut seen).is_ok_and(|real| written.contains(&real))
+                || matches(&path)
+            {
+                selected.insert(path);
+            }
+        }
+    }
+    Ok(selected.into_iter().collect())
+}
+
+#[cfg(test)]
+#[test]
+fn single_target_patch_hunks() {
+    for hunk in [
+        "*** Add File: a.py",
+        "*** Delete File: a.py",
+        "*** Update File: a.py\n+x",
+    ] {
+        let input = format!("*** Begin Patch\n{hunk}\n*** End Patch");
+        assert_eq!(patch::targets(&input).unwrap(), ["a.py"]);
+    }
 }

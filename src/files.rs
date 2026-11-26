@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeSet, HashMap, HashSet},
     env, fs,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -123,6 +124,19 @@ pub(crate) fn identity(path: &Path) -> Option<PathBuf> {
         .filter(|target| target.is_file())
 }
 
+pub(crate) fn has_hard_links(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).is_ok_and(|meta| meta.nlink() > 1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -167,24 +181,112 @@ pub(crate) fn regular(path: &Path) -> io::Result<Option<fs::Metadata>> {
     }
 }
 
-pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, Vec<PathBuf>)> {
-    let cwd = env::current_dir()?;
-    let paths = paths
-        .iter()
-        .map(|p| resolve(&cwd.join(p), &mut None))
-        .collect::<io::Result<Vec<_>>>()?;
+#[derive(Default)]
+pub(crate) struct Listing<'a> {
+    pub names: Vec<String>,
+    pub rows: Option<HashSet<&'a str>>,
+    pub unmatched: Option<PathBuf>,
+}
+
+pub(crate) fn list<'a>(
+    root: &Path,
+    cwd: &Path,
+    paths: &[PathBuf],
+    rows: impl Iterator<Item = &'a str>,
+) -> io::Result<Listing<'a>> {
+    if paths.is_empty() {
+        return Ok(Listing {
+            names: listed(root, [Path::new(".")])?,
+            ..Listing::default()
+        });
+    }
+    let mut queries = BTreeSet::new();
+    let mut wanted = HashMap::new();
+    let mut unmatched = None;
+    let mut seen = None;
+    for path in paths {
+        let named = cwd.join(path);
+        let real = resolve(&named, &mut seen)?;
+        let literal = named.strip_prefix(root).ok().filter(|p| {
+            !p.components()
+                .any(|part| part == std::path::Component::ParentDir)
+        });
+        if literal.is_some() || real.starts_with(root) {
+            queries.extend(literal.map(|p| p.components().collect::<PathBuf>()));
+            queries.extend(real.strip_prefix(root).ok().map(Path::to_owned));
+            wanted.insert(real, false);
+        } else {
+            unmatched.get_or_insert(real);
+        }
+    }
+    let mut select = |name: &str| {
+        let named = root.join(name);
+        let real = resolve(&named, &mut seen).ok();
+        let mut hit = false;
+        for path in named
+            .ancestors()
+            .chain(real.iter().flat_map(|p| p.ancestors()))
+        {
+            if let Some(matched) = wanted.get_mut(path) {
+                *matched = true;
+                hit = true;
+            }
+        }
+        hit
+    };
+    let rows: HashSet<_> = rows.filter(|name| select(name)).collect();
+    queries.extend(rows.iter().map(PathBuf::from));
+    let names = listed(root, queries.iter().map(PathBuf::as_path))?;
+    for name in &names {
+        select(name);
+    }
+    let unmatched = unmatched.or_else(|| {
+        wanted
+            .into_iter()
+            .filter_map(|(path, hit)| (!hit).then_some(path))
+            .min()
+    });
+    Ok(Listing {
+        names,
+        rows: Some(rows),
+        unmatched,
+    })
+}
+
+pub(crate) fn listed<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> io::Result<Vec<String>> {
+    let paths: Vec<_> = paths
+        .into_iter()
+        .map(|path| {
+            if path == Path::new("") {
+                Path::new(".")
+            } else {
+                path
+            }
+        })
+        .collect();
+    // Use one argument budget for both short names and paths near the filesystem limit.
+    let longest = paths.iter().map(|p| p.as_os_str().len()).max().unwrap_or(0);
+    let batch = (64 * 1024 / (longest + 16)).max(1);
     let mut selected = Vec::new();
-    let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
-    for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
-        let name = std::str::from_utf8(bytes).map_err(|_| {
-            io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
-        })?;
-        let file = root.join(name);
-        if paths.is_empty() || paths.iter().any(|path| file.starts_with(path)) {
+    for paths in paths.chunks(batch) {
+        let names = crate::git::output(
+            crate::git::command()
+                .current_dir(root)
+                .arg("--literal-pathspecs")
+                .args(["ls-files", "-co", "--exclude-standard", "-z", "--"])
+                .args(paths),
+        )?;
+        for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+            let name = std::str::from_utf8(name).map_err(|_| {
+                io::Error::other(format!("path is not valid UTF-8: {}", name.escape_ascii()))
+            })?;
             selected.push(name.to_owned());
         }
     }
     selected.sort_unstable();
     selected.dedup();
-    Ok((selected, paths))
+    Ok(selected)
 }

@@ -77,11 +77,26 @@ use std::{
 /// # Errors
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
-    check_paths(&files::root()?, Targets::Command(paths), output)
+    let cwd = env::current_dir()?;
+    let root = files::root()?;
+    let policy = Policy::load(&root)?;
+    let listing = files::list(&root, &cwd, paths, policy.paths())?;
+    if let Some(path) = listing.unmatched {
+        return Err(io::Error::other(format!(
+            "no files match {}",
+            diagnostic_text(&path.to_string_lossy())
+        )));
+    }
+    check_paths(&root, &policy, &listing, output)
 }
 
-fn check_paths(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Result<bool> {
-    let scan = scan(root, targets, output)?;
+fn check_paths(
+    root: &Path,
+    policy: &Policy,
+    listing: &files::Listing<'_>,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    let scan = scan(root, policy, listing, output)?;
     report_stale(&scan.stale, &scan.actual, output)?;
     Ok(scan.over || !scan.stale.is_empty())
 }
@@ -112,11 +127,12 @@ fn report_stale(
 pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
     let root = files::root()?;
     let _lock = files::lock(&root)?;
-    let scan = scan(&root, Targets::Command(&[]), output)?;
+    let policy = Policy::load(&root)?;
+    let scan = scan_all(&root, &policy, output)?;
     if !scan.over
-        && let Some(bytes) = scan.ledger_bytes
+        && let Some(bytes) = policy.ledger_bytes
     {
-        let mut shrunk = scan.base;
+        let mut shrunk = policy.base;
         shrunk.retain(|key, n| {
             *n = (*n).min(scan.actual.get(key).copied().unwrap_or(0));
             *n > 0
@@ -197,80 +213,73 @@ fn fill(
     permissions.map_or(Ok(()), |mode| file.set_permissions(mode))
 }
 
-#[derive(Default)]
-struct Scan {
+struct Policy {
+    config: config::Config,
+    entered: bool,
     ledger_bytes: Option<Vec<u8>>,
     base: ledger::Counts,
+}
+
+impl Policy {
+    fn load(root: &Path) -> io::Result<Self> {
+        let config =
+            config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
+        let entered = enter(root, ".blackhole", false)?;
+        let ledger_bytes = policy(entered, "ledger")?;
+        let base = ledger::load(ledger_bytes.as_deref())?;
+        Ok(Self {
+            config,
+            entered,
+            ledger_bytes,
+            base,
+        })
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.base.keys().map(|(_, path)| path.as_str())
+    }
+}
+
+struct Scan {
     actual: ledger::Counts,
     over: bool,
     stale: ledger::Counts,
 }
 
-#[derive(Clone, Copy)]
-enum Targets<'a> {
-    Command(&'a [PathBuf]),
-    HookStop,
-    Edits(Option<&'a hooks::EditNames<'a>>),
+fn scan_all(root: &Path, policy: &Policy, output: &mut impl Write) -> io::Result<Scan> {
+    scan(
+        root,
+        policy,
+        &files::list(root, root, &[], policy.paths())?,
+        output,
+    )
 }
 
-fn scan(root: &Path, targets: Targets<'_>, output: &mut impl Write) -> io::Result<Scan> {
-    // The selection is resolved before the working directory moves.
-    let (names, selection) = match targets {
-        Targets::Command(paths) => files::list(root, paths)?,
-        Targets::HookStop | Targets::Edits(Some(_)) => files::list(root, &[])?,
-        Targets::Edits(None) => (Vec::new(), Vec::new()),
-    };
-    let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
-    let entered = enter(root, ".blackhole", false)?;
-    let ledger_bytes = policy(entered, "ledger")?;
-    let base = ledger::load(ledger_bytes.as_deref())?;
-    let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
-    // A path with no file left is still a selection while the ledger has a row under it. A path that holds the repository would match every file, so it is not one.
-    for chosen in &selection {
-        let rows = base.keys().map(|(_, path)| path);
-        if !(chosen.starts_with(root) && names.iter().chain(rows).any(|path| under(path, chosen))) {
-            return Err(io::Error::other(format!(
-                "no files match {}",
-                chosen.display().to_string().escape_default()
-            )));
-        }
-    }
-    let edits = match targets {
-        Targets::Edits(None) => return Ok(Scan::default()),
-        Targets::Edits(Some(edits)) => {
-            let selected = edits.select(root, &names, &base)?;
-            if selected.is_empty() {
-                return Ok(Scan::default());
-            }
-            Some(selected)
-        }
-        Targets::Command(_) | Targets::HookStop => None,
-    };
-    let selected = |name: &str| {
-        edits.as_ref().map_or_else(
-            || selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)),
-            |edits| edits.contains(Path::new(name)),
-        )
-    };
+fn scan(
+    root: &Path,
+    rules: &Policy,
+    listing: &files::Listing<'_>,
+    output: &mut impl Write,
+) -> io::Result<Scan> {
     // Both policy files are read before any file is judged.
-    let filed = policy(entered, "objections")?.unwrap_or_default();
-    let names = names
-        .iter()
-        .map(String::as_str)
-        .filter(|name| selected(name));
-    let findings = scan_files(&config, Vec::new(), names, |name| {
+    let filed = policy(rules.entered, "objections")?.unwrap_or_default();
+    let names = listing.names.iter().map(String::as_str);
+    let findings = scan_files(&rules.config, Vec::new(), names, |name| {
         files::read(&root.join(name))
     })?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(&filed, today)?;
-    let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
-    let mut stale = ledger::excess(&base, &actual);
-    stale.retain(|(_, path), _| selected(path));
+    let over = ledger::excess(
+        &actual,
+        &objections::allowances(&rules.base, &objections, today),
+    );
+    let mut stale = ledger::excess(&rules.base, &actual);
+    if let Some(rows) = &listing.rows {
+        stale.retain(|(_, path), _| rows.contains(path.as_str()));
+    }
     report(&findings, &over, output)?;
     Ok(Scan {
-        ledger_bytes,
-        base,
         actual,
         over: !over.is_empty(),
         stale,
@@ -396,13 +405,14 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         let reason = reason
             .filter(|s| !s.trim().is_empty() && !s.contains(['\r', '\n', '\t']))
             .ok_or_else(|| io::Error::other("invalid reason"))?;
-        let scan = scan(&root, Targets::Command(&[]), &mut io::sink())?;
+        let policy = Policy::load(&root)?;
+        let scan = scan_all(&root, &policy, &mut io::sink())?;
         let extra = scan
             .actual
             .get(&key)
             .copied()
             .unwrap_or(0)
-            .saturating_sub(scan.base.get(&key).copied().unwrap_or(0));
+            .saturating_sub(policy.base.get(&key).copied().unwrap_or(0));
         if extra == 0 || ledger::invalid_path(&key.1) {
             return Err(io::Error::other("no representable overage"));
         }

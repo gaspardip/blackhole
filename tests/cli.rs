@@ -473,6 +473,20 @@ fn a_broken_entry_on_the_way_is_not_a_directory_that_is_gone() {
     check(root, &["gone/deep/file.py"], 2);
 }
 
+#[cfg(unix)]
+#[test]
+fn check_selects_a_departed_ledger_row_through_a_directory_link() {
+    let dir = repo();
+    let root = dir.path();
+    baseline(root, &[("link/gone.py", 1)]);
+    fs::create_dir(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    assert_eq!(
+        check(root, &["link/gone.py"], 1).stdout,
+        format!("link/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n").as_bytes()
+    );
+}
+
 #[test]
 fn a_path_of_many_missing_directories_is_an_error() {
     let dir = repo();

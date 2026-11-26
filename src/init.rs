@@ -234,7 +234,8 @@ fn first_ledger(root: &Path) -> io::Result<Option<usize>> {
     if crate::policy(true, "ledger")?.is_some() {
         return Ok(None);
     }
-    let mut scan = crate::scan(root, crate::Targets::Command(&[]), &mut io::sink())?;
+    let policy = crate::Policy::load(root)?;
+    let mut scan = crate::scan_all(root, &policy, &mut io::sink())?;
     let mut remaining = 0;
     scan.actual.retain(|(rule, path), count| {
         let allowed = crate::engine::can_allow(crate::engine::registry(), rule)
