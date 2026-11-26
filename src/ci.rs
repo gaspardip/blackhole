@@ -83,6 +83,7 @@ fn evaluate(
         scan_config,
         diff.diagnostics,
         head_tree.paths(),
+        head_tree.paths(),
         &mut *ctx.batch,
         |batch| head_tree.repository_paths(batch),
         |batch, path| head_tree.read(path, batch),

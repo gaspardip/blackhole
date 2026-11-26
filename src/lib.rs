@@ -50,6 +50,7 @@ mod packs {
         mod saved_methods;
         pub(crate) mod strict_msw;
         pub(crate) mod test_context;
+        pub(crate) mod test_file_names;
         mod transports;
         pub(crate) mod values;
     }
@@ -194,6 +195,7 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
         &config,
         Vec::new(),
         selected,
+        all(),
         (),
         |()| files::repository_paths(root, all()),
         |(), name| files::read(&root.join(name)),
@@ -221,6 +223,7 @@ fn scan_files<'a, S: Send>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
+    inventory_names: impl Iterator<Item = &'a str>,
     mut source: S,
     inventory: impl FnOnce(&mut S) -> io::Result<packs::boundary::RepositoryPaths>,
     mut read: impl FnMut(&mut S, &str) -> io::Result<Option<Vec<u8>>> + Send,
@@ -235,9 +238,17 @@ fn scan_files<'a, S: Send>(
             (paths, reader, ())
         },
         |scanner, reader, ()| -> io::Result<()> {
+            let mut packages = std::collections::BTreeSet::new();
+            for name in inventory_names.filter(|name| !config.exclude.is_match(name)) {
+                if let Some(dir) = engine::package_dir(name)
+                    && reader.read(name)?.is_some()
+                {
+                    packages.insert(dir);
+                }
+            }
             for name in names.filter(|name| !config.exclude.is_match(name)) {
                 if let Some(bytes) = reader.read(name)? {
-                    scanner.file(name, &bytes, &mut findings);
+                    scanner.file(name, &bytes, &packages, &mut findings);
                 }
             }
             Ok(())

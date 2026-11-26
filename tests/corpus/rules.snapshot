@@ -1323,3 +1323,27 @@ rules/ts/strict-msw/reject/review-namespace-import.test.ts:1:32 ts/strict-msw
 rules/ts/strict-msw/reject/server-alias.test.ts:1:87 ts/strict-msw
 rules/ts/strict-msw/reject/server-assigned-in-hook.test.ts:2:55 ts/strict-msw
 rules/ts/strict-msw/reject/upstream-accept-accepts-allowlisted-files-01.ts:2:38 ts/strict-msw
+rules/ts/test-file-names/reject/enforces-the-rule-through-the-repository-configuration-01/tree/src/admission.specs.ts:1:1 ts/test-file-names use <subject>.test
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.helpers.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.mocks.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.stub.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.stubs.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.test-helpers.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.test-util.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.test-utilities.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.testutil.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/other-test-utility-suffixes/tree/subject.testutils.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/rejects-02/tree/src/admission.tests.tsx:1:1 ts/test-file-names use <subject>.test
+rules/ts/test-file-names/reject/rejects-03/tree/src/admission-fixture.ts:1:1 ts/test-file-names use <subject>.fixture
+rules/ts/test-file-names/reject/rejects-04/tree/src/admission-fixtures.ts:1:1 ts/test-file-names use <subject>.fixture
+rules/ts/test-file-names/reject/rejects-05/tree/src/admission.fixtures.ts:1:1 ts/test-file-names use <subject>.fixture
+rules/ts/test-file-names/reject/rejects-06/tree/src/fixtures.ts:1:1 ts/test-file-names use <subject>.fixture
+rules/ts/test-file-names/reject/rejects-07/tree/src/routes/-fixture.ts:1:1 ts/test-file-names use <subject>.fixture
+rules/ts/test-file-names/reject/rejects-08/tree/src/admission.test-helper.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/rejects-09/tree/src/admission.helper.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/rejects-10/tree/src/admission.mock.tsx:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/rejects-11/tree/src/admission.harness.ts:1:1 ts/test-file-names use <subject>.test-utils
+rules/ts/test-file-names/reject/rejects-12/tree/src/tests/admission.test.ts:1:1 ts/test-file-names use a test directory
+rules/ts/test-file-names/reject/rejects-13/tree/src/__tests__/admission.test.ts:1:1 ts/test-file-names use a test directory
+rules/ts/test-file-names/reject/reports-both-name-and-directory-01/tree/tests/admission.specs.ts:1:1 ts/test-file-names use <subject>.test
+rules/ts/test-file-names/reject/reports-both-name-and-directory-01/tree/tests/admission.specs.ts:1:1 ts/test-file-names use a test directory

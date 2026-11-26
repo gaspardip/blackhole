@@ -1,0 +1,57 @@
+mod common;
+use std::fs;
+
+#[test]
+fn naming_uses_the_whole_tree_and_reports_selected_paths() -> common::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    fs::create_dir_all(root.join("tests/pkg"))?;
+    for (name, contents) in [
+        ("tests/pkg/package.json", "{}"),
+        ("tests/pkg/good.ts", ""),
+        ("first.specs.ts", ""),
+        ("second.mock.ts", ""),
+    ] {
+        fs::write(root.join(name), contents)?;
+    }
+    common::git(root, &["init", "-q"])?;
+    common::git(root, &["add", "."])?;
+    common::git(root, &["commit", "-qm", "case"])?;
+    for args in [
+        vec!["check", "first.specs.ts", "tests/pkg/good.ts"],
+        vec!["ci", "--base", "HEAD", "--head", "HEAD"],
+    ] {
+        let output = common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .args(&args)
+            .current_dir(root)
+            .output()?;
+        let report = String::from_utf8(output.stdout)?;
+        assert_eq!(output.status.code(), Some(1), "{report}");
+        assert!(report.contains("first.specs.ts:1:1 ts/test-file-names"));
+        assert_eq!(
+            report.contains("second.mock.ts:1:1 ts/test-file-names"),
+            args[0] == "ci"
+        );
+        assert!(!report.contains("good.ts"));
+    }
+    Ok(())
+}
+
+#[test]
+fn naming_survives_parse_failure() {
+    use blackhole_check::engine::{registry, run};
+    let rule = registry()
+        .iter()
+        .find(|rule| rule.id == "ts/test-file-names")
+        .expect("file naming rule is registered");
+    let hits = run(
+        std::slice::from_ref(rule),
+        [("x.specs.ts", b"const = ;".as_slice())],
+    );
+    assert_eq!(
+        hits.iter()
+            .map(|h| (h.path.as_str(), h.line, h.col))
+            .collect::<Vec<_>>(),
+        [("x.specs.ts", 1, 1)]
+    );
+}
