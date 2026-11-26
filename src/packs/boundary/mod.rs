@@ -1,4 +1,5 @@
 use crate::engine::{Family, Findings, Gate, Rule, Run};
+use crate::files::{LEDGER_PATH, OBJECTIONS_PATH};
 use oxc::syntax::line_terminator::LineTerminatorSplitter;
 
 pub const SIZE: Rule = Rule {
@@ -11,7 +12,7 @@ pub const SIZE: Rule = Rule {
 };
 
 fn check(path: &str, text: &str, limit: usize, findings: &mut Findings) {
-    if matches!(path, ".blackhole/ledger" | ".blackhole/objections") {
+    if matches!(path, LEDGER_PATH | OBJECTIONS_PATH) {
         return;
     }
     let mut lines = LineTerminatorSplitter::new(text);

@@ -1,5 +1,6 @@
 use crate::{
     engine::Finding,
+    files::LEDGER_PATH,
     ledger::{self, Counts},
     objections::{self, Date, Rows},
 };
@@ -116,7 +117,7 @@ fn protected(i: &Inputs<'_>, moved: &Counts, guard: &GlobSet, v: &mut Verdict) -
             paths.insert(c.path.as_str());
         }
         for path in c.old().into_iter().chain([c.path.as_str()]) {
-            let guarded = if path == ".blackhole/ledger" {
+            let guarded = if path == LEDGER_PATH {
                 !i.head_ledger
                     .is_ok_and(|h| ledger::excess(h, moved).is_empty())
             } else {

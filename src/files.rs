@@ -105,6 +105,9 @@ fn same(_: &fs::Metadata, _: &fs::Metadata) -> bool {
     true
 }
 
+pub(crate) const LEDGER_PATH: &str = ".blackhole/ledger";
+pub(crate) const OBJECTIONS_PATH: &str = ".blackhole/objections";
+
 // A policy file is read only as a regular file: a link would point it outside the repository.
 pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let named = match fs::symlink_metadata(path) {

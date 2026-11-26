@@ -1,6 +1,7 @@
 use crate::{
     config,
     engine::{self, DiffCtx, DiffFindings, Run},
+    files::{LEDGER_PATH, OBJECTIONS_PATH},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
@@ -13,7 +14,7 @@ use std::{
 };
 
 fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
-    ledger::load(tree.judge_file(".blackhole/ledger", batch)?.as_deref())
+    ledger::load(tree.judge_file(LEDGER_PATH, batch)?.as_deref())
 }
 fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
     config::parse(
@@ -24,9 +25,7 @@ fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
 }
 fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
     objections::parse(
-        &tree
-            .judge_file(".blackhole/objections", batch)?
-            .unwrap_or_default(),
+        &tree.judge_file(OBJECTIONS_PATH, batch)?.unwrap_or_default(),
         day,
     )
 }

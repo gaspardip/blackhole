@@ -4,13 +4,31 @@ mod common;
 
 use cli::{check, repo};
 use common::Result;
-use std::fs;
+use std::{fs, path::Path};
+
+fn write_max_lines(root: &Path, value: &str) -> std::io::Result<()> {
+    fs::write(
+        root.join("blackhole.toml"),
+        format!("[boundaries]\nmax-lines = {value}"),
+    )
+}
+
+fn first_line(output: &[u8]) -> Result<Option<&str>> {
+    Ok(std::str::from_utf8(output)?.lines().next())
+}
 
 #[test]
 fn lines_are_counted_on_the_text_as_decoded() -> Result<()> {
     let dir = repo();
     let root = dir.path();
-    fs::write(root.join("blackhole.toml"), "[boundaries]\nmax-lines = 3")?;
+    write_max_lines(root, "3")?;
+    let mut utf32_le = vec![0xff, 0xfe, 0, 0];
+    utf32_le.extend(
+        "a\r\nb\r\nc\nd"
+            .chars()
+            .flat_map(|ch| u32::from(ch).to_le_bytes()),
+    );
+    let finding = Some("x.txt:4:1 boundary/file-size 4 lines, limit 3");
     for (bytes, expected) in [
         (&b"a\r\0\nb\rc"[..], true),
         (&b"a\r\nb\rc"[..], false),
@@ -19,39 +37,16 @@ fn lines_are_counted_on_the_text_as_decoded() -> Result<()> {
         ("a\u{2028}b\u{2029}c\nd\r\n".as_bytes(), true),
         ("a\u{2028}b\u{2029}c\u{2028}".as_bytes(), false),
         (&b"a\nb\nc\n\xff"[..], true),
+        (utf32_le.as_slice(), true),
     ] {
         fs::write(root.join("x.txt"), bytes)?;
-        let out = String::from_utf8(check(root, &["x.txt"], i32::from(expected)).stdout)?;
+        let out = check(root, &["x.txt"], i32::from(expected)).stdout;
         if expected {
-            assert_eq!(
-                out.lines().next(),
-                Some("x.txt:4:1 boundary/file-size 4 lines, limit 3")
-            );
+            assert_eq!(first_line(&out)?, finding);
         } else {
-            assert_eq!(out, "");
+            assert_eq!(out, b"");
         }
     }
-    Ok(())
-}
-
-#[test]
-fn the_utf32_le_bom_takes_precedence_over_utf16_le() -> Result<()> {
-    let dir = repo();
-    let root = dir.path();
-    fs::write(root.join("blackhole.toml"), "[boundaries]\nmax-lines = 3")?;
-    let mut bytes = vec![0xff, 0xfe, 0, 0];
-    bytes.extend(
-        "a\r\nb\r\nc\nd"
-            .chars()
-            .flat_map(|ch| u32::from(ch).to_le_bytes()),
-    );
-    fs::write(root.join("x.txt"), bytes)?;
-    assert_eq!(
-        String::from_utf8(check(root, &["x.txt"], 1).stdout)?
-            .lines()
-            .next(),
-        Some("x.txt:4:1 boundary/file-size 4 lines, limit 3")
-    );
     Ok(())
 }
 
@@ -82,7 +77,7 @@ fn the_ledger_and_objections_are_exempt_from_the_line_limit() -> Result<()> {
     let dir = repo();
     let root = dir.path();
     fs::create_dir(root.join(".blackhole"))?;
-    fs::write(root.join("blackhole.toml"), "[boundaries]\nmax-lines = 1")?;
+    write_max_lines(root, "1")?;
     fs::write(root.join("a.txt"), "a\nb\n")?;
     fs::write(root.join("b.txt"), "a\nb\n")?;
     fs::write(
@@ -93,12 +88,8 @@ fn the_ledger_and_objections_are_exempt_from_the_line_limit() -> Result<()> {
         root.join(".blackhole/objections"),
         "boundary/file-size\ta.txt\t1\t2000-01-01\t-\treason\nboundary/file-size\tb.txt\t1\t2000-01-01\t-\treason\n",
     )?;
-    assert_eq!(
-        String::from_utf8(check(root, &[], 1).stdout)?
-            .lines()
-            .next(),
-        Some("blackhole.toml:2:1 boundary/file-size 2 lines, limit 1")
-    );
+    let finding = Some("blackhole.toml:2:1 boundary/file-size 2 lines, limit 1");
+    assert_eq!(first_line(&check(root, &[], 1).stdout)?, finding);
     assert_eq!(check(root, &[".blackhole"], 0).stdout, b"");
     Ok(())
 }
@@ -108,10 +99,7 @@ fn invalid_limits_are_configuration_errors() -> Result<()> {
     let dir = repo();
     let root = dir.path();
     for value in ["0", "-1", "'3'"] {
-        fs::write(
-            root.join("blackhole.toml"),
-            format!("[boundaries]\nmax-lines = {value}"),
-        )?;
+        write_max_lines(root, value)?;
         let error = String::from_utf8(check(root, &[], 2).stderr)?;
         assert!(error.contains("nonzero usize"), "{error}");
     }

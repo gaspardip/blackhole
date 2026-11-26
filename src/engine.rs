@@ -326,7 +326,7 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     source: &Source,
-    line_limit: Option<usize>,
+    settings: Settings,
     parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
     let error = parsed.as_ref().err().copied();
@@ -357,8 +357,8 @@ fn collect<'r>(
                 }
             }
             Run::Lines(check) => {
-                if let Some(limit) = line_limit.filter(|&limit| source.decoded.len() > limit) {
-                    check(path, &source.decoded, limit, &mut findings);
+                if let Some(limit) = settings.max_lines {
+                    check(path, &source.decoded, limit.get(), &mut findings);
                 }
             }
             Run::ParseError => {
@@ -421,22 +421,21 @@ impl Source {
     }
 
     fn locate(&self, path: &str, mut hits: Vec<Hit<'_>>, result: &mut Vec<Finding>) {
-        hits.sort_by_key(|(offset, _, _)| *offset);
         if self.nul.is_some() {
             // Text rules see stripped offsets. Line rules and encoding errors use decoded offsets.
-            let mut nuls = self.decoded.match_indices('\0').peekable();
-            let mut skipped = 0;
+            let nuls: Vec<_> = self
+                .decoded
+                .match_indices('\0')
+                .enumerate()
+                .map(|(skipped, (at, _))| at - skipped)
+                .collect();
             for (offset, rule, _) in &mut hits {
                 if !matches!(rule.run, Run::Lines(_) | Run::ParseError) {
-                    while nuls.peek().is_some_and(|(at, _)| *at <= *offset + skipped) {
-                        nuls.next();
-                        skipped += 1;
-                    }
-                    *offset += skipped;
+                    *offset += nuls.partition_point(|&at| at <= *offset);
                 }
             }
-            hits.sort_by_key(|(offset, _, _)| *offset);
         }
+        hits.sort_by_key(|(offset, _, _)| *offset);
         let mut chars = self.decoded.chars().peekable();
         let (mut matched, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
@@ -488,13 +487,13 @@ fn parsed_hits<'r>(
     path: &str,
     source: &Source,
     kind: SourceType,
-    line_limit: Option<usize>,
+    settings: Settings,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     source.encoding()?;
     parser_thread(|| {
         let arena = Allocator::default();
         let mut ts = parse(&arena, path, source.text(), kind)?;
-        let hits = collect(rules, path, source, line_limit, Ok(Some(&mut ts)));
+        let hits = collect(rules, path, source, settings, Ok(Some(&mut ts)));
         Ok((hits, ts.work.get()))
     })
     .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
@@ -523,10 +522,9 @@ pub fn run_configured<'a>(
     settings: Settings,
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
-    let line_limit = settings.max_lines.map(NonZeroUsize::get);
     let mut result = Vec::new();
     for (path, bytes) in files {
-        run_file(rules, path, bytes, line_limit, &mut result);
+        run_file(rules, path, bytes, settings, &mut result);
     }
     sort_findings(&mut result);
     result
@@ -537,7 +535,7 @@ pub fn run_configured<'a>(
 #[must_use]
 pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
-    let work = run_file(rules, path, bytes, None, &mut findings);
+    let work = run_file(rules, path, bytes, Settings::default(), &mut findings);
     sort_findings(&mut findings);
     (findings, work)
 }
@@ -546,14 +544,14 @@ fn run_file(
     rules: &[Rule],
     path: &str,
     bytes: &[u8],
-    line_limit: Option<usize>,
+    settings: Settings,
     result: &mut Vec<Finding>,
 ) -> u64 {
     let source = Source::new(bytes);
     let (hits, work) = match source_type(path) {
-        Some(kind) => parsed_hits(rules, path, &source, kind, line_limit)
-            .unwrap_or_else(|error| (collect(rules, path, &source, line_limit, Err(&error)), 0)),
-        None => (collect(rules, path, &source, line_limit, Ok(None)), 0),
+        Some(kind) => parsed_hits(rules, path, &source, kind, settings)
+            .unwrap_or_else(|error| (collect(rules, path, &source, settings, Err(&error)), 0)),
+        None => (collect(rules, path, &source, settings, Ok(None)), 0),
     };
     source.locate(path, hits, result);
     work
