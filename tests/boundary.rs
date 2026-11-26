@@ -47,7 +47,7 @@ fn lines_for<'a>(out: &'a str, prefix: &str) -> Vec<&'a str> {
 const UNKNOWN: &str = "specifier is not a literal";
 
 fn findings(path: &str, source: &str, expected: &[(usize, usize, &str)]) {
-    assert_findings(path, source, expected, false);
+    assert_findings(path, source, expected, false, 0);
 }
 
 fn assert_findings(
@@ -55,11 +55,14 @@ fn assert_findings(
     source: &str,
     expected: &[(usize, usize, &str)],
     boundary_only: bool,
+    code: i32,
 ) {
-    let out = judge_banned(path, source, i32::from(!expected.is_empty()));
+    let out = judge_banned(path, source, code);
     let lines: Vec<_> = expected
         .iter()
-        .map(|(line, col, note)| format!("{path}:{line}:{col} boundary/banned-imports {note}"))
+        .map(|(line, col, note)| {
+            format!("{path}:{line}:{col} boundary/banned-imports [advisory] {note}")
+        })
         .collect();
     let boundary: Vec<_> = lines_for(&out, path)
         .into_iter()
@@ -85,9 +88,9 @@ fn banned_package_subpath_with_suffix() {
                 ("node_modules/pkg/x.mjs", ""),
             ],
             &[],
-            1,
+            0,
         );
-        assert!(out.contains("ui/a.mjs:1:8 boundary/banned-imports pkg/x.mjs"));
+        assert!(out.contains("ui/a.mjs:1:8 boundary/banned-imports [advisory] pkg/x.mjs"));
     }
 }
 
@@ -113,7 +116,7 @@ fn package_import_keys_keep_query_suffixes() {
             ),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "a.mjs:")
@@ -121,8 +124,8 @@ fn package_import_keys_keep_query_suffixes() {
             .chain(lines_for(&out, "b.cjs:"))
             .collect::<Vec<_>>(),
         [
-            "a.mjs:2:8 boundary/banned-imports restricted",
-            "b.cjs:2:9 boundary/banned-imports restricted",
+            "a.mjs:2:8 boundary/banned-imports [advisory] restricted",
+            "b.cjs:2:9 boundary/banned-imports [advisory] restricted",
         ]
     );
 }
@@ -151,15 +154,15 @@ fn package_import_conditions_stop_at_null() {
             ("c.mts", "import type {Model} from '#blocked';"),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         out.lines()
             .filter(|line| line.contains(" boundary/banned-imports "))
             .collect::<Vec<_>>(),
         [
-            "a.mjs:3:8 boundary/banned-imports restricted",
-            "c.mts:1:26 boundary/banned-imports restricted",
+            "a.mjs:3:8 boundary/banned-imports [advisory] restricted",
+            "c.mts:1:26 boundary/banned-imports [advisory] restricted",
         ]
     );
 }
@@ -187,15 +190,15 @@ fn inline_type_specifiers_load_under_verbatim_module_syntax() {
             ("ordinary/a.mts", source),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         out.lines()
             .filter(|line| line.contains(" boundary/banned-imports "))
             .collect::<Vec<_>>(),
         [
-            "verbatim/a.mts:1:24 boundary/banned-imports restricted",
-            "verbatim/a.mts:2:24 boundary/banned-imports restricted",
+            "verbatim/a.mts:1:24 boundary/banned-imports [advisory] restricted",
+            "verbatim/a.mts:2:24 boundary/banned-imports [advisory] restricted",
         ]
     );
 }
@@ -304,10 +307,10 @@ fn unreadable_loader_calls_and_module_escapes_are_findings() {
         "import * as m from 'module'; delete m.createRequire;",
         "const {require:q}=globalThis; consume(q);",
     ] {
-        let out = judge_banned("a.ts", source, 1);
+        let out = judge_banned("a.ts", source, 0);
         let note = "specifier is not a literal";
         assert!(
-            out.contains(&format!("boundary/banned-imports {note}\n")),
+            out.contains(&format!("boundary/banned-imports [advisory] {note}\n")),
             "{source}\n{out}"
         );
     }
@@ -352,9 +355,9 @@ fn loader_scope_controls_and_module_pattern_siblings() {
         "const {require:{call:q}}=module; q('allowed');",
         "let q; ({require:q}=module); require('allowed');",
     ] {
-        let out = judge_banned("a.cjs", source, 1);
+        let out = judge_banned("a.cjs", source, 0);
         assert!(
-            out.contains("boundary/banned-imports specifier is not a literal"),
+            out.contains("boundary/banned-imports [advisory] specifier is not a literal"),
             "{source}\n{out}"
         );
     }
@@ -538,11 +541,13 @@ fn process_builtin_and_wrapper_arguments() {
             "specifier is not a literal",
         ),
     ] {
-        let out = judge(&[("blackhole.toml", config), (file, source)], &[], 1);
+        let out = judge(&[("blackhole.toml", config), (file, source)], &[], 0);
         let col = source.find(at).unwrap() + 1;
         assert_eq!(
             lines_for(&out, file),
-            [format!("{file}:1:{col} boundary/banned-imports {note}")],
+            [format!(
+                "{file}:1:{col} boundary/banned-imports [advisory] {note}"
+            )],
             "{source}"
         );
     }
@@ -618,12 +623,12 @@ fn base_write_reports_only_at_the_write() {
                 ("db/x.cjs", ""),
             ],
             &[],
-            1,
+            0,
         );
         assert_eq!(
             lines_for(&out, file),
             [format!(
-                "{file}:2:1 boundary/banned-imports specifier is not a literal"
+                "{file}:2:1 boundary/banned-imports [advisory] specifier is not a literal"
             )]
         );
     }
@@ -671,11 +676,11 @@ fn global_filename_is_not_a_wrapper_base_in_module_packages() {
             ("db/x.cjs", ""),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "ui/a.js:"),
-        ["ui/a.js:3:39 boundary/banned-imports specifier is not a literal"]
+        ["ui/a.js:3:39 boundary/banned-imports [advisory] specifier is not a literal"]
     );
 }
 
@@ -718,7 +723,7 @@ fn closed_loader_forms() {
                 expected.push(format!("a.cts:{line}:1 ts/no-reflect-apply"));
             }
             expected.push(format!(
-                "a.cts:{line}:{col} boundary/banned-imports specifier is not a literal"
+                "a.cts:{line}:{col} boundary/banned-imports [advisory] specifier is not a literal"
             ));
         }
     }
@@ -735,7 +740,7 @@ fn closed_loader_forms() {
             writeln!(source, "{root}('{name}');").unwrap();
             if name == "restricted" {
                 expected.push(format!(
-                    "a.cts:{line}:{} boundary/banned-imports restricted",
+                    "a.cts:{line}:{} boundary/banned-imports [advisory] restricted",
                     root.len() + 2
                 ));
             }
@@ -840,12 +845,10 @@ fn check_loader_spellings() {
             "specifier is not a literal",
         ),
     ] {
-        let output = judge_banned("row.cjs", stmt, 1);
+        let output = judge_banned("row.cjs", stmt, 0);
         let col = stmt.find(at).unwrap() + 1;
-        assert!(
-            output.contains(&format!("row.cjs:1:{col} boundary/banned-imports {note}")),
-            "{stmt}\n{output}"
-        );
+        let expected = format!("row.cjs:1:{col} boundary/banned-imports [advisory] {note}");
+        assert!(output.contains(&expected), "{stmt}\n{output}");
     }
 }
 
@@ -956,11 +959,11 @@ fn require_resolve_reports_only_when_the_result_reaches_a_loader() {
     let out = judge_banned(
         "a.cjs",
         "require.resolve(name);\nrequire(require.resolve(name));",
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "a.cjs:"),
-        ["a.cjs:2:9 boundary/banned-imports specifier is not a literal"]
+        ["a.cjs:2:9 boundary/banned-imports [advisory] specifier is not a literal"]
     );
 }
 
@@ -995,16 +998,16 @@ fn dynamic_import_of_lookup_reports_non_literal() {
             ("node_modules/restricted/ok.cjs", "module.exports=1;"),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "ui/"),
         [
-            "ui/alias.cjs:1:40 boundary/banned-imports specifier is not a literal",
-            "ui/computed.cjs:1:8 boundary/banned-imports specifier is not a literal",
-            "ui/load.cjs:1:8 boundary/banned-imports specifier is not a literal",
-            "ui/load.cjs:2:8 boundary/banned-imports specifier is not a literal",
-            "ui/load.mjs:1:14 boundary/banned-imports specifier is not a literal",
+            "ui/alias.cjs:1:40 boundary/banned-imports [advisory] specifier is not a literal",
+            "ui/computed.cjs:1:8 boundary/banned-imports [advisory] specifier is not a literal",
+            "ui/load.cjs:1:8 boundary/banned-imports [advisory] specifier is not a literal",
+            "ui/load.cjs:2:8 boundary/banned-imports [advisory] specifier is not a literal",
+            "ui/load.mjs:1:14 boundary/banned-imports [advisory] specifier is not a literal",
         ]
     );
 }
@@ -1057,11 +1060,11 @@ fn destructured_lookup_is_reported_when_loaded() {
             "specifier is not a literal",
         ),
     ] {
-        let out = judge_banned("a.cjs", source, 1);
+        let out = judge_banned("a.cjs", source, 0);
         assert!(
             lines_for(&out, "a.cjs:").contains(
                 &format!(
-                    "a.cjs:{}:9 boundary/banned-imports {note}",
+                    "a.cjs:{}:9 boundary/banned-imports [advisory] {note}",
                     source.lines().count()
                 )
                 .as_str()
@@ -1177,12 +1180,12 @@ fn scoped_check_resolves_aliases_outside_the_selection() {
     );
     put(root, "src/app.mts", "import '#entry';");
     put(root, "other.mts", "import 'restricted';");
-    let output = cli::check(root, &["src"], 1);
+    let output = cli::check(root, &["src"], 0);
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         text.lines()
             .filter(|line| line.contains(" boundary/banned-imports "))
             .collect::<Vec<_>>(),
-        ["src/app.mts:1:8 boundary/banned-imports restricted"]
+        ["src/app.mts:1:8 boundary/banned-imports [advisory] restricted"]
     );
 }

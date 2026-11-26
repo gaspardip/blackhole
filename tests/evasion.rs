@@ -62,10 +62,15 @@ fn run(case: &Path) -> Result<()> {
     };
     let out = cmd.output()?;
     let stdout = String::from_utf8(out.stdout)?;
-    if out.status.code() != Some(code)
-        || stdout.lines().last().unwrap_or("") != summary
-        || !out.stderr.is_empty()
-    {
+    let matches_verdict = if gates == "green" && !stdout.is_empty() {
+        stdout.lines().any(|line| line.contains(" [advisory]"))
+            && !stdout
+                .lines()
+                .any(|line| line.starts_with("blackhole ci: red ("))
+    } else {
+        stdout.lines().last().unwrap_or("") == summary
+    };
+    if out.status.code() != Some(code) || !matches_verdict || !out.stderr.is_empty() {
         return Err(format!(
             "expected {gates}, got {} {stdout}{}",
             out.status,

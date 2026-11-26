@@ -1,5 +1,7 @@
 # boundary/banned-imports
 
+Advisory until the resolution cases under Does not catch are addressed. Findings print with `[advisory]` and leave the verdict unchanged.
+
 ## Catches
 
 - A configured banned name or its slash subpaths in static imports,

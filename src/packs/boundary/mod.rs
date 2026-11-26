@@ -44,7 +44,7 @@ use std::{
 pub const BANNED: Rule = Rule {
     id: "boundary/banned-imports",
     family: Family::Boundary,
-    gate: Gate::Blocking,
+    gate: Gate::Advisory,
     provenance: "A disallowed dependency can enter through any import form.",
     fix: "Remove the dependency and implement the operation with an allowed module.",
     run: Run::Repo(banned),

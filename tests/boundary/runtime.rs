@@ -1,7 +1,7 @@
 use super::{UNKNOWN, assert_findings, judge, lines_for};
 
 fn findings(path: &str, source: &str, expected: &[(usize, usize, &str)]) {
-    assert_findings(path, source, expected, true);
+    assert_findings(path, source, expected, true, 0);
 }
 
 #[test]
@@ -91,10 +91,12 @@ fn runtime_wrapper_bindings() {
 
 #[test]
 fn untrusted_loader_members() {
-    findings(
+    assert_findings(
         "a.cjs",
         "const load = require('module').createRequire('/other.cjs');\nconst resolve = load.resolve;\ntypeof load.main;\nconst {resolve:r} = load;\nload.length;",
         &[(2, 17, UNKNOWN), (3, 8, UNKNOWN), (4, 21, UNKNOWN)],
+        true,
+        1,
     );
 }
 
@@ -123,10 +125,12 @@ fn meta_assignment_patterns() {
 
 #[test]
 fn wrapper_root_read_positions() {
-    findings(
+    assert_findings(
         "a.cjs",
         "typeof arguments;\nconst a = arguments; a === arguments;\nconst main = process.mainModule; main === module;\nconst {mainModule:m} = process; typeof m;\nconsume(m);\na[0];\nfunction f(){ return () => arguments[1]; }",
         &[(5, 9, UNKNOWN), (6, 1, UNKNOWN)],
+        true,
+        1,
     );
 }
 
@@ -212,21 +216,21 @@ fn discarded_process_and_global_values_only_check_dependencies() {
             ("a.mts", loads),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "a.mts:"),
         [
-            "a.mts:1:9 boundary/banned-imports node:process",
-            "a.mts:2:14 boundary/banned-imports node:process",
-            "a.mts:3:14 boundary/banned-imports node:process",
+            "a.mts:1:9 boundary/banned-imports [advisory] node:process",
+            "a.mts:2:14 boundary/banned-imports [advisory] node:process",
+            "a.mts:3:14 boundary/banned-imports [advisory] node:process",
         ],
     );
 }
 
 #[test]
 fn discarded_global_assign_accepts_static_methods_and_wrapped_literals() {
-    findings(
+    assert_findings(
         "a.mts",
         "Object.assign(globalThis, ({}));\nObject['assign'](globalThis, {});\nObject.assign(globalThis, {} as object);\nObject.assign(globalThis, obj);\nfunction patch(Object) { Object.assign(globalThis, {}); }\nconst result = Object['assign'](globalThis, ({}));\nObject[method](globalThis, {});",
         &[
@@ -235,6 +239,8 @@ fn discarded_global_assign_accepts_static_methods_and_wrapped_literals() {
             (6, 33, UNKNOWN),
             (7, 16, UNKNOWN),
         ],
+        true,
+        1,
     );
 }
 
@@ -265,11 +271,11 @@ fn type_package_imports_banned_rule_uses_resolved_condition() {
             ),
         ],
         &[],
-        1,
+        0,
     );
     assert_eq!(
         lines_for(&out, "ui/app.cts"),
-        ["ui/app.cts:1:26 boundary/banned-imports demo"]
+        ["ui/app.cts:1:26 boundary/banned-imports [advisory] demo"]
     );
 }
 
@@ -298,12 +304,12 @@ fn mixed_reexports_follow_the_exported_type_and_value_readings() {
                 ("app.mts", source),
             ],
             &[],
-            1,
+            0,
         );
         for (line, text) in source.lines().enumerate() {
             assert!(
                 out.contains(&format!(
-                    "app.mts:{}:{} boundary/banned-imports {banned}",
+                    "app.mts:{}:{} boundary/banned-imports [advisory] {banned}",
                     line + 1,
                     text.find("'#dep'").unwrap() + 1
                 )),
@@ -321,7 +327,7 @@ fn non_null_wrapped_bases_and_specifiers_keep_their_findings() {
         "require((('restricted' satisfies string)!));\n",
         "createRequire(import.meta.url)((`restricted`)!);",
     );
-    findings(
+    assert_findings(
         "ui/a.ts",
         source,
         &[
@@ -329,6 +335,8 @@ fn non_null_wrapped_bases_and_specifiers_keep_their_findings() {
             (3, 11, "restricted"),
             (4, 33, "restricted"),
         ],
+        true,
+        1,
     );
 }
 
