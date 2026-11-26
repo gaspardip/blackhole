@@ -421,21 +421,22 @@ impl Source {
     }
 
     fn locate(&self, path: &str, mut hits: Vec<Hit<'_>>, result: &mut Vec<Finding>) {
+        hits.sort_by_key(|(offset, _, _)| *offset);
         if self.nul.is_some() {
             // Text rules see stripped offsets. Line rules and encoding errors use decoded offsets.
-            let nuls: Vec<_> = self
-                .decoded
-                .match_indices('\0')
-                .enumerate()
-                .map(|(skipped, (at, _))| at - skipped)
-                .collect();
+            let mut nuls = self.decoded.match_indices('\0').peekable();
+            let mut skipped = 0;
             for (offset, rule, _) in &mut hits {
                 if !matches!(rule.run, Run::Lines(_) | Run::ParseError) {
-                    *offset += nuls.partition_point(|&at| at <= *offset);
+                    while nuls.peek().is_some_and(|(at, _)| *at <= *offset + skipped) {
+                        nuls.next();
+                        skipped += 1;
+                    }
+                    *offset += skipped;
                 }
             }
+            hits.sort_by_key(|(offset, _, _)| *offset);
         }
-        hits.sort_by_key(|(offset, _, _)| *offset);
         let mut chars = self.decoded.chars().peekable();
         let (mut matched, mut line, mut col) = (0, 1, 1);
         for (offset, rule, note) in hits {
