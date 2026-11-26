@@ -1,6 +1,6 @@
 use crate::{
     engine::TsCtx,
-    packs::ts::values::{is_written, symbol, unwrapped},
+    packs::ts::values::{is_written, property_key, string_value, symbol, unwrapped},
 };
 use oxc::{
     ast::{
@@ -86,24 +86,11 @@ impl<'ctx, 'a> Values<'ctx, 'a> {
     }
 
     pub fn literal(&self, expr: &'a Expression<'a>) -> Option<&'a str> {
-        match self.resolve(expr) {
-            Expression::StringLiteral(s) => s.value.as_str(),
-            Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
-                t.quasis.first()?.value.cooked?.as_str()
-            }
-            _ => None,
-        }
+        string_value(self.resolve(expr))
     }
 
     pub fn key(&self, key: &'a PropertyKey<'a>) -> Option<&'a str> {
-        if let PropertyKey::StaticIdentifier(id) = key {
-            return Some(id.name.as_str());
-        }
-        let expr = key.as_expression()?;
-        if let Expression::NumericLiteral(n) = expr {
-            return n.raw.as_ref().map(oxc::str::Str::as_str);
-        }
-        self.literal(expr)
+        property_key(key, |expr| self.resolve(expr))
     }
 
     fn pattern_index(&self, pattern: &'a ObjectPattern<'a>) -> Rc<PatternIndex<'a>> {

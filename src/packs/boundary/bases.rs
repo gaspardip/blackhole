@@ -63,17 +63,10 @@ pub(super) fn base_write<'a>(kinds: &Kinds<'_, 'a>, id: NodeId, kind: AstKind<'a
 }
 
 pub(super) fn wrapped_node(kind: AstKind<'_>) -> Option<NodeId> {
-    Some(match kind {
-        AstKind::ParenthesizedExpression(n) => n.expression.node_id(),
-        AstKind::ChainExpression(n) => n.expression.node_id(),
-        AstKind::TSAsExpression(n) => n.expression.node_id(),
-        AstKind::TSSatisfiesExpression(n) => n.expression.node_id(),
-        AstKind::TSInstantiationExpression(n) => n.expression.node_id(),
-        AstKind::TSNonNullExpression(n) => n.expression.node_id(),
-        AstKind::TSTypeAssertion(n) => n.expression.node_id(),
-        AstKind::SequenceExpression(s) => s.expressions.last()?.node_id(),
-        _ => return None,
-    })
+    match kind {
+        AstKind::SequenceExpression(s) => Some(s.expressions.last()?.node_id()),
+        _ => crate::packs::ts::values::transparent_child(kind),
+    }
 }
 
 pub(super) fn outer<'a>(ctx: &TsCtx<'a>, mut id: NodeId) -> Option<AstKind<'a>> {

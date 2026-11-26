@@ -267,18 +267,17 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
     let exported = type_exports(ctx);
     for (id, node) in ctx.nodes_with_ids() {
         let kind = node.kind();
-        if super::bases::base_write(&kinds, id, kind) {
-            imports.push(Import::new(kind.span().start, None, Kind::Require));
-        }
-        if let Some(value) = kinds.node(id)
-            && !kinds.read(id, value)
-        {
-            imports.push(Import::new(kind.span().start, None, Kind::Require));
-        }
-        if let Some(span) = kinds.unread_alias(kind) {
-            imports.push(Import::new(span.start, None, Kind::Require));
-        }
-        if let Some(offset) = unread_binding(&kinds, kind) {
+        let start = kind.span().start;
+        let offsets = [
+            super::bases::base_write(&kinds, id, kind).then_some(start),
+            kinds
+                .node(id)
+                .is_some_and(|value| !kinds.read(id, value))
+                .then_some(start),
+            kinds.unread_alias(kind).map(|span| span.start),
+            unread_binding(&kinds, kind),
+        ];
+        for offset in offsets.into_iter().flatten() {
             imports.push(Import::new(offset, None, Kind::Require));
         }
         let import = match kind {

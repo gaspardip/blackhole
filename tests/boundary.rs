@@ -1,3 +1,5 @@
+#[path = "common/cli.rs"]
+mod cli;
 mod common;
 use std::{fs, os::unix::fs::symlink, path::Path};
 
@@ -8,7 +10,7 @@ fn put(root: &Path, name: &str, content: &str) {
 }
 
 fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = cli::repo();
     let root = dir.path();
     for &(name, text) in files {
         put(root, name, text);
@@ -16,40 +18,57 @@ fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
     for &(name, target) in links {
         symlink(target, root.join(name)).unwrap();
     }
-    common::git(root, &["init", "-q"]).unwrap();
     common::git(root, &["add", "-f", "."]).unwrap();
     common::git(root, &["commit", "-qm", "case"]).unwrap();
     let outputs = [
-        vec!["check"],
-        vec!["ci", "--base", "HEAD", "--head", "HEAD"],
+        cli::check(root, &[], code),
+        cli::run(root, &["ci", "--base", "HEAD", "--head", "HEAD"], code),
     ]
-    .map(|args| {
-        let output = common::command(env!("CARGO_BIN_EXE_blackhole"))
-            .args(args)
-            .current_dir(root)
-            .output()
-            .unwrap();
+    .map(|output| {
         let text = String::from_utf8(if code == 2 {
             output.stderr
         } else {
             output.stdout
         })
         .unwrap();
-        (
-            output.status.code(),
-            text.trim_end_matches("blackhole ci: red (findings)\n")
-                .to_owned(),
-        )
+        text.trim_end_matches("blackhole ci: red (findings)\n")
+            .to_owned()
     });
     assert_eq!(outputs[0], outputs[1]);
-    assert_eq!(outputs[0].0, Some(code), "{outputs:?}");
-    outputs.into_iter().next().unwrap().1
+    outputs.into_iter().next().unwrap()
 }
 
 fn lines_for<'a>(out: &'a str, prefix: &str) -> Vec<&'a str> {
     out.lines()
         .filter(|line| line.starts_with(prefix))
         .collect()
+}
+
+const UNKNOWN: &str = "specifier is not a literal";
+
+fn findings(path: &str, source: &str, expected: &[(usize, usize, &str)]) {
+    assert_findings(path, source, expected, false);
+}
+
+fn assert_findings(
+    path: &str,
+    source: &str,
+    expected: &[(usize, usize, &str)],
+    boundary_only: bool,
+) {
+    let out = judge_banned(path, source, i32::from(!expected.is_empty()));
+    let lines: Vec<_> = expected
+        .iter()
+        .map(|(line, col, note)| format!("{path}:{line}:{col} boundary/banned-imports {note}"))
+        .collect();
+    let boundary: Vec<_> = lines_for(&out, path)
+        .into_iter()
+        .filter(|line| !boundary_only || line.contains(" boundary/"))
+        .collect();
+    assert_eq!(boundary, lines, "{source}");
+    if !boundary_only && expected.is_empty() {
+        assert!(out.is_empty(), "{out}");
+    }
 }
 
 #[test]
@@ -132,14 +151,7 @@ fn loader_sources_share_the_base_check() {
                 expected.push((3, callee.len() + 2, note));
             }
             expected.sort_unstable();
-            let out = judge_banned(file, &source, i32::from(!expected.is_empty()));
-            let lines: Vec<_> = expected
-                .into_iter()
-                .map(|(line, col, note)| {
-                    format!("{file}:{line}:{col} boundary/banned-imports {note}")
-                })
-                .collect();
-            assert_eq!(lines_for(&out, file), lines, "{source}");
+            findings(file, &source, &expected);
         }
     }
 }
@@ -180,18 +192,8 @@ fn filename_factory_accepts_implicit_commonjs_javascript() {
         ("a.ts", call.to_owned(), 1),
         ("a.js", format!("{call}\nexport {{}};"), 1),
     ] {
-        let out = judge_banned(path, &source, code);
-        if code == 0 {
-            assert_eq!(out, "");
-        } else {
-            assert_eq!(
-                lines_for(&out, path),
-                [format!(
-                    "{path}:2:27 boundary/banned-imports specifier is not a literal"
-                )],
-                "{source}"
-            );
-        }
+        let expected = [(2, 27, UNKNOWN)];
+        findings(path, &source, &expected[..code]);
     }
 }
 
@@ -262,15 +264,7 @@ fn instance_and_class_factory_members() {
             &[],
         ),
     ] {
-        let out = judge_banned(path, source, i32::from(!positions.is_empty()));
-        let expected: Vec<_> = positions
-            .iter()
-            .map(|(line, col, note)| format!("{path}:{line}:{col} boundary/banned-imports {note}"))
-            .collect();
-        assert_eq!(lines_for(&out, path), expected, "{source}");
-        if positions.is_empty() {
-            assert!(out.is_empty(), "{out}");
-        }
+        findings(path, source, positions);
     }
 }
 
@@ -297,17 +291,8 @@ fn namespace_binding_positions() {
         (" alias=other;", Some(40)),
     ] {
         let source = format!("{prelude}{tail}");
-        let output = judge_banned("a.ts", &source, i32::from(position.is_some()));
-        if let Some(col) = position {
-            assert_eq!(
-                lines_for(&output, "a.ts:"),
-                [format!(
-                    "a.ts:1:{col} boundary/banned-imports specifier is not a literal"
-                )]
-            );
-        } else {
-            assert!(output.is_empty(), "{output}");
-        }
+        let expected = position.map(|col| (1, col, UNKNOWN));
+        findings("a.ts", &source, expected.as_slice());
     }
 }
 
@@ -317,11 +302,7 @@ fn mutable_destructuring_reports_the_factory_initializer() {
         let source = format!(
             "{declaration} {{ createRequire: f }} = require('module'); f(__filename)('restricted');"
         );
-        let output = judge_banned("a.cjs", &source, 1);
-        assert_eq!(
-            lines_for(&output, "a.cjs:"),
-            ["a.cjs:1:28 boundary/banned-imports specifier is not a literal"]
-        );
+        findings("a.cjs", &source, &[(1, 28, UNKNOWN)]);
     }
 }
 
@@ -357,15 +338,8 @@ fn unread_loader_positions() {
         ("a.cjs", "require.apply(null, unknown);", "require"),
         ("a.cjs", "require.resolve.apply(null, unknown);", "require"),
     ] {
-        let out = judge_banned(file, source, 1);
-        assert_eq!(
-            lines_for(&out, file),
-            [format!(
-                "{file}:1:{} boundary/banned-imports specifier is not a literal",
-                source.find(needle).unwrap() + 1
-            )],
-            "{source}"
-        );
+        let col = source.find(needle).unwrap() + 1;
+        findings(file, source, &[(1, col, UNKNOWN)]);
     }
 }
 
@@ -470,15 +444,8 @@ fn trusted_base_uses() {
             "'./x.cjs'",
         ),
     ] {
-        let out = judge_banned(file, source, 1);
-        let column = source.find(at).unwrap() + 1;
-        assert_eq!(
-            lines_for(&out, file),
-            [format!(
-                "{file}:1:{column} boundary/banned-imports specifier is not a literal"
-            )],
-            "{source}"
-        );
+        let col = source.find(at).unwrap() + 1;
+        findings(file, source, &[(1, col, UNKNOWN)]);
     }
     for (file, source) in [
         (
@@ -536,14 +503,8 @@ fn base_write_reports_only_at_the_write() {
 fn filename_base_in_explicit_modules() {
     let source = "import {createRequire} from 'node:module'; createRequire(__filename)('allowed');";
     for file in ["a.mjs", "a.mts"] {
-        let out = judge_banned(file, source, 1);
         let col = source.find("'allowed'").unwrap() + 1;
-        assert_eq!(
-            lines_for(&out, file),
-            [format!(
-                "{file}:1:{col} boundary/banned-imports specifier is not a literal"
-            )]
-        );
+        findings(file, source, &[(1, col, UNKNOWN)]);
     }
 }
 
@@ -559,15 +520,8 @@ fn filename_global_property_writes() {
             format!("for ({target} of names) {{}}"),
         ] {
             let source = format!("{statement}\nrequire('allowed');");
-            let out = judge_banned("a.cjs", &source, 1);
             let col = statement.find(target).unwrap() + 1;
-            assert_eq!(
-                lines_for(&out, "a.cjs:"),
-                [format!(
-                    "a.cjs:1:{col} boundary/banned-imports specifier is not a literal"
-                )],
-                "{source}"
-            );
+            findings("a.cjs", &source, &[(1, col, UNKNOWN)]);
         }
     }
 }
@@ -819,19 +773,11 @@ fn check_exported_loaders() {
         ),
         ("a.mts", "export * from 'node:module';".into(), vec![15]),
     ] {
-        let out = judge_banned(path, &source, 1);
         let expected: Vec<_> = columns
             .into_iter()
-            .map(|col| {
-                let note = if col == 101 {
-                    "restricted"
-                } else {
-                    "specifier is not a literal"
-                };
-                format!("{path}:1:{col} boundary/banned-imports {note}")
-            })
+            .map(|col| (1, col, if col == 101 { "restricted" } else { UNKNOWN }))
             .collect();
-        assert_eq!(lines_for(&out, path), expected, "{source}");
+        findings(path, &source, &expected);
     }
 }
 
@@ -936,10 +882,7 @@ fn dynamic_import_of_lookup_reports_non_literal() {
 #[test]
 fn lookup_with_options_is_reported_when_loaded() {
     let source = "require(require.resolve('restricted', { paths: [dir] }));";
-    assert_eq!(
-        lines_for(&judge_banned("a.cjs", source, 1), "a.cjs:"),
-        ["a.cjs:1:9 boundary/banned-imports specifier is not a literal"]
-    );
+    findings("a.cjs", source, &[(1, 9, UNKNOWN)]);
 }
 
 #[test]
@@ -948,11 +891,7 @@ fn import_meta_lookup_is_reported_when_loaded() {
         "await import(import.meta.resolve('restricted'));",
         "await import(import.meta.resolve(dyn));",
     ] {
-        assert_eq!(
-            lines_for(&judge_banned("a.mjs", source, 1), "a.mjs:"),
-            ["a.mjs:1:14 boundary/banned-imports specifier is not a literal"],
-            "{source}"
-        );
+        findings("a.mjs", source, &[(1, 14, UNKNOWN)]);
     }
 }
 
@@ -966,23 +905,14 @@ fn loaded_lookup_reports_for_either_loader_base() {
     ] {
         let source = format!("import {{createRequire}} from 'node:module';\n{expr}");
         let col = expr.find("(createRequire").unwrap() + 2;
-        assert_eq!(
-            lines_for(&judge_banned("a.mjs", &source, 1), "a.mjs:"),
-            [format!(
-                "a.mjs:2:{col} boundary/banned-imports specifier is not a literal"
-            )],
-            "{expr}"
-        );
+        findings("a.mjs", &source, &[(2, col, UNKNOWN)]);
     }
 }
 
 #[test]
 fn builtin_loader_reports_resolved_argument() {
     let source = "process.getBuiltinModule(require.resolve('node:module')).createRequire(__filename)('restricted');";
-    assert_eq!(
-        lines_for(&judge_banned("a.cjs", source, 1), "a.cjs:"),
-        ["a.cjs:1:26 boundary/banned-imports specifier is not a literal"]
-    );
+    findings("a.cjs", source, &[(1, 26, UNKNOWN)]);
 }
 
 #[test]
@@ -1017,10 +947,7 @@ fn unknown_base_computed_lookup_reports_only_when_loaded() {
     let alone = format!("{setup}\nr['resolve'](dyn);");
     assert_eq!(judge_banned("a.cjs", &alone, 0), "");
     let loaded = format!("{setup}\nrequire(r['resolve'](dyn));");
-    assert_eq!(
-        lines_for(&judge_banned("a.cjs", &loaded, 1), "a.cjs:"),
-        ["a.cjs:2:9 boundary/banned-imports specifier is not a literal"]
-    );
+    findings("a.cjs", &loaded, &[(2, 9, UNKNOWN)]);
 }
 
 #[test]
@@ -1031,26 +958,14 @@ fn unknown_base_lookup_reads_report_at_the_member() {
         ("const f = (r.resolve).foo;", 12),
     ] {
         let source = format!("{setup}\n{read}");
-        assert_eq!(
-            lines_for(&judge_banned("a.cjs", &source, 1), "a.cjs:"),
-            [format!(
-                "a.cjs:2:{col} boundary/banned-imports specifier is not a literal"
-            )],
-            "{read}"
-        );
+        findings("a.cjs", &source, &[(2, col, UNKNOWN)]);
     }
 }
 
 #[test]
 fn resolved_load_reports_at_its_argument_start() {
     let source = "require('restricted');\nrequire(require.resolve('restricted'));";
-    assert_eq!(
-        lines_for(&judge_banned("a.cjs", source, 1), "a.cjs:"),
-        [
-            "a.cjs:1:9 boundary/banned-imports restricted",
-            "a.cjs:2:9 boundary/banned-imports specifier is not a literal",
-        ]
-    );
+    findings("a.cjs", source, &[(1, 9, "restricted"), (2, 9, UNKNOWN)]);
 }
 
 #[test]
@@ -1073,13 +988,7 @@ fn runtime_builtins_loaded_through_resolve_report_at_the_load() {
         ),
     ] {
         let col = source.find(argument).unwrap() + 1;
-        assert_eq!(
-            lines_for(&judge_banned(path, source, 1), path),
-            [format!(
-                "{path}:1:{col} boundary/banned-imports specifier is not a literal"
-            )],
-            "{source}"
-        );
+        findings(path, source, &[(1, col, UNKNOWN)]);
     }
 }
 
@@ -1099,13 +1008,7 @@ fn allowed_lookup_names_are_still_non_literal_load_arguments() {
         ),
     ] {
         let col = source.find(argument).unwrap() + 1;
-        assert_eq!(
-            lines_for(&judge_banned(path, source, 1), path),
-            [format!(
-                "{path}:1:{col} boundary/banned-imports specifier is not a literal"
-            )],
-            "{source}"
-        );
+        findings(path, source, &[(1, col, UNKNOWN)]);
     }
 }
 
@@ -1122,10 +1025,7 @@ fn destructuring_a_lookup_does_not_load_anything() {
 #[test]
 fn destructuring_a_lookup_with_an_untrusted_base_reports_at_the_binding() {
     let source = "import {createRequire} from 'node:module';\nconst {resolve} = createRequire(__filename + ''); resolve('node:path');";
-    assert_eq!(
-        lines_for(&judge_banned("a.ts", source, 1), "a.ts:"),
-        ["a.ts:2:19 boundary/banned-imports specifier is not a literal"]
-    );
+    findings("a.ts", source, &[(2, 19, UNKNOWN)]);
 }
 
 #[path = "boundary/runtime.rs"]
@@ -1133,7 +1033,7 @@ mod runtime;
 
 #[test]
 fn scoped_check_resolves_aliases_outside_the_selection() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = cli::repo();
     let root = dir.path();
     put(
         root,
@@ -1147,13 +1047,7 @@ fn scoped_check_resolves_aliases_outside_the_selection() {
     );
     put(root, "src/app.mts", "import '#entry';");
     put(root, "other.mts", "import 'restricted';");
-    common::git(root, &["init", "-q"]).unwrap();
-    let output = common::command(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(root)
-        .args(["check", "src"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let output = cli::check(root, &["src"], 1);
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(
         text.lines()

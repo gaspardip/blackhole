@@ -188,16 +188,16 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
     let filed = policy(entered, "objections")?.unwrap_or_default();
     let all = || names.iter().map(String::as_str);
-    let resolution_paths = if config.engine_settings().banned_imports.is_empty() {
-        packs::boundary::RepositoryPaths::default()
-    } else {
-        files::repository_paths(root, all())?
-    };
     let selected = all()
         .filter(|name| selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)));
-    let findings = scan_files(&config, Vec::new(), selected, resolution_paths, |name| {
-        files::read(&root.join(name))
-    })?;
+    let findings = scan_files(
+        &config,
+        Vec::new(),
+        selected,
+        (),
+        |()| files::repository_paths(root, all()),
+        |(), name| files::read(&root.join(name)),
+    )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(&filed, today)?;
@@ -217,30 +217,32 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     })
 }
 
-fn scan_files<'a>(
+fn scan_files<'a, S: Send>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
-    paths: packs::boundary::RepositoryPaths,
-    read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send,
+    mut source: S,
+    inventory: impl FnOnce(&mut S) -> io::Result<packs::boundary::RepositoryPaths>,
+    mut read: impl FnMut(&mut S, &str) -> io::Result<Option<Vec<u8>>> + Send,
 ) -> io::Result<Vec<engine::Finding>> {
-    let settings = config.engine_settings();
-    let reader = packs::boundary::Reader::new(paths.links, read);
-    let repository =
-        (!settings.banned_imports.is_empty()).then(|| engine::RepoCtx::new(paths.files, &reader));
-    for name in names.filter(|name| !config.exclude.is_match(name)) {
-        if let Some(bytes) = reader.read(name)? {
-            engine::run_file(
-                engine::registry(),
-                name,
-                &bytes,
-                settings,
-                repository.as_ref(),
-                &mut findings,
-            );
-        }
-    }
-    reader.finish()?;
+    engine::scan(
+        engine::registry(),
+        config.engine_settings(),
+        config.banned_imports(),
+        |enabled| {
+            let paths = enabled.then(|| inventory(&mut source)).transpose()?;
+            let reader = packs::boundary::Reader::new(move |name| read(&mut source, name));
+            Ok((paths, reader, ()))
+        },
+        |scanner, reader, ()| {
+            for name in names.filter(|name| !config.exclude.is_match(name)) {
+                if let Some(bytes) = reader.read(name)? {
+                    scanner.file(name, &bytes, &mut findings);
+                }
+            }
+            reader.finish()
+        },
+    )?;
     engine::sort_findings(&mut findings);
     Ok(findings)
 }

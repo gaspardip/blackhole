@@ -690,7 +690,11 @@ pub(super) fn resolves_to_global<'a>(
 pub(super) use strings::{contains_shape, static_string_contains_shape};
 
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
-    match resolve(ctx, expr) {
+    string_value(resolve(ctx, expr))
+}
+
+pub(crate) fn string_value<'a>(expr: &Expression<'a>) -> Option<&'a str> {
+    match expr {
         Expression::StringLiteral(s) => s.value.as_str(),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
             t.quasis.first()?.value.cooked?.as_str()
@@ -700,6 +704,13 @@ pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&
 }
 
 pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    property_key(key, |expr| resolve(ctx, expr))
+}
+
+pub(crate) fn property_key<'a>(
+    key: &'a PropertyKey<'a>,
+    resolve: impl FnOnce(&'a Expression<'a>) -> &'a Expression<'a>,
+) -> Option<&'a str> {
     if let PropertyKey::StaticIdentifier(id) = key {
         return Some(id.name.as_str());
     }
@@ -707,7 +718,7 @@ pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a s
     if let Expression::NumericLiteral(n) = expr {
         return n.raw.as_ref().map(oxc::str::Str::as_str);
     }
-    literal(ctx, expr)
+    string_value(resolve(expr))
 }
 
 pub(super) struct MemberKeys<'ctx, 'a>(pub(super) &'ctx TsCtx<'a>);
@@ -923,16 +934,20 @@ pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Optio
 
 /// Wrappers that leave the wrapped expression's value and target unchanged.
 fn transparent(kind: &AstKind<'_>) -> bool {
-    matches!(
-        kind,
-        AstKind::ParenthesizedExpression(_)
-            | AstKind::ChainExpression(_)
-            | AstKind::TSAsExpression(_)
-            | AstKind::TSSatisfiesExpression(_)
-            | AstKind::TSInstantiationExpression(_)
-            | AstKind::TSNonNullExpression(_)
-            | AstKind::TSTypeAssertion(_)
-    )
+    transparent_child(*kind).is_some()
+}
+
+pub(crate) fn transparent_child(kind: AstKind<'_>) -> Option<oxc::syntax::node::NodeId> {
+    Some(match kind {
+        AstKind::ParenthesizedExpression(n) => n.expression.node_id(),
+        AstKind::ChainExpression(n) => n.expression.node_id(),
+        AstKind::TSAsExpression(n) => n.expression.node_id(),
+        AstKind::TSSatisfiesExpression(n) => n.expression.node_id(),
+        AstKind::TSInstantiationExpression(n) => n.expression.node_id(),
+        AstKind::TSNonNullExpression(n) => n.expression.node_id(),
+        AstKind::TSTypeAssertion(n) => n.expression.node_id(),
+        _ => return None,
+    })
 }
 
 pub(crate) fn global_object(name: &str) -> bool {

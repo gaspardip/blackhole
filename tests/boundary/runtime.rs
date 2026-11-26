@@ -1,19 +1,7 @@
-use super::{judge, judge_banned, lines_for};
-
-const UNKNOWN: &str = "specifier is not a literal";
+use super::{UNKNOWN, assert_findings, judge, lines_for};
 
 fn findings(path: &str, source: &str, expected: &[(usize, usize, &str)]) {
-    let out = judge_banned(path, source, i32::from(!expected.is_empty()));
-    let lines: Vec<_> = expected
-        .iter()
-        .map(|(line, col, note)| format!("{path}:{line}:{col} boundary/banned-imports {note}"))
-        .collect();
-    // Other packs have their own fixtures; these cases pin boundary findings.
-    let boundary: Vec<_> = lines_for(&out, path)
-        .into_iter()
-        .filter(|line| line.contains(" boundary/"))
-        .collect();
-    assert_eq!(boundary, lines, "{source}");
+    assert_findings(path, source, expected, true);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 mod declarations;
 
+use super::RepositoryPaths;
 use oxc_resolver::{
     FileMetadata, FileSystem, PackageJson, PackageType, ResolveError, ResolveOptions,
     ResolverGeneric, TsconfigDiscovery,
@@ -20,18 +21,13 @@ const MAX_READS: usize = 64;
 const PACKAGE_TARGETS: &str = "/\0";
 type ReadFile<'a> = Box<dyn FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a>;
 pub(crate) struct Reader<'a> {
-    links: BTreeMap<PathBuf, PathBuf>,
     read: Mutex<ReadFile<'a>>,
     reads: AtomicUsize,
     failure: Mutex<Option<io::Error>>,
 }
 impl<'a> Reader<'a> {
-    pub fn new(
-        links: BTreeMap<PathBuf, PathBuf>,
-        read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a,
-    ) -> Self {
+    pub fn new(read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a) -> Self {
         Self {
-            links,
             read: Mutex::new(Box::new(read)),
             reads: AtomicUsize::new(0),
             failure: Mutex::default(),
@@ -95,7 +91,7 @@ impl<'a> Reader<'a> {
         name: &str,
     ) -> Result<Option<TypeImportTarget>, String> {
         self.bounded(|| {
-            if Self::type_paths_target(loader, tree, file, name)?.is_some() {
+            if Self::type_paths_target(loader, tree, file, name)? {
                 return Ok(Some(TypeImportTarget::Local));
             }
             declarations::import_target(tree, file, name, mode)
@@ -106,7 +102,7 @@ impl<'a> Reader<'a> {
         tree: &Tree<'_, 'a>,
         file: &Path,
         name: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<bool, String> {
         if loader
             .resolver
             .find_tsconfig(file)
@@ -115,7 +111,7 @@ impl<'a> Reader<'a> {
         {
             resolve(&loader.aliases, tree, file, name)
         } else {
-            Ok(None)
+            Ok(false)
         }
     }
     fn bounded<T>(&self, lookup: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -127,10 +123,11 @@ impl<'a> Reader<'a> {
             result
         }
     }
-    pub fn finish(self) -> io::Result<()> {
+    pub fn finish(&self) -> io::Result<()> {
         self.failure
-            .into_inner()
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
             .map_or(Ok(()), Err)
     }
 }
@@ -148,22 +145,23 @@ pub(super) struct Tree<'a, 'source> {
     pub(super) files: Arc<BTreeSet<PathBuf>>,
     pub(super) links: Arc<super::links::Links>,
     dirs: Arc<BTreeSet<PathBuf>>,
-    reader: Option<&'a Reader<'source>>,
+    pub(super) reader: Option<&'a Reader<'source>>,
     package_targets: bool,
     manifest_bytes: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
     manifests: Arc<ManifestCache<Arc<Manifest>>>,
     package_types: Arc<ManifestCache<Option<PackageType>>>,
 }
 impl<'a, 'source> Tree<'a, 'source> {
-    pub fn from_files(names: BTreeSet<PathBuf>, reader: &'a Reader<'source>) -> Self {
-        let dirs = names
+    pub fn from_paths(paths: RepositoryPaths, reader: &'a Reader<'source>) -> Self {
+        let RepositoryPaths { files, links } = paths;
+        let dirs = files
             .iter()
-            .chain(reader.links.keys())
+            .chain(links.keys())
             .flat_map(|p| p.ancestors().skip(1).map(Path::to_owned))
             .collect();
         Self {
-            links: Arc::new(super::links::Links::new(&reader.links, &names, &dirs)),
-            files: Arc::new(names),
+            links: Arc::new(super::links::Links::new(&links, &files, &dirs)),
+            files: Arc::new(files),
             dirs: Arc::new(dirs),
             reader: Some(reader),
             ..Self::default()
@@ -346,17 +344,8 @@ impl<'tree, 'source> Loaders<'tree, 'source> {
     }
 }
 
-const TS_EXTENSIONS: &[&str] = &[
-    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json",
-];
 // TypeScript tries a declaration before JavaScript for an extensionless specifier.
 const TYPE_EXTENSIONS: &[&str] = &[".ts", ".tsx", ".d.ts", ".js", ".jsx", ".json"];
-const TS_ALIASES: &[(&str, &[&str])] = &[
-    (".js", &[".ts", ".tsx", ".js"]),
-    (".jsx", &[".tsx", ".jsx"]),
-    (".mjs", &[".mts", ".mjs"]),
-    (".cjs", &[".cts", ".cjs"]),
-];
 const TYPE_ALIASES: &[(&str, &[&str])] = &[
     (".js", &[".ts", ".tsx", ".d.ts", ".js"]),
     (".jsx", &[".tsx", ".ts", ".d.ts", ".jsx"]),
@@ -389,21 +378,17 @@ impl Conditions {
         root: &ResolverGeneric<Tree<'tree, 'source>>,
     ) -> ResolverGeneric<Tree<'tree, 'source>> {
         let mut options = root.options().clone();
-        let (extensions, aliases) = match self {
-            Self::TypeImport | Self::TypeRequire => {
-                options
-                    .main_fields
-                    .splice(..0, ["typings".into(), "types".into()]);
-                (TYPE_EXTENSIONS, TYPE_ALIASES)
-            }
-            _ => (TS_EXTENSIONS, TS_ALIASES),
-        };
         let strings = |values: &[&str]| values.iter().copied().map(str::to_owned).collect();
-        options.extensions = strings(extensions);
-        options.extension_alias = aliases
-            .iter()
-            .map(|(extension, candidates)| ((*extension).into(), strings(candidates)))
-            .collect();
+        if self.is_type() {
+            options
+                .main_fields
+                .splice(..0, ["typings".into(), "types".into()]);
+            options.extensions = strings(TYPE_EXTENSIONS);
+            options.extension_alias = TYPE_ALIASES
+                .iter()
+                .map(|(extension, candidates)| ((*extension).into(), strings(candidates)))
+                .collect();
+        }
         options.condition_names = strings(self.names());
         root.clone_with_options(options)
     }
@@ -479,20 +464,13 @@ impl FileSystem for Tree<'_, '_> {
         }
     }
     fn symlink_metadata(&self, path: &Path) -> io::Result<FileMetadata> {
-        if self.reader.is_some_and(|r| r.links.contains_key(path)) {
-            return Ok(FileMetadata::new(false, false, true));
-        }
         self.metadata(path)
     }
-    fn read_link(&self, path: &Path) -> Result<PathBuf, ResolveError> {
-        self.reader
-            .and_then(|r| r.links.get(path))
-            .cloned()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput).into())
+    fn read_link(&self, _: &Path) -> Result<PathBuf, ResolveError> {
+        Err(io::Error::from(io::ErrorKind::Unsupported).into())
     }
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        let target = self.links.follow(path).map_err(link_error)?;
-        self.metadata(&target).map(|_| target.into_owned())
+    fn canonicalize(&self, _: &Path) -> io::Result<PathBuf> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -515,7 +493,7 @@ fn resolve(
     tree: &Tree<'_, '_>,
     file: &Path,
     name: &str,
-) -> Result<Option<String>, String> {
+) -> Result<bool, String> {
     let end = super::specifier::path_end(name);
     // This resolver removes escaped hashes by byte offset, which is only a character offset for ASCII.
     let escaped = if end < name.len() && name.is_ascii() {
@@ -524,17 +502,18 @@ fn resolve(
         std::borrow::Cow::Borrowed(name)
     };
     match resolver.resolve_file(file, &escaped) {
-        Ok(module) if end < name.len() && module.fragment().is_some() => Ok(None),
-        Ok(module) => Ok(Some(
-            repository_name(&tree.follow(module.path())?)?.to_owned(),
-        )),
+        Ok(module) if end < name.len() && module.fragment().is_some() => Ok(false),
+        Ok(module) => {
+            repository_name(&tree.follow(module.path())?)?;
+            Ok(true)
+        }
         Err(
             ResolveError::NotFound(_)
             | ResolveError::ExtensionAlias(..)
             | ResolveError::MatchedAliasNotFound(..)
             | ResolveError::PackageImportNotDefined(..)
             | ResolveError::PackagePathNotExported { .. },
-        ) => Ok(None),
+        ) => Ok(false),
         Err(e) => Err(e.to_string()),
     }
 }

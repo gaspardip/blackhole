@@ -1,7 +1,7 @@
 pub use crate::packs::boundary::RepoCtx;
 use crate::{
     git::{Batch, Tree},
-    packs::boundary::Reader,
+    packs::boundary::{Reader, RepositoryPaths},
     verdict::Change,
 };
 use globset::GlobSet;
@@ -45,7 +45,7 @@ pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
-    Repo(fn(&TsCtx<'_>, &RepoCtx<'_, '_>, &[String], &mut Findings)),
+    Repo(fn(&TsCtx<'_>, &RepoCtx<'_, '_>, &mut Findings)),
     Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
     Lines(fn(&str, &str, usize, &mut Findings)),
     ParseError,
@@ -75,9 +75,8 @@ pub struct DiffFindings {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct Settings<'a> {
+pub struct Settings {
     pub(crate) max_lines: Option<NonZeroUsize>,
-    pub(crate) banned_imports: &'a [String],
 }
 
 pub struct FileCtx<'a> {
@@ -333,7 +332,7 @@ fn collect<'r>(
     rules: &'r [Rule],
     path: &str,
     source: &Source,
-    settings: Settings<'_>,
+    settings: Settings,
     repository: Option<&RepoCtx<'_, '_>>,
     parsed: Result<Option<&mut TsCtx<'_>>, &(usize, String)>,
 ) -> Vec<Hit<'r>> {
@@ -376,7 +375,7 @@ fn collect<'r>(
             }
             Run::Repo(check) => {
                 if let (Some(ts), Some(repository)) = (ts.as_deref(), repository) {
-                    check(ts, repository, settings.banned_imports, &mut findings);
+                    check(ts, repository, &mut findings);
                 }
             }
             Run::Diff(_) => (),
@@ -501,7 +500,7 @@ fn parsed_hits<'r>(
     path: &str,
     source: &Source,
     kind: SourceType,
-    settings: Settings<'_>,
+    settings: Settings,
     repository: Option<&RepoCtx<'_, '_>>,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
     source.encoding()?;
@@ -519,13 +518,53 @@ pub(crate) fn sort_findings(result: &mut [Finding]) {
     result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
 }
 
+pub(crate) struct Scanner<'a, 'source> {
+    rules: &'a [Rule],
+    settings: Settings,
+    repository: Option<RepoCtx<'a, 'source>>,
+}
+
+impl Scanner<'_, '_> {
+    pub(crate) fn file(&self, path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
+        run_file(
+            self.rules,
+            path,
+            bytes,
+            self.settings,
+            self.repository.as_ref(),
+            result,
+        )
+    }
+}
+
+pub(crate) fn scan<'source, S, T, E>(
+    rules: &[Rule],
+    settings: Settings,
+    bans: &[String],
+    prepare: impl FnOnce(bool) -> Result<(Option<RepositoryPaths>, Reader<'source>, S), E>,
+    check: impl FnOnce(Scanner<'_, 'source>, &Reader<'source>, S) -> Result<T, E>,
+) -> Result<T, E> {
+    let enabled = !bans.is_empty() && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)));
+    let (paths, reader, state) = prepare(enabled)?;
+    let repository = paths.map(|paths| RepoCtx::new(paths, &reader, bans));
+    check(
+        Scanner {
+            rules,
+            settings,
+            repository,
+        },
+        &reader,
+        state,
+    )
+}
+
 /// # Panics
 /// Panics if a rule reports an offset past the end of its input.
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
-    run_configured(rules, Settings::default(), files)
+    run_configured(rules, Settings::default(), &[], files)
 }
 
 /// Applies configured rules to files already selected by the caller.
@@ -534,50 +573,70 @@ pub fn run<'a>(
 /// Panics if a rule reports an offset past the end of its input.
 pub fn run_configured<'a>(
     rules: &[Rule],
-    settings: Settings<'_>,
+    settings: Settings,
+    bans: &[String],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> Vec<Finding> {
-    let mut result = Vec::new();
-    if !settings.banned_imports.is_empty()
-        && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)))
-    {
-        let files: Vec<_> = files.into_iter().collect();
-        let by_name: BTreeMap<_, _> = files.iter().copied().collect();
-        let paths = by_name
-            .keys()
-            .map(|name| Path::new("/").join(name))
-            .collect();
-        let reader = Reader::new(BTreeMap::new(), |name| {
-            Ok(by_name.get(name).map(|bytes| bytes.to_vec()))
-        });
-        let repository = RepoCtx::new(paths, &reader);
-        for (path, bytes) in files {
-            run_file(rules, path, bytes, settings, Some(&repository), &mut result);
-        }
-    } else {
-        for (path, bytes) in files {
-            run_file(rules, path, bytes, settings, None, &mut result);
-        }
-    }
-    sort_findings(&mut result);
-    result
+    run_with_work(rules, settings, bans, files).0
 }
 
-/// Runs the selected rules on one file and returns findings and counted work.
+/// Runs configured rules and returns findings and counted work across the supplied files.
+///
+/// # Panics
+/// Panics if a rule reports an offset past the end of its input.
 #[doc(hidden)]
 #[must_use]
-pub fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
+pub fn run_with_work<'a>(
+    rules: &[Rule],
+    settings: Settings,
+    bans: &[String],
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
-    let work = run_file(rules, path, bytes, Settings::default(), None, &mut findings);
-    sort_findings(&mut findings);
-    (findings, work)
+    scan(
+        rules,
+        settings,
+        bans,
+        |enabled| {
+            let mut pending = files.into_iter();
+            let mut inventory = Vec::new();
+            let (paths, by_name) = if enabled {
+                inventory.extend(pending.by_ref());
+                let by_name: BTreeMap<_, _> = inventory.iter().copied().collect();
+                let paths = RepositoryPaths {
+                    files: by_name
+                        .keys()
+                        .map(|name| Path::new("/").join(name))
+                        .collect(),
+                    ..RepositoryPaths::default()
+                };
+                (Some(paths), by_name)
+            } else {
+                (None, BTreeMap::new())
+            };
+            Ok::<_, std::convert::Infallible>((
+                paths,
+                Reader::new(move |name| Ok(by_name.get(name).map(|bytes| bytes.to_vec()))),
+                inventory.into_iter().chain(pending),
+            ))
+        },
+        |scanner, _, files| {
+            let mut work = 0u64;
+            for (path, bytes) in files {
+                work = work.saturating_add(scanner.file(path, bytes, &mut findings));
+            }
+            sort_findings(&mut findings);
+            Ok((findings, work))
+        },
+    )
+    .unwrap_or_else(|never| match never {})
 }
 
-pub(crate) fn run_file(
+fn run_file(
     rules: &[Rule],
     path: &str,
     bytes: &[u8],
-    settings: Settings<'_>,
+    settings: Settings,
     repository: Option<&RepoCtx<'_, '_>>,
     result: &mut Vec<Finding>,
 ) -> u64 {

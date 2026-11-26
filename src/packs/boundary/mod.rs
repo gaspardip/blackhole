@@ -61,17 +61,21 @@ pub(crate) struct RepositoryPaths {
 pub struct RepoCtx<'a, 'source> {
     tree: Tree<'a, 'source>,
     loaders: Loaders<'a, 'source>,
-    reader: &'a Reader<'source>,
+    bans: &'a [String],
 }
 
 impl<'a, 'source> RepoCtx<'a, 'source> {
-    pub(crate) fn new(files: BTreeSet<PathBuf>, reader: &'a Reader<'source>) -> Self {
-        let tree = Tree::from_files(files, reader);
+    pub(crate) fn new(
+        paths: RepositoryPaths,
+        reader: &'a Reader<'source>,
+        bans: &'a [String],
+    ) -> Self {
+        let tree = Tree::from_paths(paths, reader);
         let loaders = tree.loaders();
         Self {
             tree,
             loaders,
-            reader,
+            bans,
         }
     }
 
@@ -85,19 +89,17 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
             return Ok(None);
         }
         let path = importer.map_err(Clone::clone)?;
+        let reader = self.tree.reader.expect("repository context has a reader");
         if let Some(loader) = self.loaders.types(mode)
             && !name.contains('?')
-            && let Some(target) = self
-                .reader
-                .type_import_target(loader, &self.tree, mode, path, name)?
+            && let Some(target) = reader.type_import_target(loader, &self.tree, mode, path, name)?
         {
             return Ok(match target {
                 TypeImportTarget::Local => None,
                 TypeImportTarget::Package(package) => Some(package),
             });
         }
-        self.reader
-            .package_target(self.loaders.package(mode), &self.tree, mode, path, name)
+        reader.package_target(self.loaders.package(mode), &self.tree, mode, path, name)
     }
 }
 
@@ -147,7 +149,7 @@ fn module_format(
 
 fn loader_readings(
     kind: Kind,
-    extension: Option<&str>,
+    ts_extension: bool,
     module: Option<ModuleFormat>,
     name: &str,
 ) -> impl Iterator<Item = (Result<String, &'static str>, Conditions)> {
@@ -161,7 +163,7 @@ fn loader_readings(
     };
     let dual = kind.implicit_mode()
         && !module.is_some_and(|m| m.declared)
-        && matches!(extension, Some("ts" | "tsx"))
+        && ts_extension
         && specifier::bare(name)
         && (kind == Kind::TypeDeclaration || !name.contains('?'));
     specifier::readings(name, kind)
@@ -191,7 +193,7 @@ enum BuiltinSource {
 
 impl BuiltinSource {
     fn source(name: Option<&str>) -> Option<Self> {
-        match bare(name?) {
+        match strip_node_scheme(name?) {
             "module" => Some(Self::Module),
             "process" => Some(Self::Process),
             _ => None,
@@ -199,14 +201,14 @@ impl BuiltinSource {
     }
 }
 
-fn bare(s: &str) -> &str {
+fn strip_node_scheme(s: &str) -> &str {
     s.strip_prefix("node:").unwrap_or(s)
 }
 
 fn denied(name: &str, bans: &[String]) -> bool {
     bans.iter().any(|ban| {
-        bare(name)
-            .strip_prefix(bare(ban))
+        strip_node_scheme(name)
+            .strip_prefix(strip_node_scheme(ban))
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     })
 }
@@ -217,7 +219,7 @@ fn note(
     path: Result<&Path, &String>,
     module: Result<ModuleFormat, &String>,
     extension: Option<&str>,
-    bans: &[String],
+    ts_extension: bool,
 ) -> Result<Option<String>, String> {
     let Some(name) = import.name.as_deref() else {
         return Ok(Some(NON_LITERAL.into()));
@@ -227,23 +229,27 @@ fn note(
     {
         return Ok(Some(NON_LITERAL.into()));
     }
-    for (reading, mode) in loader_readings(import.kind, extension, module.ok(), name) {
+    let needs_format = import.needs_format(ts_extension);
+    for (reading, mode) in loader_readings(import.kind, ts_extension, module.ok(), name) {
         let name = reading?;
-        if import.needs_format(matches!(extension, Some("ts" | "tsx"))) {
+        if needs_format {
             module.map_err(Clone::clone)?;
         }
         let target = repo.package_target(path, mode, &name)?;
-        if denied(&name, bans) {
+        if denied(&name, repo.bans) {
             return Ok(Some(name));
         }
-        if target.as_deref().is_some_and(|name| denied(name, bans)) {
+        if target
+            .as_deref()
+            .is_some_and(|name| denied(name, repo.bans))
+        {
             return Ok(target);
         }
     }
     Ok(None)
 }
 
-fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, bans: &[String], findings: &mut Findings) {
+fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
     let imports = imports::collect(ts, ts.program.source_type.is_typescript_definition());
     if imports.is_empty() {
         return;
@@ -257,11 +263,9 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, bans: &[String], findings: &mu
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, ext)| ext.to_ascii_lowercase());
     let extension = extension.as_deref();
+    let ts_extension = matches!(extension, Some("ts" | "tsx"));
     let module = module_format(extension, ts.has_module_syntax, || {
-        if imports
-            .iter()
-            .any(|i| i.needs_format(matches!(extension, Some("ts" | "tsx"))))
-        {
+        if imports.iter().any(|i| i.needs_format(ts_extension)) {
             repo.tree
                 .package_scope(importer.as_deref().map_err(Clone::clone)?)
         } else {
@@ -270,6 +274,7 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, bans: &[String], findings: &mu
     });
     let mut last = None;
     for import in &imports {
+        ts.take_work(1);
         if last == Some(import.offset) {
             continue;
         }
@@ -279,7 +284,7 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, bans: &[String], findings: &mu
             importer.as_deref(),
             module.as_ref().copied(),
             extension,
-            bans,
+            ts_extension,
         )
         .unwrap_or_else(Some);
         if let Some(note) = note {

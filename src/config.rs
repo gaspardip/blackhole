@@ -40,11 +40,15 @@ pub struct Config {
 
 impl Config {
     #[must_use]
-    pub fn engine_settings(&self) -> engine::Settings<'_> {
+    pub fn engine_settings(&self) -> engine::Settings {
         engine::Settings {
             max_lines: self.boundaries.max_lines,
-            banned_imports: &self.boundaries.banned_imports,
         }
+    }
+
+    #[must_use]
+    pub fn banned_imports(&self) -> &[String] {
+        &self.boundaries.banned_imports
     }
 }
 
