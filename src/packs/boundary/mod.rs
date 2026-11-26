@@ -94,7 +94,7 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
             && let Some(target) = reader.type_import_target(loader, &self.tree, mode, path, name)?
         {
             return Ok(match target {
-                TypeImportTarget::Local => None,
+                TypeImportTarget::Blocked | TypeImportTarget::Local => None,
                 TypeImportTarget::Package(package) => Some(package),
             });
         }

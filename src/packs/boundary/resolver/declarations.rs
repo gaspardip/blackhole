@@ -9,6 +9,12 @@ use std::path::Path;
 type Lookup = Result<bool, String>;
 type TargetLookup<T> = Result<Option<T>, TargetError>;
 
+enum Target<T> {
+    Matched(T),
+    Blocked,
+    Unmatched,
+}
+
 pub(super) enum TargetError {
     InvalidTarget(String),
     Resolution(String),
@@ -39,7 +45,7 @@ pub(super) fn import_target(
         javascript: true,
         ..declarations
     };
-    walk_import(tree, importer, name, mode, |root, target, capture| {
+    match walk_import(tree, importer, name, mode, |root, target, capture| {
         let Some(target) = capture.apply(target) else {
             return Ok(None);
         };
@@ -65,8 +71,12 @@ pub(super) fn import_target(
         }
         lookup(tree, &root.join("package.json"), &target, mode)
             .map(|found| found.then_some(super::TypeImportTarget::Package(target)))
-    })
-    .map_err(TargetError::message)
+    }) {
+        Ok(Target::Matched(target)) => Ok(Some(target)),
+        Ok(Target::Blocked) => Ok(Some(super::TypeImportTarget::Blocked)),
+        Ok(Target::Unmatched) => Ok(None),
+        Err(error) => Err(error.message()),
+    }
 }
 
 pub(super) fn package_target(
@@ -89,8 +99,8 @@ pub(super) fn package_target(
         }
         Ok(Some((!target.starts_with("./")).then_some(target)))
     }) {
-        Ok(target) => Ok(target.flatten()),
-        Err(TargetError::InvalidTarget(_)) => Ok(None),
+        Ok(Target::Matched(target)) => Ok(target),
+        Ok(Target::Blocked | Target::Unmatched) | Err(TargetError::InvalidTarget(_)) => Ok(None),
         Err(TargetError::Resolution(error)) => Err(error),
     }
 }
@@ -101,21 +111,21 @@ fn walk_import<T>(
     name: &str,
     mode: Conditions,
     mut resolve: impl FnMut(&Path, &str, Capture<'_>) -> TargetLookup<T>,
-) -> TargetLookup<T> {
+) -> Result<Target<T>, TargetError> {
     if name == "#" {
-        return Ok(None);
+        return Ok(Target::Unmatched);
     }
     let Some((root, manifest)) = Tree::nearest_manifest(importer, |path| tree.manifest(path))
         .map_err(TargetError::Resolution)?
     else {
-        return Ok(None);
+        return Ok(Target::Unmatched);
     };
     let Some((target, capture)) = manifest
         .get("imports")
         .and_then(Value::as_object)
         .and_then(|paths| select_path(paths, name, true))
     else {
-        return Ok(None);
+        return Ok(Target::Unmatched);
     };
     walk_target(target, mode, &mut |target| resolve(root, target, capture))
 }
@@ -241,7 +251,7 @@ impl PackageLookup<'_, '_, '_> {
                 .map(|found| found.then_some(()))
                 .map_err(TargetError::Resolution)
         })
-        .map(|target| target.is_some())
+        .map(|target| matches!(target, Target::Matched(())))
     }
 
     fn legacy(&self, root: &Path, manifest: &Manifest, subpath: &str) -> Lookup {
@@ -406,18 +416,27 @@ fn walk_target<T>(
     target: &Value,
     mode: Conditions,
     resolve: &mut impl FnMut(&str) -> TargetLookup<T>,
-) -> TargetLookup<T> {
-    let mut invalid = None;
+) -> Result<Target<T>, TargetError> {
+    let mut fallback = Ok(Target::Unmatched);
+    let array = target.is_array();
     let mut try_target = |target| match walk_target(target, mode, resolve) {
-        Err(error @ TargetError::InvalidTarget(_)) => {
-            invalid.get_or_insert(error);
+        Err(error @ TargetError::InvalidTarget(_)) if array || mode.is_type() => {
+            if array || matches!(fallback, Ok(Target::Unmatched)) {
+                fallback = Err(error);
+            }
             None
         }
-        Ok(None) => None,
+        Ok(Target::Blocked) if array => {
+            fallback = Ok(Target::Blocked);
+            None
+        }
+        Ok(Target::Unmatched) => None,
         result => Some(result),
     };
     let result = match target {
-        Value::String(target) => return resolve(target),
+        Value::String(target) => {
+            return resolve(target).map(|target| target.map_or(Target::Unmatched, Target::Matched));
+        }
         Value::Object(conditions) => conditions
             .iter()
             .filter(|(key, _)| {
@@ -425,10 +444,11 @@ fn walk_target<T>(
                     || (mode.is_type() && versioned_type_condition(key))
             })
             .find_map(|(_, target)| try_target(target)),
-        Value::Array(targets) => targets.iter().find_map(try_target),
+        Value::Array(targets) if !targets.is_empty() => targets.iter().find_map(try_target),
+        Value::Array(_) | Value::Null => return Ok(Target::Blocked),
         _ => None,
     };
-    result.unwrap_or_else(|| invalid.map_or(Ok(None), Err))
+    result.unwrap_or(fallback)
 }
 
 fn invalid_relative(target: &str) -> bool {

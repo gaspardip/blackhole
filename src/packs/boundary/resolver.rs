@@ -119,6 +119,7 @@ impl<'a> Reader<'a> {
 }
 
 pub(super) enum TypeImportTarget {
+    Blocked,
     Local,
     Package(String),
 }

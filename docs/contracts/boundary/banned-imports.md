@@ -57,7 +57,8 @@
 - Dynamic imports and requires when the banned list is empty
   (`unconfigured`).
 - A banned target in a condition the import does not select
-  (`package-aliases`, the clean `#unused` import).
+  (`package-aliases`, the clean `#unused` import). A selected `null` stops
+  conditional lookup (`package_import_conditions_stop_at_null`).
 - A standalone `require.resolve(name)` or
   `createRequire(base).resolve(name)`, even with an unknown base or
   dynamic name. A lookup loads nothing (`resolve-only`,

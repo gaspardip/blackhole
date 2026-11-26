@@ -128,6 +128,40 @@ fn package_import_keys_keep_query_suffixes() {
 }
 
 #[test]
+fn package_import_conditions_stop_at_null() {
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            (
+                "package.json",
+                r##"{"imports": {
+                    "#blocked": {"node":null,"default":"restricted"},
+                    "#blocked-array": {"node":[null],"default":"restricted"},
+                    "#array-fallback": {"node":[null,"restricted"],"default":"allowed"}
+                }}"##,
+            ),
+            (
+                "a.mjs",
+                "import '#blocked';\nimport '#blocked-array';\nimport '#array-fallback';",
+            ),
+            ("b.cjs", "require('#blocked');"),
+            ("c.mts", "import type {Model} from '#blocked';"),
+        ],
+        &[],
+        1,
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains(" boundary/banned-imports "))
+            .collect::<Vec<_>>(),
+        ["a.mjs:3:8 boundary/banned-imports restricted"]
+    );
+}
+
+#[test]
 fn loader_sources_share_the_base_check() {
     for (file, declaration, callee, own_base) in [
         ("a.cjs", "", "require.main.require", false),
