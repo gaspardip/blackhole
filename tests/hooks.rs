@@ -189,14 +189,22 @@ fn post_edit_agrees_with_check_for_a_listed_external_link() {
 
 #[cfg(unix)]
 #[test]
-fn absent_ledger_aliases_are_not_refused() {
+fn absent_ledger_cannot_be_created_through_dangling_links() {
     let dir = repo();
     let root = dir.path();
     fs::create_dir(root.join(".blackhole")).unwrap();
     std::os::unix::fs::symlink(".blackhole/ledger", root.join("alias")).unwrap();
-    for path in ["alias", "missing/../.blackhole/ledger"] {
-        assert_eq!(hook(root, "pre-edit", &edit("Write", path), 0), b"");
-    }
+    std::os::unix::fs::symlink("alias", root.join("second")).unwrap();
+    refuses(root, Path::new("alias"));
+    refuses(root, Path::new("second"));
+}
+
+#[test]
+fn absent_ledger_cannot_be_created_through_a_normalized_path() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    refuses(root, Path::new("missing/../.blackhole/ledger"));
 }
 
 #[cfg(unix)]
@@ -248,7 +256,7 @@ fn stop_blocks_when_the_checkout_check_cannot_complete() {
 }
 
 #[test]
-fn stop_blocks_when_git_reports_the_wrong_checkout_root() {
+fn blocking_hooks_block_when_git_reports_the_wrong_checkout_root() {
     let dir = repo();
     let root = dir.path();
     let outside = tempdir().unwrap();
@@ -257,9 +265,11 @@ fn stop_blocks_when_git_reports_the_wrong_checkout_root() {
         &["config", "core.worktree", outside.path().to_str().unwrap()],
     )
     .unwrap();
-    let error = String::from_utf8(hook(root, "stop", &json!({}), 2)).unwrap();
-    assert!(error.contains("checkout root mismatch"));
-    assert_ne!(hook(outside.path(), "stop", &json!({}), 1), b"");
+    for (event, payload) in [("stop", json!({})), ("pre-edit", edit("Write", "a.py"))] {
+        let error = String::from_utf8(hook(root, event, &payload, 2)).unwrap();
+        assert!(error.contains("checkout root mismatch"), "{event}: {error}");
+        assert_ne!(hook(outside.path(), event, &payload, 1), b"");
+    }
 }
 
 #[cfg(unix)]

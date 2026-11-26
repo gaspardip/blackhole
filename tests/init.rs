@@ -205,6 +205,59 @@ fn invalid_settings_are_preserved() {
         }
     }
 }
+#[test]
+fn installed_guards_run_synchronously() {
+    let dir = repo();
+    let root = dir.path();
+    let legacy = json!({"hooks":{"Stop":[{"hooks":[
+        {"type":"command","command":"blackhole hook stop","async":true}
+    ]}]}});
+    for name in HOOK_FILES {
+        let p = root.join(name);
+        fs::create_dir(p.parent().unwrap()).unwrap();
+        fs::write(p, legacy.to_string()).unwrap();
+    }
+    let guards = |root: &Path| {
+        HOOK_FILES.map(|name| {
+            let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+            doc["hooks"]["Stop"][0]["hooks"].clone()
+        })
+    };
+    init(root, true);
+    for hooks in guards(root) {
+        assert_eq!(hooks.as_array().unwrap().len(), 1);
+        assert_eq!(hooks[0].get("async"), None, "{hooks}");
+    }
+    for (name, mut hooks) in HOOK_FILES.into_iter().zip(guards(root)) {
+        hooks[0]["async"] = json!(true);
+        let doc = json!({"hooks":{"Stop":[{"hooks":hooks}]}});
+        fs::write(root.join(name), doc.to_string()).unwrap();
+    }
+    init(root, true);
+    for hooks in guards(root) {
+        assert_eq!(hooks.as_array().unwrap().len(), 1);
+        assert_eq!(hooks[0].get("async"), None, "{hooks}");
+    }
+}
+
+#[test]
+fn malformed_ledger_stops_init_before_any_write() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    fs::write(root.join(".blackhole/ledger"), "not a ledger\n").unwrap();
+    let message = init(root, false);
+    assert!(message.contains("ledger line 1"), "{message}");
+    assert_eq!(message.lines().count(), 1);
+    for name in HOOK_FILES.into_iter().chain(["blackhole.toml"]) {
+        assert!(!root.join(name).exists(), "{name}");
+    }
+    assert_eq!(
+        fs::read(root.join(".blackhole/ledger")).unwrap(),
+        b"not a ledger\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn outside_settings_directory() {

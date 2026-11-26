@@ -29,8 +29,8 @@ pub fn run(event: Event) -> ExitCode {
                 crate::diagnostic_text(&error.to_string())
             );
             match event {
-                Event::PreEdit if crate::files::root().is_ok() => ExitCode::from(2),
-                Event::Stop if crate::files::in_checkout() => ExitCode::from(2),
+                // A guard that cannot decide inside a checkout must block, since Codex ignores exit 1.
+                Event::PreEdit | Event::Stop if crate::files::in_checkout() => ExitCode::from(2),
                 _ => ExitCode::FAILURE,
             }
         }
@@ -124,20 +124,14 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
     let mut alternate = None;
     for name in &names {
         let path = cwd.join(name);
-        let physical = resolve(&path, &mut seen)?;
-        // A missing parent followed by `..` does not name a writable destination.
-        let reachable = physical.as_ref().is_some_and(|p| {
-            !p.components()
-                .any(|part| part == std::path::Component::ParentDir)
-        });
+        let physical = edit_destination(&path, &mut seen)?;
         if physical
             .as_deref()
             .is_some_and(|p| matches_protected(p) || same_file(p))
             || edits.normalized(name).any(|p| {
                 same_file(&p)
-                    || (reachable
-                        && resolve(&p, &mut alternate)
-                            .is_ok_and(|real| real.as_deref().is_some_and(matches_protected)))
+                    || edit_destination(&p, &mut alternate)
+                        .is_ok_and(|real| real.as_deref().is_some_and(matches_protected))
             })
         {
             return Err(io::Error::other(
@@ -147,6 +141,33 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         validate_target(&path)?;
     }
     Ok(false)
+}
+
+// The writer follows a final link even when its target does not exist yet.
+fn edit_destination(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<PathBuf>> {
+    let mut resolved = resolve(path, seen)?;
+    for _ in 0..40 {
+        let Some(path) = resolved else {
+            return Ok(None);
+        };
+        match fs::read_link(&path) {
+            Ok(target) => resolved = resolve(&path.with_file_name(target), seen)?,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidInput
+                        | io::ErrorKind::NotFound
+                        | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Some(path));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(
+        "cannot resolve edit target: too many symbolic links",
+    ))
 }
 
 fn validate_target(path: &Path) -> io::Result<()> {

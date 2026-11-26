@@ -30,7 +30,8 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
     let codex = settings(&root, CODEX, "^apply_patch$")?;
     let config = root.join("blackhole.toml");
     let existing = crate::files::policy(&config)?;
-    crate::config::parse(existing.as_deref().unwrap_or_default())?;
+    // A malformed ledger would turn every hook red, so it stops init before anything is written.
+    crate::Policy::load(&root)?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
     let created =
         claude.install_then(&root, || codex.install_then(&root, || first_ledger(&root)))?;
@@ -273,12 +274,18 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                     continue;
                 }
                 let installed = hook.entry("command", || Json::string(""));
-                if matches!(installed.as_str(), Some(current) if current == legacy || current == previous)
-                {
+                let Some(current) = installed.as_str().filter(|current| {
+                    *current == legacy || *current == previous || *current == command
+                }) else {
+                    continue;
+                };
+                if current != command {
                     *installed = Json::string(&command);
                     changed = true;
                 }
-                found |= installed.as_str() == Some(&command);
+                // Codex and Claude run an async handler in the background, where it cannot block.
+                changed |= hook.remove("async").is_some();
+                found = true;
             }
         }
         if !found {
