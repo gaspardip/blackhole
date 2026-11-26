@@ -57,7 +57,8 @@ fn verify(tree: &str) -> Result<()> {
         fs::write(snapshot, actual)?;
         return Ok(());
     }
-    let expected = fs::read_to_string(&snapshot)?;
+    // A checkout with core.autocrlf turns the snapshot's line endings into CRLF.
+    let expected = fs::read_to_string(&snapshot)?.replace("\r\n", "\n");
     if expected == actual {
         return Ok(());
     }
