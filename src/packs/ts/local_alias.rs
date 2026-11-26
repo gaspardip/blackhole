@@ -69,15 +69,9 @@ pub(super) fn is_local(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
 
 fn is_exported(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
     let declaration = ctx.semantic.symbol_declaration(symbol);
-    ctx.counted(
-        ctx.semantic
-            .nodes()
-            .ancestor_kinds(declaration.id())
-            .take(2),
-    )
-    .any(|kind| {
+    ctx.ancestors(declaration.id()).take(2).any(|node| {
         matches!(
-            kind,
+            node.kind(),
             AstKind::ExportNamedDeclaration(_)
                 | AstKind::ExportDefaultDeclaration(_)
                 | AstKind::ExportDeclaration(_)

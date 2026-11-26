@@ -139,9 +139,8 @@ pub(super) fn region(ctx: &TsCtx<'_>, regions: &mut Regions, mut id: NodeId) -> 
         let node = nodes.parent_node(id);
         let boundary = match node.kind() {
             AstKind::Decorator(_) => {
-                let Some(class) = nodes
-                    .ancestors(node.id())
-                    .take_while(|_| ctx.take_work(1))
+                let Some(class) = ctx
+                    .bounded_ancestors(node.id())
                     .find(|n| matches!(n.kind(), AstKind::Class(_)))
                 else {
                     break None;

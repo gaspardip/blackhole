@@ -586,11 +586,11 @@ fn implicit_namespace_exports(
 ) -> Option<bool> {
     let mut ambient = ns.declare || ctx.program.source_type.is_typescript_definition();
     if !ambient {
-        for ancestor in ctx.semantic.nodes().ancestor_kinds(ns.node_id()) {
+        for ancestor in ctx.ancestors(ns.node_id()) {
             if !budget.take(1) {
                 return None;
             }
-            ambient = match ancestor {
+            ambient = match ancestor.kind() {
                 AstKind::TSNamespaceDeclaration(ns) => ns.declare,
                 AstKind::TSExternalModuleDeclaration(module) => module.declare,
                 AstKind::TSGlobalDeclaration(global) => global.declare,
@@ -934,7 +934,7 @@ impl Environments {
         }
         let mut path = Vec::new();
         let mut enclosing = None;
-        for scope in scopes.scope_ancestors(scope) {
+        for scope in ctx.counted(scopes.scope_ancestors(scope)) {
             if let Some(&cached) = self.enclosing_namespaces.get(&scope) {
                 enclosing = cached;
                 break;

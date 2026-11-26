@@ -18,10 +18,9 @@ fn typed<'a>(ctx: &TsCtx<'a>, e: &'a Expression<'a>, names: &[&str]) -> bool {
     let Some(sym) = super::values::symbol(ctx, id) else {
         return false;
     };
-    let nodes = ctx.semantic.nodes();
     let decl = ctx.semantic.symbol_declaration(sym);
     let Some(ty) = std::iter::once(decl)
-        .chain(ctx.counted(nodes.ancestors(decl.id())))
+        .chain(ctx.ancestors(decl.id()))
         .find_map(|n| match n.kind() {
             AstKind::FormalParameter(p) => p.type_annotation.as_ref(),
             AstKind::VariableDeclarator(v) => v.type_annotation.as_ref(),

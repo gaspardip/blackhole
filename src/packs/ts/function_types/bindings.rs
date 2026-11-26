@@ -29,7 +29,7 @@ pub(crate) fn declarations<'a>(
         )
     });
     first.into_iter()
-        .chain(merged.iter().map(|d| (d.declaration, d.flags)))
+        .chain(ctx.counted(merged.iter()).map(|d| (d.declaration, d.flags)))
         .map(|(id, flags)| {
             // The binder marks import-equals as a value import even for the type-only spelling.
             let type_only = matches!(ctx.semantic.nodes().kind(id), AstKind::TSImportEqualsDeclaration(i) if i.import_kind.is_type());
@@ -129,6 +129,7 @@ impl<T: Copy> ConstBindings<T> {
             if !self.immutable(ctx, sym, id) {
                 break None;
             }
+            ctx.record_work(1);
             expr = init;
         };
         let origin = match (end, last_binding) {

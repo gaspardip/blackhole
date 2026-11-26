@@ -9,7 +9,7 @@ mod strings;
 #[path = "tracked_uses.rs"]
 pub(super) mod tracked_uses;
 use crate::engine::TsCtx;
-use oxc::syntax::symbol::SymbolId;
+use oxc::syntax::{reference::Reference, symbol::SymbolId};
 use oxc::{
     ast::{
         AstKind,
@@ -195,6 +195,23 @@ fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool 
         })[id.index()]
 }
 
+pub(super) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    ctx.record_work(1);
+    let scoping = ctx.semantic.scoping();
+    !scoping.symbol_flags(symbol).is_const_variable()
+        && ctx
+            .counted(scoping.get_resolved_references(symbol))
+            .any(Reference::is_write)
+}
+
+fn mutation_index(ctx: &TsCtx<'_>) -> HashSet<SymbolId> {
+    ctx.semantic
+        .scoping()
+        .symbol_ids()
+        .filter(|&symbol| symbol_is_mutated(ctx, symbol))
+        .collect()
+}
+
 pub(super) fn declaration<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
@@ -204,12 +221,7 @@ pub(super) fn declaration<'a>(
     if ctx
         .resolution
         .written
-        .get_or_init(|| {
-            scope
-                .symbol_ids()
-                .filter(|&s| scope.symbol_is_mutated(s))
-                .collect()
-        })
+        .get_or_init(|| mutation_index(ctx))
         .contains(&symbol)
         || unreadable(ctx, symbol)
     {
@@ -298,10 +310,7 @@ struct Write<'a> {
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> Option<oxc::syntax::node::NodeId> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.take_work(1))
+    ctx.bounded_ancestors(id)
         .find(|n| {
             matches!(
                 n.kind(),
@@ -385,10 +394,7 @@ fn live_writes<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'a>) -> Vec<&'a Exp
                 || w.owner != owner()
                 || loops
                     .get_or_init(|| {
-                        ctx.semantic
-                            .nodes()
-                            .ancestors(id.node_id.get())
-                            .take_while(|_| ctx.take_work(1))
+                        ctx.bounded_ancestors(id.node_id.get())
                             .take_while(|node| Some(node.id()) != owner())
                             .filter(|node| node.kind().is_iteration_statement())
                             .map(oxc::semantic::AstNode::span)
@@ -805,16 +811,12 @@ pub(super) fn enclosing_functions<'ctx, 'a>(
     ctx: &'ctx TsCtx<'a>,
     id: oxc::syntax::node::NodeId,
 ) -> impl Iterator<Item = &'ctx oxc::semantic::AstNode<'a>> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.take_work(1))
-        .filter(|node| {
-            matches!(
-                node.kind(),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        })
+    ctx.bounded_ancestors(id).filter(|node| {
+        matches!(
+            node.kind(),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        )
+    })
 }
 
 pub(super) fn parameter_index(
@@ -887,10 +889,7 @@ pub(super) fn enclosing_call<'a>(
 }
 
 pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Option<AstKind<'a>> {
-    ctx.semantic
-        .nodes()
-        .ancestors(id)
-        .take_while(|_| ctx.take_work(1))
+    ctx.bounded_ancestors(id)
         .map(oxc::semantic::AstNode::kind)
         .find(|kind| !transparent(kind))
 }

@@ -170,7 +170,7 @@ fn local_class<'a>(
             let AstKind::MethodDefinition(method) = nodes.parent_kind(function.id()) else {
                 return None;
             };
-            ctx.counted(nodes.ancestors(method.node_id.get()))
+            ctx.ancestors(method.node_id.get())
                 .find_map(|node| match node.kind() {
                     AstKind::Class(class) => Some((class, method.r#static)),
                     _ => None,

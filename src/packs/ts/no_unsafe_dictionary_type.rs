@@ -56,12 +56,12 @@ pub(super) fn check_with_resolution(
             continue;
         }
         let mut needs_alias = resolution.is_bare_alias_use(ctx, kind);
-        let hidden = ctx.counted(nodes.ancestor_ids(id)).any(|id| {
-            let parent = nodes.kind(id);
+        let hidden = ctx.ancestors(id).any(|ancestor| {
+            let parent = ancestor.kind();
             if matches!(parent, AstKind::TSTypeAliasDeclaration(_)) {
                 needs_alias = false;
             }
-            match dictionaries.get(&id) {
+            match dictionaries.get(&ancestor.id()) {
                 Some(Ok(true)) => return true,
                 Some(Err(Unjudged)) => verdict = Err(Unjudged),
                 _ => {}

@@ -168,9 +168,7 @@ fn typed_flow<'a>(
         AstKind::AccessorProperty(n) => (n.value.as_ref()?, n.type_annotation.as_deref()?),
         AstKind::ReturnStatement(n) => (
             n.argument.as_ref()?,
-            ctx.counted(nodes.ancestor_ids(id))
-                .find_map(|a| signature(nodes.kind(a)))?
-                .1?,
+            ctx.ancestors(id).find_map(|a| signature(a.kind()))?.1?,
         ),
         AstKind::AssignmentExpression(n) if n.operator.is_assign() => {
             let AssignmentTarget::AssignmentTargetIdentifier(i) = &n.left else {

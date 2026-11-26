@@ -93,6 +93,15 @@ impl<'a> TsCtx<'a> {
         self.nodes().map(|node| (node.id(), node))
     }
 
+    pub(crate) fn ancestors(&self, id: NodeId) -> impl Iterator<Item = &AstNode<'a>> {
+        self.counted(self.semantic.nodes().ancestors(id))
+    }
+
+    pub(crate) fn bounded_ancestors(&self, id: NodeId) -> impl Iterator<Item = &AstNode<'a>> {
+        self.ancestors(id)
+            .take_while(|_| self.resolution.take_work(1))
+    }
+
     pub(crate) fn bounded_nodes(&self) -> impl Iterator<Item = &AstNode<'a>> {
         self.semantic
             .nodes()

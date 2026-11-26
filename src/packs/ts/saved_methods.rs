@@ -109,7 +109,7 @@ pub(super) fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                     && let Some(id) =
                         v.id.get_binding_identifier()
                             .and_then(|b| b.symbol_id.get())
-                    && !ctx.semantic.scoping().symbol_is_mutated(id)
+                    && !super::values::symbol_is_mutated(ctx, id)
                 {
                     saved.push((v.span.start, id, m));
                 }

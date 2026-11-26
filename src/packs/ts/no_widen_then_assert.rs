@@ -43,13 +43,14 @@ fn broad<'a>(resolver: &Resolution, ctx: &TsCtx<'a>, ty: &'a TSType<'a>) -> Judg
 }
 
 fn boundary(ctx: &TsCtx<'_>, id: NodeId) -> Option<NodeId> {
-    let nodes = ctx.semantic.nodes();
-    ctx.counted(nodes.ancestor_ids(id)).find(|p| {
-        matches!(
-            nodes.kind(*p),
-            AstKind::ArrowFunctionExpression(_) | AstKind::Function(_)
-        )
-    })
+    ctx.ancestors(id)
+        .find(|node| {
+            matches!(
+                node.kind(),
+                AstKind::ArrowFunctionExpression(_) | AstKind::Function(_)
+            )
+        })
+        .map(oxc::semantic::AstNode::id)
 }
 
 #[derive(Clone, Copy)]

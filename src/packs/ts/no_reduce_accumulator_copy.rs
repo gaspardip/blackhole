@@ -69,20 +69,18 @@ fn incoming_until(ctx: &TsCtx<'_>, callback: NodeId, accumulator: SymbolId) -> O
         }
         let at = reference.node_id();
         let target = nodes.kind(at).span();
-        let assignment = nodes
-            .ancestors(at)
-            .take_while(|_| ctx.take_work(1))
+        let assignment = ctx
+            .bounded_ancestors(at)
             .find_map(|n| n.kind().as_assignment_expression())
             .filter(|e| e.operator == AssignmentOperator::Assign && e.left.span() == target)?;
-        let statement = nodes
-            .ancestors(assignment.node_id.get())
-            .take_while(|_| ctx.take_work(1))
+        let statement = ctx
+            .bounded_ancestors(assignment.node_id.get())
             .map(AstNode::kind)
             .find(|kind| !matches!(kind, AstKind::ParenthesizedExpression(_)));
         let statement = matches!(statement, Some(AstKind::ExpressionStatement(_)));
-        let nested = nodes
+        let nested = ctx
             .ancestors(at)
-            .take_while(|n| n.id() != callback && ctx.take_work(1))
+            .take_while(|n| n.id() != callback && ctx.resolution.take_work(1))
             .any(|n| {
                 n.kind().is_iteration_statement()
                     || matches!(
@@ -261,9 +259,8 @@ fn declared_fresh<'a>(
     }
     let statement = statement.id();
     // The read must run after the initializer: same function, inside the declaration's own block.
-    let container = nodes
-        .ancestors(statement)
-        .take_while(|_| ctx.take_work(1))
+    let container = ctx
+        .bounded_ancestors(statement)
         .find(|node| !matches!(node.kind(), AstKind::LabeledStatement(_)))?;
     let conditional_body = match container.kind() {
         AstKind::IfStatement(_)
@@ -281,16 +278,13 @@ fn declared_fresh<'a>(
     };
     let function = enclosing_functions(ctx, statement).next().map(AstNode::id);
     let mut same_block = false;
-    let read_function = nodes
-        .ancestors(id.node_id.get())
-        .take_while(|_| ctx.take_work(1))
-        .find(|node| {
-            same_block |= node.id() == container.id();
-            matches!(
-                node.kind(),
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            )
-        });
+    let read_function = ctx.bounded_ancestors(id.node_id.get()).find(|node| {
+        same_block |= node.id() == container.id();
+        matches!(
+            node.kind(),
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        )
+    });
     if !same_block || function != read_function.map(AstNode::id) {
         return None;
     }

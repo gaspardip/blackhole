@@ -583,6 +583,23 @@ fn repeated_const_reads_with_an_unrelated_with_scale_linearly() {
 }
 
 #[test]
+fn declaration_lookups_share_the_mutation_index() {
+    let [small, large] = [250, 1_000].map(|n| {
+        let text =
+            "{ let value; consume(value); const key = 'userShape'; consume({ [key]: 0 }); }\n"
+                .repeat(n);
+        let (hits, work) = run_with_work(registry(), "computed.ts", text.as_bytes());
+        assert_eq!(hits.len(), n);
+        assert!(
+            hits.iter()
+                .all(|hit| hit.rule == "ts/no-shape-in-symbol-names")
+        );
+        work
+    });
+    assert_growth(small, large, 8, "mutation index");
+}
+
+#[test]
 fn plain_writes_under_deep_nesting_scale_linearly() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

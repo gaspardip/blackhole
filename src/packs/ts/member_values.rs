@@ -202,8 +202,8 @@ fn fields<'a>(ctx: &TsCtx<'a>, id: &IdentifierReference<'_>, sym: SymbolId) -> O
     };
     let scope = ctx.semantic.scoping();
     if !is_local(ctx, sym)
-        || !ctx
-            .counted(scope.get_resolved_references(sym))
+        || !scope
+            .get_resolved_references(sym)
             .all(|reference| ctx.take_work(1) && readonly_member(ctx, reference.node_id()))
     {
         return None;
@@ -265,7 +265,7 @@ fn plain_decimal_key<'a>(ctx: &TsCtx<'_>, number: &NumericLiteral<'a>) -> Option
 fn readonly_member(ctx: &TsCtx<'_>, id: NodeId) -> bool {
     let nodes = ctx.semantic.nodes();
     let mut child = nodes.kind(id).span();
-    let mut parents = nodes.ancestors(id).take_while(|_| ctx.take_work(1));
+    let mut parents = ctx.bounded_ancestors(id);
     let Some(member) = parents.find(|node| !transparent(&node.kind())) else {
         return false;
     };
