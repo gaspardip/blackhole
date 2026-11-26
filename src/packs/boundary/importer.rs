@@ -124,13 +124,15 @@ impl<'a, 'tree, 'source> Importer<'a, 'tree, 'source> {
             return Err(NON_LITERAL.into());
         }
         Ok(
-            loader_readings(kind, ts_extension, module.ok(), name).map(move |(name, mode)| {
-                let name = name?;
-                if needs_format {
-                    module.map_err(Clone::clone)?;
-                }
-                Ok((name, mode))
-            }),
+            loader_readings(kind, ts_extension, module.ok(), name, rule).map(
+                move |(name, mode)| {
+                    let name = name?;
+                    if needs_format {
+                        module.map_err(Clone::clone)?;
+                    }
+                    Ok((name, mode))
+                },
+            ),
         )
     }
 
@@ -223,6 +225,7 @@ fn loader_readings(
     ts_extension: bool,
     module: Option<ModuleFormat>,
     name: &str,
+    rule: ReadingMode,
 ) -> impl Iterator<Item = (Result<String, &'static str>, Conditions)> {
     use Conditions::{Import, Require, TypeImport, TypeRequire};
     let commonjs = module.is_some_and(|m| m.declared && m.kind == PackageType::CommonJs);
@@ -237,7 +240,15 @@ fn loader_readings(
         && ts_extension
         && specifier::bare(name)
         && (kind == Kind::TypeDeclaration || name.starts_with('#') || !name.contains('?'));
-    specifier::readings(name, kind)
+    let mut readings = specifier::readings(name, kind);
+    if matches!(rule, ReadingMode::Folder { .. })
+        && conditions.is_type()
+        && specifier::bare(name)
+        && name.contains('?')
+    {
+        readings.truncate(1);
+    }
+    readings
         .into_iter()
         .enumerate()
         .flat_map(move |(index, text)| {

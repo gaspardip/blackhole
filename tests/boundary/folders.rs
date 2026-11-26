@@ -1541,6 +1541,42 @@ fn type_package_question_mark_uses_literal_file() {
 }
 
 #[test]
+fn bare_type_query_does_not_resolve_the_trimmed_package_subpath() {
+    for (denied, folder_note) in [
+        ("node_modules/demo/model.d.mts", None),
+        (
+            "node_modules/demo/sub[?]x.d.ts",
+            Some("ui/app.mts:1:26 boundary/folder-imports [advisory] node_modules/demo/sub?x.d.ts"),
+        ),
+    ] {
+        let out = judge(
+            &[
+                (
+                    "blackhole.toml",
+                    &format!(
+                        "[boundaries]\nbanned-imports=['demo/sub']\n[[boundaries.folders]]\nfrom='ui/**'\ndeny=['{denied}']"
+                    ),
+                ),
+                ("ui/app.mts", "import type {Model} from 'demo/sub?x.d.ts';"),
+                (
+                    "node_modules/demo/package.json",
+                    r#"{"exports":{"./sub":{"types":"./model.d.mts"}}}"#,
+                ),
+                ("node_modules/demo/model.d.mts", "export interface Model {}"),
+                ("node_modules/demo/sub?x.d.ts", "export interface Model {}"),
+            ],
+            &[],
+            0,
+        );
+        let expected: Vec<_> = ["ui/app.mts:1:26 boundary/banned-imports [advisory] demo/sub"]
+            .into_iter()
+            .chain(folder_note)
+            .collect();
+        assert_eq!(lines_for(&out, "ui/app.mts:"), expected);
+    }
+}
+
+#[test]
 fn type_package_deep_javascript_fallback_stays_within_read_budget() {
     let mut dir = "ui".to_owned();
     let mut manifests = vec!["node_modules/demo/package.json".to_owned()];
