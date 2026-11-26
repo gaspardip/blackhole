@@ -25,13 +25,14 @@ fn cases(row: &Row) -> Vec<(String, String)> {
     let a = row.args;
     let mut cases = Vec::new();
     let mut add = |label: &str, decl: String, call: String| {
+        let body = if row.context.contains("DECL") {
+            row.context.replace("DECL", &decl)
+        } else {
+            format!("{decl} {}", row.context)
+        };
         cases.push((
             label.to_owned(),
-            format!(
-                "{} {decl} {}",
-                row.prelude,
-                row.context.replace("CALL", &call)
-            ),
+            format!("{} {}", row.prelude, body.replace("CALL", &call)),
         ));
     };
     add("dot", String::new(), format!("{p}({a})"));
@@ -724,6 +725,11 @@ fn written_selectors_are_unknown_at_immediate_calls() {
     let mut missing = Vec::new();
     for (label, rule, source) in [
         (
+            "bound writer leaves reducer unchanged",
+            "no-reduce-accumulator-copy",
+            "const arr = [1]; const box={cb:other}; const names={method:'call'}; const alias=names; alias.method='bind'; (()=>{box.cb=(acc,x)=>({...acc,x});})[names.method](null); arr.reduce(box.cb,{});",
+        ),
+        (
             "bound writer leaves computed name unchanged",
             "no-shape-in-symbol-names",
             "const box={key:'name'}; const names={method:'call'}; names.method='bind'; (()=>{box.key='shape';})[names['method']](null); consume({[box.key]:0});",
@@ -747,12 +753,20 @@ fn written_selectors_are_unknown_at_immediate_calls() {
 #[test]
 fn accessor_assignments_do_not_supply_member_values() {
     let mut missing = Vec::new();
-    let (label, rule, source) = (
-        "name with a bracket accessor",
-        "no-shape-in-symbol-names",
-        "const box={get ['key'](){return 'name';},set ['key'](value){}}; box['key']='shape'; consume({[box.key]:0});",
-    );
-    check_spelling(&mut missing, label, rule, source, None);
+    for (label, rule, source) in [
+        (
+            "callback through an alias of the owner",
+            "no-reduce-accumulator-copy",
+            "const arr = [1]; const box={get cb(){return other;},set cb(value){}}; const alias=box; alias.cb=(acc,x)=>({...acc,x}); arr.reduce(box.cb,{});",
+        ),
+        (
+            "name with a bracket accessor",
+            "no-shape-in-symbol-names",
+            "const box={get ['key'](){return 'name';},set ['key'](value){}}; box['key']='shape'; consume({[box.key]:0});",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
@@ -1439,6 +1453,1115 @@ fn conditional_empty_spreads_hide_aliases_in_dynamic_scope() {
             label,
             "no-conditional-empty-object-spread",
             ("case.cjs", source),
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn explicit_pipeline_receivers() {
+    let mut missing = Vec::new();
+    for (rule, source, marker) in [
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; (0, xs.reduce)(acc => ({ ...acc }), {});",
+            Some("...acc"),
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; import {assign} from 'Object'; xs.reduce(acc=>assign({},acc),{});",
+            None,
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; import * as other from 'Array'; xs.reduce(acc=>other.from(acc),[]);",
+            None,
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const page = { rows: [1], other: {} }; page.rows.reduce.call(page.other, acc => [...acc], []);",
+            None,
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce(acc=>acc.concat.call(other,n),[]);",
+            None,
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce(acc=>Array.prototype.concat.call(acc,n),[]);",
+            Some("Array.prototype"),
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce(acc=>acc.concat.call(acc,n),[]);",
+            Some("acc.concat"),
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce.bind(xs,acc=>Object.assign({},acc),{})();",
+            Some("Object.assign"),
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce.bind(xs,acc=>Object.assign({},acc),{});",
+            None,
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; const Array=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
+            Some("globalThis"),
+        ),
+        (
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; const globalThis=custom; xs.reduce(acc=>globalThis.Array.from(acc),[]);",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            "receiver",
+            rule,
+            source,
+            marker.map(|m: &str| source.find(m).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn annotated_bindings_supply_array_evidence() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S114 unseeded reduce with an array accumulator",
+            "no-reduce-accumulator-copy",
+            "[[1], [2]].reduce((acc: number[], n) => acc.concat(n));",
+            Some("acc.concat"),
+        ),
+        (
+            "S114 unseeded reduce without an annotation",
+            "no-reduce-accumulator-copy",
+            "[[1], [2]].reduce((acc, n) => acc.concat(n));",
+            None,
+        ),
+        (
+            "S116 reducer seed reached through a member",
+            "no-reduce-accumulator-copy",
+            "declare function load(): number[]; const rows: number[] = load(); const box = { rows }; [[1]].reduce((acc, n) => acc.concat(n), box.rows);",
+            Some("acc.concat"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn for_await_loops_suspend_async_regions() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S117 reducer copy inside a for await loop",
+            "no-reduce-accumulator-copy",
+            "declare const items: AsyncIterable<number>; [1].reduce((acc: number[], n) => (async () => { for await (const x of items) { return [...acc, n]; } })(), []);",
+            None,
+        ),
+        (
+            "S117 reducer copy before a for await loop",
+            "no-reduce-accumulator-copy",
+            "declare const items: AsyncIterable<number>; [1].reduce((acc: number[], n) => (async () => { const c = [...acc, n]; for await (const x of items) {} return c; })(), []);",
+            Some("...acc"),
+        ),
+        (
+            "S117 reducer copy in a for await head default",
+            "no-reduce-accumulator-copy",
+            "declare const items: AsyncIterable<{ a?: number[] }>; [1].reduce((acc: number[], n) => (async () => { for await (const { a = [...acc, n] } of items) { return a; } })(), []);",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn suspensions_split_every_region() {
+    let mut missing = Vec::new();
+    check_spelling(
+        &mut missing,
+        "S126 reducer copy after an optional chain base",
+        "no-reduce-accumulator-copy",
+        "declare const ready: Promise<number>; [1].reduce((acc: number[], n) => (async () => { (await ready)?.toString(); return [...acc, n]; })(), []);",
+        None,
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn generator_bodies_and_async_disposal_split_regions() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S134 inline generator reducer",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(function* (acc: number[], n) { yield* [...acc, n]; }, []);",
+            None,
+        ),
+        (
+            "S134 declared generator reducer",
+            "no-reduce-accumulator-copy",
+            "function* step(acc: number[], n: number) { yield* [...acc, n]; } [1].reduce(step, []);",
+            None,
+        ),
+        (
+            "S134 plain reducer",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(function (acc: number[], n) { return [...acc, n]; }, []);",
+            Some("...acc"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.and_then(|marker| source.find(marker)),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn array_evidence_follows_with() {
+    let mut missing = Vec::new();
+    let source = "const xs = [1]; xs.reduce((acc, n) => acc.concat(n), [0].with(0, 1));";
+    check_spelling(
+        &mut missing,
+        "S79 reducer seeded with with",
+        "no-reduce-accumulator-copy",
+        source,
+        source.find("acc.concat"),
+    );
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn documented_reducer_limits() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S75 copy inside an immediately constructed function",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { new (function () { Object.assign({}, acc); })(); return acc; }, {});",
+            None,
+        ),
+        (
+            "S110 logical callee",
+            "no-reduce-accumulator-copy",
+            "declare const callback: (() => number[]) | undefined; [1].reduce((acc: number[], n) => (callback ?? (() => [...acc, n]))(), []);",
+            None,
+        ),
+        (
+            "S151 Object.assign source after a spread argument",
+            "no-reduce-accumulator-copy",
+            "declare const layers: object[]; [1].reduce(acc => Object.assign({}, ...layers, acc), {});",
+            None,
+        ),
+        (
+            "overloaded reducer implementation copies its accumulator",
+            "no-reduce-accumulator-copy",
+            "function step(acc: number[], n: number): number[]; function step(acc: number[], n: number | string): number[]; function step(acc: number[], n: number | string) { return [...acc, Number(n)]; } [1].reduce(step, []);",
+            Some("...acc"),
+        ),
+        (
+            "redeclared reducer variable stays unresolved",
+            "no-reduce-accumulator-copy",
+            "var step = (acc: number[], n: number) => [...acc, n]; var step = (acc: number[], n: number) => acc; [1].reduce(step, []);",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.and_then(|marker| source.find(marker)),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+const REDUCER_CALLS: &[Row] = &[
+    Row {
+        rule: "no-reduce-accumulator-copy",
+        path: "xs.reduce",
+        args: "acc=>acc.concat(1),[]",
+        prelude: "const xs=[1];",
+        context: "\nCALL",
+        module: "",
+        options: "",
+        callback: "acc=>acc.concat(1)",
+    },
+    Row {
+        rule: "no-reduce-accumulator-copy",
+        path: "Object.assign",
+        args: "{},acc",
+        prelude: "",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, {})",
+        module: "",
+        options: "",
+        callback: "",
+    },
+    Row {
+        rule: "no-reduce-accumulator-copy",
+        path: "Array.from",
+        args: "acc",
+        prelude: "",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, [])",
+        module: "",
+        options: "",
+        callback: "",
+    },
+    Row {
+        rule: "no-reduce-accumulator-copy",
+        path: "acc.concat",
+        args: "n",
+        prelude: "const n=1;",
+        context: "const items = [1]; items.reduce(acc=>{DECL return (\nCALL)}, [])",
+        module: "",
+        options: "",
+        callback: "",
+    },
+];
+
+#[test]
+fn reducer_spellings() {
+    let mut missing = Vec::new();
+    for row in REDUCER_CALLS {
+        for (label, source) in cases(row) {
+            let start = if row.path == "xs.reduce" {
+                source.find("acc.concat").unwrap()
+            } else {
+                source.find('\n').unwrap() + 1 + usize::from(label == "whole call")
+            };
+            check_spelling(
+                &mut missing,
+                &format!("{} {label}", row.path),
+                row.rule,
+                &source,
+                Some(start),
+            );
+        }
+    }
+    for &(label, wrapper) in WRAPPERS {
+        for (slot, source, value, rule, report) in [
+            (
+                "object spread",
+                "const items = [1]; items.reduce(acc=>({...VALUE}),{});",
+                "acc",
+                "no-reduce-accumulator-copy",
+                true,
+            ),
+            (
+                "array spread",
+                "const items = [1]; items.reduce(acc=>[...VALUE],[]);",
+                "acc",
+                "no-reduce-accumulator-copy",
+                true,
+            ),
+        ] {
+            let source = source.replace("VALUE", &wrapper.replace("VALUE", value));
+            check_spelling(
+                &mut missing,
+                &format!("{slot} {label}"),
+                rule,
+                &source,
+                report.then(|| source.find("...").unwrap()),
+            );
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn conditional_callees_leave_reducer_copies_unreported() {
+    let mut missing = Vec::new();
+    for source in [
+        "[1].reduce((acc, n) => (flag ? () => [...acc, n] : () => [n])(), []);",
+        "[1].reduce((acc, n) => (flag ? () => [n] : (() => [...acc, n]))(), []);",
+        "[1].reduce((acc, n) => ((() => [...acc, n]) ? () => [] : () => [])(), []);",
+        "[1].reduce((acc, n) => { const f = flag ? () => [...acc, n] : () => [n]; return f(); }, []);",
+        "[1].reduce((acc, n) => invoke(flag ? () => [...acc, n] : () => [n]), []);",
+    ] {
+        check_spelling(
+            &mut missing,
+            source,
+            "no-reduce-accumulator-copy",
+            source,
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn reducer_self_call_defaults_keep_the_accumulator() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "S112 self call with defaults",
+            "[0, 1].reduce(function fold(acc = [0], n = 1) { return n ? [...acc, n] : fold(); }, []);",
+            "...acc",
+        ),
+        (
+            "S113 alias of a defaulted accumulator",
+            "[0, 1].reduce(function fold(acc = {}, n = 1) { const prev = acc; return n ? Object.assign({}, prev) : fold(); }, {});",
+            "Object.assign",
+        ),
+        (
+            "S113 assigned alias of a defaulted accumulator",
+            "[0, 1].reduce(function fold(acc = {}, n = 1) { let prev; prev = acc; return n ? Object.assign({}, prev) : fold(); }, {});",
+            "Object.assign",
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            source,
+            Some(source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn names_shared_with_types_give_no_values() {
+    let mut missing = Vec::new();
+    for (label, rule, source) in [
+        (
+            "S130 reducer seed annotated with a type declared before a value",
+            "no-reduce-accumulator-copy",
+            "type Rows = number[]; const Rows = 0; declare const seed: Rows; [1].reduce((acc, n) => acc.concat(n), seed);",
+        ),
+        (
+            "S131 copy target sharing a type name",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { type Target = {}; const Target = {}; return Object.assign(Target, acc); }, {});",
+        ),
+        (
+            "S131 type alias sharing a var with redeclarations",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { type Target = object; var Target: Target = {}; var Target: Target; return Object.assign(Target, acc); }, {});",
+        ),
+        (
+            "S131 interface sharing a local const",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { const Target: Target = {}; interface Target {} return Object.assign(Target, acc); }, {});",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn accumulator_writes_shared_names_and_switch_cases() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S138 reducer copy after await using in a sole default clause",
+            "no-reduce-accumulator-copy",
+            "declare const res: AsyncDisposable; [1].reduce((acc: number[], n) => (async () => { switch (0) { default: { await using r = res; } } return [...acc, n]; })(), []);",
+            None,
+        ),
+        (
+            "S139 spread after reassigning the accumulator",
+            "no-reduce-accumulator-copy",
+            "[[1], [2]].reduce((acc, item) => { acc = item; return [...acc]; }, []);",
+            None,
+        ),
+        (
+            "S139 assign after reassigning the accumulator",
+            "no-reduce-accumulator-copy",
+            "[{}].reduce((acc, item) => { acc = item; return Object.assign({}, acc); }, {});",
+            None,
+        ),
+        (
+            "S139 alias copied after reassignment",
+            "no-reduce-accumulator-copy",
+            "[[1], [2]].reduce((acc, item) => { const prev = acc; acc = item; return [...prev]; }, []);",
+            None,
+        ),
+        (
+            "S139 copy before reassignment",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { const next = [...acc, n]; acc = next; return acc; }, []);",
+            Some("...acc"),
+        ),
+        (
+            "S140 accumulator sharing a type alias name",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { type acc = number[]; return [...acc, n]; }, []);",
+            None,
+        ),
+        (
+            "S140 accumulator sharing an interface name",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { interface acc {} return [...acc, n]; }, []);",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn assignments_immediate_calls_and_first_case_tests() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S141 spread assigned back to the accumulator",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { acc = [...acc, n]; return acc; }, []);",
+            Some("...acc"),
+        ),
+        (
+            "S141 assign assigned back to the accumulator",
+            "no-reduce-accumulator-copy",
+            "[{}].reduce((acc, item) => { acc = Object.assign({}, acc, item); return acc; }, {});",
+            Some("Object.assign"),
+        ),
+        (
+            "S142 copy in an immediately called arrow before reassignment",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { const next = (() => [...acc, n])(); acc = next; return acc; }, []);",
+            Some("...acc"),
+        ),
+        (
+            "S142 reassignment inside an immediately called arrow",
+            "no-reduce-accumulator-copy",
+            "[[1]].reduce((acc, item) => (() => { acc = item; return [...acc]; })(), []);",
+            None,
+        ),
+        (
+            "S145 a wrapped accumulator target silences the callback",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { (acc as number[]) = [...acc, n]; return acc; }, []);",
+            None,
+        ),
+        (
+            "S145 a non-null accumulator target silences the callback",
+            "no-reduce-accumulator-copy",
+            "[1].reduce((acc: number[], n) => { acc! = [...acc, n]; return acc; }, []);",
+            None,
+        ),
+        (
+            "S147 accumulator replaced inside a computed target key",
+            "no-reduce-accumulator-copy",
+            "declare const out: number[][]; [[1]].reduce((acc, item) => { out[(() => { for (acc of [item]) {} return 0; })()] = [...acc]; return acc; }, []);",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn nested_case_awaits_and_array_from_evidence() {
+    let mut missing = Vec::new();
+    for (label, rule, source, marker) in [
+        (
+            "S149 Array.from of an accumulator without array evidence",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { Array.from(acc); return acc; }, { length: 0 });",
+            None,
+        ),
+        (
+            "S149 Array.from of an accumulator seeded with an array",
+            "no-reduce-accumulator-copy",
+            "[1].reduce(acc => { Array.from(acc); return acc; }, []);",
+            Some("Array.from"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            rule,
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn reducer_assign_targets_require_declaration_initializers() {
+    let mut missing = Vec::new();
+    for (label, setup, target, report) in [
+        (
+            "conditional let assignment",
+            "let t; if (enabled) t = {};",
+            "t",
+            false,
+        ),
+        (
+            "assignment after a branch",
+            "let t; if (enabled) log(); t = {};",
+            "t",
+            false,
+        ),
+        (
+            "assignment in both branches",
+            "let t; if (enabled) t = {}; else t = {};",
+            "t",
+            false,
+        ),
+        (
+            "conditional var assignment",
+            "var t; if (enabled) t = {};",
+            "t",
+            false,
+        ),
+        (
+            "conditional var declaration",
+            "if (enabled) { var t = {}; }",
+            "t",
+            false,
+        ),
+        (
+            "alias of a conditionally assigned target",
+            "let t; if (enabled) t = {}; const alias = t;",
+            "alias",
+            false,
+        ),
+        (
+            "S111 fresh local reached through a member",
+            "const t = {}; const holder = { target: t };",
+            "holder.target",
+            false,
+        ),
+        (
+            "fresh literal member",
+            "const holder = { target: {} };",
+            "holder.target",
+            true,
+        ),
+        ("initialized let", "let t = {};", "t", true),
+        ("initialized var", "var t = {};", "t", true),
+    ] {
+        let source =
+            format!("[1].reduce(acc => {{ {setup} return Object.assign({target}, acc); }}, {{}});");
+        check_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            &source,
+            report.then(|| source.find("Object.assign").unwrap()),
+        );
+    }
+    for (label, source) in [
+        (
+            "with can shadow an initialized var",
+            "var o = { t: shared }; [1].reduce(function (acc) { var t = {}; with (o) { return Object.assign(t, acc); } }, {});",
+        ),
+        (
+            "with can shadow an initialized let",
+            "var o = { t: shared }; [1].reduce(function (acc) { let t = {}; with (o) { return Object.assign(t, acc); } }, {});",
+        ),
+        (
+            "member of a conditionally assigned target",
+            "[1].reduce(acc => { let o; if (c) o = { t: {} }; return Object.assign(o.t, acc); }, {});",
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            ("case.cjs", source),
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn fresh_reducer_targets_follow_their_declarators() {
+    let mut missing = Vec::new();
+    for (label, source, report) in [
+        (
+            "plain var in a function body",
+            "[1].reduce(function (acc) { var t = {}; return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S86 labeled var in a function body",
+            "[1].reduce(function (acc) { fresh: var t = {}; return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S86 var in the same switch case",
+            "[1].reduce(acc => { switch (mode) { case 0: var t = {}; return Object.assign(t, acc); } }, {});",
+            true,
+        ),
+        (
+            "S86 var in a for initializer",
+            "[1].reduce(acc => { for (var t = {}; enabled;) { return Object.assign(t, acc); } }, {});",
+            true,
+        ),
+        (
+            "S91 var initializer in a for-in binding",
+            "[1].reduce(function (acc) { for (var t = {} in { key: 1 }) return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S93 using target",
+            "[1].reduce(acc => { using t = { [Symbol.dispose]() {} }; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S93 await using target",
+            "[1].reduce(async acc => { await using t = { [Symbol.asyncDispose]() {} }; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "plain assignment",
+            "[1].reduce(acc => { let t; t = {}; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "declarator followed by a second write",
+            "[1].reduce(acc => { let t = {}; t = {}; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "read in an immediately invoked nested function",
+            "[1].reduce(acc => { const t = {}; return (() => Object.assign(t, acc))(); }, {});",
+            false,
+        ),
+        (
+            "alias of a fresh declarator",
+            "[1].reduce(acc => { const t = {}; const alias = t; return Object.assign(alias, acc); }, {});",
+            false,
+        ),
+        (
+            "read in a nested block",
+            "[1].reduce(acc => { let t = {}; if (enabled) { return Object.assign(t, acc); } }, {});",
+            true,
+        ),
+        (
+            "read in a different switch case",
+            "[1].reduce(acc => { switch (mode) { case 0: var t = {}; case 1: return Object.assign(t, acc); } }, {});",
+            false,
+        ),
+        (
+            "var under an unbraced condition",
+            "[1].reduce(function (acc) { if (enabled) var t = {}; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "var under an unbraced condition read from the else branch",
+            "[1].reduce((acc, x) => { if (x) var t = {}; else return Object.assign(t, acc); return acc; }, {})",
+            false,
+        ),
+        (
+            "labeled var under an unbraced condition read from the else branch",
+            "[1].reduce((acc, x) => { if (x) l: var t = {}; else return Object.assign(t, acc); return acc; }, {})",
+            false,
+        ),
+        (
+            "var in a labeled block read after it",
+            "[1].reduce(function (acc) { fresh: { var t = {}; } return Object.assign(t, acc); }, {});",
+            false,
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            ("case.cjs", source),
+            report.then(|| source.find("Object.assign").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn fresh_reducer_targets_allow_bare_var_redeclarations() {
+    let mut missing = Vec::new();
+    for (label, source, report) in [
+        (
+            "S94 initialized var followed by a bare redeclaration",
+            "[1].reduce(acc => { var t = {}; var t; return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S94 bare var followed by an initialized redeclaration",
+            "[1].reduce(acc => { var t; var t = {}; return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S94 two initialized redeclarations",
+            "[1].reduce(acc => { var t = {}; var t = {}; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S94 redeclaration with a separate assignment",
+            "[1].reduce(acc => { var t = {}; var t; t = {}; return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S95 block function overwrites the var binding",
+            "[1].reduce(acc => { var t = {}; var t; if (true) { function t() {} } return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S98 static block function leaves the outer var fresh",
+            "[1].reduce(acc => { var t = {}; class C { static { function t() {} } } return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S102 nested function obscures a var in the same static block",
+            "[1].reduce(acc => { class C { static { var t = {}; { function t() {} } Object.assign(t, acc); } } }, {});",
+            false,
+        ),
+        (
+            "S94 redeclaration bound by iteration",
+            "[1].reduce(acc => { var t = {}; for (var t of [shared]) {} return Object.assign(t, acc); }, {});",
+            false,
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            ("case.cjs", source),
+            report.then(|| source.find("Object.assign").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn direct_eval_can_replace_mutable_reducer_targets() {
+    let mut missing = Vec::new();
+    for (label, file, source, report) in [
+        (
+            "S97 locally bound direct eval replaces a var",
+            "case.cjs",
+            "const shared = {}; [1].reduce(acc => { var t = {}; var t; const eval = globalThis.eval; eval('t = shared'); return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S97 direct eval in a nested function sees an enclosing let",
+            "case.cjs",
+            "const shared = {}; [1].reduce(acc => { let t = {}; (() => { const eval = globalThis.eval; (eval)('t = shared'); })(); return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S97 direct eval cannot replace a const",
+            "case.cjs",
+            "const shared = {}; [1].reduce(acc => { const t = {}; const eval = globalThis.eval; eval('try { t = shared } catch {}'); return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S97 direct eval in an unrelated function",
+            "case.cjs",
+            "function other() { const eval = globalThis.eval; eval('0'); } [1].reduce(acc => { let t = {}; return Object.assign(t, acc); }, {});",
+            true,
+        ),
+        (
+            "S100 optional call to global eval obscures the local let",
+            "case.cjs",
+            "[1].reduce(acc => { let t = {}; eval?.('t = 1'); return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S97 locally bound optional eval obscures a let",
+            "case.cjs",
+            "const shared = {}; [1].reduce(acc => { let t = {}; const eval = globalThis.eval; eval?.('t = shared'); return Object.assign(t, acc); }, {});",
+            false,
+        ),
+        (
+            "S101 optional eval can become direct in TypeScript emit",
+            "case.ts",
+            "const shared = {}; [1].reduce(acc => { let t = {}; eval?.('t = shared'); return Object.assign(t, acc); }, {});",
+            false,
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            (file, source),
+            report.then(|| source.find("Object.assign").unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn member_writes_hide_reducer_callbacks_and_targets() {
+    let mut missing = Vec::new();
+    for (label, rule, source) in [
+        (
+            "overwritten reducer callback",
+            "no-reduce-accumulator-copy",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; h.cb=other; arr.reduce(h.cb,{});",
+        ),
+        (
+            "reducer callback overwritten through a bracket",
+            "no-reduce-accumulator-copy",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; h['cb']=other; arr.reduce(h['cb'],{});",
+        ),
+        (
+            "reducer callback overwritten through an alias",
+            "no-reduce-accumulator-copy",
+            "const arr = [1]; const h={cb:(acc,x)=>({...acc,x})}; const alias=h; alias.cb=other; arr.reduce(h.cb,{});",
+        ),
+        (
+            "reducer target written by nested callback",
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o.t=acc;}); return Object.assign(o.t,acc);},{});",
+        ),
+        (
+            "reducer target aliased in nested callback",
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; const alias=o; x.forEach(()=>{alias.t=acc;}); return Object.assign(o.t,acc);},{});",
+        ),
+        (
+            "reducer target written with a bracket in nested callback",
+            "no-reduce-accumulator-copy",
+            "const xs = [1]; xs.reduce((acc,x)=>{const o={t:{}}; x.forEach(()=>{o['t']=acc;}); return Object.assign(o['t'],acc);},{});",
+        ),
+    ] {
+        check_spelling(&mut missing, label, rule, source, None);
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn with_anywhere_disables_reducer_reports() {
+    let mut missing = Vec::new();
+    for (label, source) in [
+        (
+            "unrelated with disables inline object targets",
+            "with (o) {} [1].reduce(acc => Object.assign({}, acc), {});",
+        ),
+        (
+            "unrelated with disables spread argument aliases",
+            "with (o) {} [1].reduce(acc => { const args = [{}, acc]; return Object.assign(...args); }, {});",
+        ),
+        (
+            "unrelated with disables local target evidence",
+            "with (o) {} [1].reduce(acc => { const t = {}; return Object.assign(t, acc); }, {});",
+        ),
+        (
+            "unrelated with disables member target evidence",
+            "with (o) {} [1].reduce(acc => { const box = { t: {} }; return Object.assign(box.t, acc); }, {});",
+        ),
+        (
+            "unrelated with disables reducer receiver evidence",
+            "with (o) {} const rows = [1]; rows.reduce(acc => Object.assign({}, acc), {});",
+        ),
+        (
+            "with can shadow a named callback",
+            "const f = (acc, x) => [...acc, x]; with (o) { [1].reduce(f, []); }",
+        ),
+        (
+            "with can shadow Object",
+            "with (o) { [1].reduce((a) => Object.assign({}, a), {}); }",
+        ),
+        (
+            "with can shadow the accumulator",
+            "[1].reduce((acc, x) => { with (o) { return [...acc]; } }, [])",
+        ),
+    ] {
+        check_file_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            ("case.cjs", source),
+            None,
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn a_spread_consumed_as_the_receiver_does_not_hide_assign_sources() {
+    let mut missing = Vec::new();
+    for (source, marker) in [
+        (
+            "const rows = [1]; rows.reduce(acc => Object.assign.call(...[Object], {}, acc), {});",
+            Some("Object.assign"),
+        ),
+        (
+            "const rows = [1]; rows.reduce(acc => Object.assign.call(...[Object, {}], acc), {});",
+            None,
+        ),
+        (
+            "const rows = [1]; rows.reduce(acc => Object.assign({}, ...[], acc), {});",
+            None,
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            source,
+            "no-reduce-accumulator-copy",
+            source,
+            marker.map(|marker| source.find(marker).unwrap()),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn indirect_eval_and_alias_cycles_leave_incoming_accumulator_reads_visible() {
+    let mut missing = Vec::new();
+    for (source, marker) in [
+        (
+            "const rows = [1]; rows.reduce(acc => { let next = {}; (0, eval)('next = shared'); return Object.assign(next, acc); }, {});",
+            "Object.assign",
+        ),
+        (
+            "const rows = [1]; rows.reduce(acc => { let next = {}; globalThis.eval('next = shared'); return Object.assign(next, acc); }, {});",
+            "Object.assign",
+        ),
+        (
+            "const rows = [1]; rows.reduce(acc => { const a = b; const b = a; return [...a, ...b, ...acc]; }, []);",
+            "...acc",
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            source,
+            "no-reduce-accumulator-copy",
+            source,
+            source.find(marker),
+        );
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+#[test]
+fn reducer_review_regressions() {
+    let mut missing = Vec::new();
+    for (label, source, marker) in [
+        (
+            "R1 custom reduce method",
+            "const rows = { reduce(_step, seed) { return seed; } }; rows.reduce(acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 unproven receiver",
+            "rows.reduce(acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 custom method borrowed by an array",
+            "const rows = { reduce(_step, seed) { return seed; } }; rows.reduce.call([1], acc => [...acc], []);",
+            None,
+        ),
+        (
+            "R1 native prototype method borrowed by an array",
+            "Array.prototype.reduce.call([1], acc => [...acc], []);",
+            Some("...acc"),
+        ),
+        (
+            "R2 suspension in an assign argument",
+            "[1].reduce(async acc => Object.assign({}, await ready, acc), {});",
+            None,
+        ),
+        (
+            "R2 suspension in an argument after the accumulator",
+            "[1].reduce(async acc => Object.assign({}, acc, await ready), {});",
+            None,
+        ),
+        (
+            "R2 suspension before an immediate function runs",
+            "[1].reduce(async acc => (() => [...acc])(await ready), []);",
+            None,
+        ),
+        (
+            "R2 suspension before Reflect.apply invokes its target",
+            "[1].reduce(async acc => Reflect.apply(() => [...acc], null, [await ready]), []);",
+            None,
+        ),
+        (
+            "R2 immediate copy before an unrelated argument suspends",
+            "[1].reduce(async acc => consume((() => [...acc])(), await ready), []);",
+            Some("...acc"),
+        ),
+        (
+            "R3 parenthesized assignment statement",
+            "[1].reduce((acc, n) => { ((acc = [...acc, n])); return acc; }, []);",
+            Some("...acc"),
+        ),
+        (
+            "R4 computed string target",
+            "[1].reduce(acc => { const box = { ['next']: {} }; return Object.assign(box.next, acc); }, {});",
+            Some("Object.assign"),
+        ),
+        (
+            "R4 computed template target",
+            "[1].reduce(acc => { const box = { [`next`]: {} }; return Object.assign(box.next, acc); }, {});",
+            Some("Object.assign"),
+        ),
+        (
+            "R4 computed target written by a nested callback",
+            "[1].reduce(acc => { const box = { ['next']: {} }; defer(() => { box.next = shared; }); return Object.assign(box.next, acc); }, {});",
+            None,
+        ),
+        (
+            "R5 Reflect.apply without an argument array",
+            "[1].reduce(acc => Reflect.apply(() => [...acc], null, null), []);",
+            None,
+        ),
+        (
+            "R5 Reflect.apply with a named argument array",
+            "[1].reduce(acc => { const args = []; return Reflect.apply(() => [...acc], null, args); }, []);",
+            None,
+        ),
+        (
+            "R7 trailing reduce argument",
+            "[1, 2].reduce((acc, n) => [...acc, n], [], null);",
+            Some("...acc"),
+        ),
+    ] {
+        check_spelling(
+            &mut missing,
+            label,
+            "no-reduce-accumulator-copy",
+            source,
             marker.map(|marker| source.find(marker).unwrap()),
         );
     }

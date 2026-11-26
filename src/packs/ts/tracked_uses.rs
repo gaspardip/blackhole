@@ -102,7 +102,7 @@ fn inspect_value<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, escapes: &mut V
     let mut pending = vec![value];
     let mut seen = HashSet::new();
     while let Some(value) = pending.pop() {
-        let value = unwrapped(value);
+        let value = unwrapped(ctx, value);
         let resolved = resolve(ctx, value);
         if let Expression::ConditionalExpression(branch) = resolved {
             if seen.insert(branch.span) {

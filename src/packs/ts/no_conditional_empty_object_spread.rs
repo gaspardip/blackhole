@@ -156,7 +156,7 @@ impl<'a> Visibility<'a> {
         self.known[&symbol]
     }
     fn value(&mut self, ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
-        let mut expr = unwrapped(expr);
+        let mut expr = unwrapped(ctx, expr);
         let mut path = Vec::new();
         // The visibility check rejects alias cycles before the next initializer is followed.
         let terminal = loop {
@@ -177,7 +177,7 @@ impl<'a> Visibility<'a> {
             if !self.harmless(ctx, symbol) {
                 break None;
             }
-            expr = unwrapped(next);
+            expr = unwrapped(ctx, next);
         };
         self.terminals
             .extend(path.into_iter().map(|symbol| (symbol, terminal)));

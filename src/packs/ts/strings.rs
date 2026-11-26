@@ -114,7 +114,7 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold> {
                 }
                 // A dependency that returns to a pending node fails the cycle.
                 cache.insert(id, None);
-                let inner = unwrapped(expr);
+                let inner = unwrapped(ctx, expr);
                 if inner.node_id() != id {
                     copy(&mut pending, id, inner);
                     continue;
