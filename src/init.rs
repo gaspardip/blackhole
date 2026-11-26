@@ -274,7 +274,10 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                 continue;
             };
             for hook in commands.iter_mut().filter_map(Json::as_object_mut) {
-                if hook.get("type").and_then(Json::as_str) != Some("command") {
+                // A handler with an `if` condition skips the events it does not match.
+                if hook.get("type").and_then(Json::as_str) != Some("command")
+                    || hook.get("if").is_some()
+                {
                     continue;
                 }
                 let installed = hook.entry("command", || Json::string(""));

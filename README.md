@@ -23,6 +23,10 @@ checkout's executable `node_modules/.bin/blackhole` when available and use
 `blackhole` from PATH otherwise.
 
 Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
+Pre-edit compares the ledger path case-insensitively, but it does not catch
+aliases of a ledger that does not exist yet on filesystems that ignore some
+Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
+`ci` still judge the ledger.
 
 ## Working on this repo
 

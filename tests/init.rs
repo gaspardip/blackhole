@@ -668,3 +668,54 @@ fn unwritable_stderr_keeps_the_exit_code() {
         .unwrap();
     assert_eq!(status.code(), Some(2));
 }
+
+// Each event ends with init's own guard after the existing groups, which stay as they were.
+fn guard_added_beside(existing_group: impl Fn(&str, &Value) -> Option<Value>) {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    for name in HOOK_FILES {
+        let p = root.join(name);
+        let fresh: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        let mut existing = json!({"hooks":{}});
+        for (event, cmd) in [
+            ("PreToolUse", "pre-edit"),
+            ("PostToolUse", "post-edit"),
+            ("Stop", "stop"),
+        ] {
+            let groups: Vec<Value> = existing_group(cmd, &fresh["hooks"][event][0])
+                .into_iter()
+                .collect();
+            existing["hooks"][event] = json!(groups);
+        }
+        fs::write(&p, existing.to_string()).unwrap();
+        init(root, true);
+        let doc: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        for event in ["PreToolUse", "PostToolUse", "Stop"] {
+            let mut expected = existing["hooks"][event].as_array().unwrap().clone();
+            expected.push(fresh["hooks"][event][0].clone());
+            assert_eq!(doc["hooks"][event], json!(expected), "{name} {event}");
+        }
+    }
+}
+
+#[test]
+fn conditional_guards_get_an_unconditional_one_beside_them() {
+    guard_added_beside(|cmd, guard| {
+        let mut group = guard.clone();
+        group["hooks"][0]["if"] = json!("Edit(*.ts)");
+        group["hooks"][0]["command"] = json!(previous_launcher(cmd));
+        Some(group)
+    });
+}
+
+#[test]
+fn narrower_guards_get_a_full_one_beside_them() {
+    guard_added_beside(|cmd, guard| {
+        let mut group = guard.clone();
+        group.get("matcher")?;
+        group["matcher"] = json!("^Edit$");
+        group["hooks"][0]["command"] = json!(previous_launcher(cmd));
+        Some(group)
+    });
+}
