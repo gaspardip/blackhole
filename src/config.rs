@@ -30,7 +30,6 @@ struct Coverage {
     lcov: String,
 }
 
-#[derive(Default)]
 pub struct Config {
     pub(crate) lcov: Option<String>,
     pub(crate) exclude: GlobSet,

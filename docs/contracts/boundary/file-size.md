@@ -22,6 +22,8 @@
 - Any file when `max-lines` is omitted. The limit has no default.
 - An empty decoded file or a file at or below the limit. A final line
   terminator adds no extra line (`limit`).
+- A UTF-16LE line count for a file starting with the bytes `FF FE 00 00`.
+  The decoder reads that prefix as a UTF-32LE BOM.
 - Byte size, line width or separate limits by path.
 - Files outside the command's selection, including files matched by the
   root `exclude` patterns. Use these patterns to omit binary files. A local

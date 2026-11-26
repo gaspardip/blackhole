@@ -35,6 +35,27 @@ fn lines_are_counted_on_the_text_as_decoded() -> Result<()> {
 }
 
 #[test]
+fn the_utf32_le_bom_takes_precedence_over_utf16_le() -> Result<()> {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("blackhole.toml"), "[boundaries]\nmax-lines = 3")?;
+    let mut bytes = vec![0xff, 0xfe, 0, 0];
+    bytes.extend(
+        "a\r\nb\r\nc\nd"
+            .chars()
+            .flat_map(|ch| u32::from(ch).to_le_bytes()),
+    );
+    fs::write(root.join("x.txt"), bytes)?;
+    assert_eq!(
+        String::from_utf8(check(root, &["x.txt"], 1).stdout)?
+            .lines()
+            .next(),
+        Some("x.txt:4:1 boundary/file-size 4 lines, limit 3")
+    );
+    Ok(())
+}
+
+#[test]
 fn the_limit_is_opt_in_and_applies_to_selected_generated_text() -> Result<()> {
     let dir = repo();
     let root = dir.path();
