@@ -537,15 +537,15 @@ impl Scanner<'_, '_> {
     }
 }
 
-pub(crate) fn scan<'source, S, T, E>(
+pub(crate) fn scan<'source, S, T>(
     rules: &[Rule],
     settings: Settings,
     bans: &[String],
-    prepare: impl FnOnce(bool) -> Result<(Option<RepositoryPaths>, Reader<'source>, S), E>,
-    check: impl FnOnce(Scanner<'_, 'source>, &Reader<'source>, S) -> Result<T, E>,
-) -> Result<T, E> {
+    prepare: impl FnOnce(bool) -> (Option<Result<RepositoryPaths, String>>, Reader<'source>, S),
+    check: impl FnOnce(Scanner<'_, 'source>, &Reader<'source>, S) -> T,
+) -> T {
     let enabled = !bans.is_empty() && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)));
-    let (paths, reader, state) = prepare(enabled)?;
+    let (paths, reader, state) = prepare(enabled);
     let repository = paths.map(|paths| RepoCtx::new(paths, &reader, bans));
     check(
         Scanner {
@@ -610,15 +610,15 @@ pub fn run_with_work<'a>(
                         .collect(),
                     ..RepositoryPaths::default()
                 };
-                (Some(paths), by_name)
+                (Some(Ok(paths)), by_name)
             } else {
                 (None, BTreeMap::new())
             };
-            Ok::<_, std::convert::Infallible>((
+            (
                 paths,
                 Reader::new(move |name| Ok(by_name.get(name).map(|bytes| bytes.to_vec()))),
                 inventory.into_iter().chain(pending),
-            ))
+            )
         },
         |scanner, _, files| {
             let mut work = 0u64;
@@ -626,10 +626,9 @@ pub fn run_with_work<'a>(
                 work = work.saturating_add(scanner.file(path, bytes, &mut findings));
             }
             sort_findings(&mut findings);
-            Ok((findings, work))
+            (findings, work)
         },
     )
-    .unwrap_or_else(|never| match never {})
 }
 
 fn run_file(

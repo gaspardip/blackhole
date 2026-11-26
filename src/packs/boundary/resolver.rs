@@ -21,7 +21,7 @@ type ReadFile<'a> = Box<dyn FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 
 pub(crate) struct Reader<'a> {
     read: Mutex<ReadFile<'a>>,
     reads: AtomicUsize,
-    failure: Mutex<Option<io::Error>>,
+    failure: Mutex<Option<String>>,
 }
 impl<'a> Reader<'a> {
     pub fn new(read: impl FnMut(&str) -> io::Result<Option<Vec<u8>>> + Send + 'a) -> Self {
@@ -53,8 +53,7 @@ impl<'a> Reader<'a> {
         *self
             .failure
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(io::Error::new(error.kind(), error.to_string()));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
     }
     fn limit() -> String {
         format!("resolution exceeded {MAX_READS} configuration reads")
@@ -109,18 +108,18 @@ impl<'a> Reader<'a> {
     fn bounded<T>(&self, lookup: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         self.reads.store(0, Ordering::Relaxed);
         let result = lookup();
-        if self.reads.load(Ordering::Relaxed) > MAX_READS {
+        if let Some(error) = self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            Err(error)
+        } else if self.reads.load(Ordering::Relaxed) > MAX_READS {
             Err(Self::limit())
         } else {
             result
         }
-    }
-    pub fn finish(&self) -> io::Result<()> {
-        self.failure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .map_or(Ok(()), Err)
     }
 }
 

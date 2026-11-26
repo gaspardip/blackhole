@@ -1189,3 +1189,41 @@ fn scoped_check_resolves_aliases_outside_the_selection() {
         ["src/app.mts:1:8 boundary/banned-imports [advisory] restricted"]
     );
 }
+
+#[test]
+fn unreadable_resolver_configuration_is_advisory_across_commands() {
+    let dir = cli::repo();
+    let root = dir.path();
+    put(root, "package.json/placeholder", "");
+    put(root, "app.mjs", "import '#entry';");
+    for (bans, expected) in [
+        ("[]", None),
+        (
+            "['restricted']",
+            Some(
+                "app.mjs:1:8 boundary/banned-imports [advisory] \"package.json\": listed configuration is a directory",
+            ),
+        ),
+    ] {
+        put(
+            root,
+            "blackhole.toml",
+            &format!("[boundaries]\nbanned-imports={bans}"),
+        );
+        common::git(root, &["add", "-f", "."]).unwrap();
+        common::git(root, &["commit", "-qm", "case"]).unwrap();
+        for args in [
+            &["check"][..],
+            &["ci", "--base", "HEAD", "--head", "HEAD"],
+            &["ledger"],
+        ] {
+            let output = cli::run(root, args, 0);
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(
+                lines_for(&stdout, "app.mjs:"),
+                expected.as_slice(),
+                "{args:?}"
+            );
+        }
+    }
+}

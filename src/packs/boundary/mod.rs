@@ -58,25 +58,28 @@ pub(crate) struct RepositoryPaths {
     pub links: BTreeMap<PathBuf, PathBuf>,
 }
 
-pub struct RepoCtx<'a, 'source> {
+struct Resolution<'a, 'source> {
     tree: Tree<'a, 'source>,
     loaders: Loaders<'a, 'source>,
+}
+
+pub struct RepoCtx<'a, 'source> {
+    resolution: Result<Resolution<'a, 'source>, String>,
     bans: &'a [String],
 }
 
 impl<'a, 'source> RepoCtx<'a, 'source> {
     pub(crate) fn new(
-        paths: RepositoryPaths,
+        paths: Result<RepositoryPaths, String>,
         reader: &'a Reader<'source>,
         bans: &'a [String],
     ) -> Self {
-        let tree = Tree::from_paths(paths, reader);
-        let loaders = tree.loaders();
-        Self {
-            tree,
-            loaders,
-            bans,
-        }
+        let resolution = paths.map(|paths| {
+            let tree = Tree::from_paths(paths, reader);
+            let loaders = tree.loaders();
+            Resolution { tree, loaders }
+        });
+        Self { resolution, bans }
     }
 
     fn package_target(
@@ -89,16 +92,17 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
             return Ok(None);
         }
         let path = importer.map_err(Clone::clone)?;
-        let reader = self.tree.reader.expect("repository context has a reader");
-        if let Some(loader) = self.loaders.types(mode)
-            && let Some(target) = reader.type_import_target(loader, &self.tree, mode, path, name)?
+        let Resolution { tree, loaders } = self.resolution.as_ref().map_err(Clone::clone)?;
+        let reader = tree.reader.expect("repository context has a reader");
+        if let Some(loader) = loaders.types(mode)
+            && let Some(target) = reader.type_import_target(loader, tree, mode, path, name)?
         {
             return Ok(match target {
                 TypeImportTarget::Blocked | TypeImportTarget::Local => None,
                 TypeImportTarget::Package(package) => Some(package),
             });
         }
-        reader.package_target(&self.tree, mode, path, name)
+        reader.package_target(tree, mode, path, name)
     }
 }
 
@@ -254,7 +258,10 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
         return;
     }
     let rooted = Path::new("/").join(ts.path);
-    let importer = repo.tree.follow(&rooted);
+    let resolution = repo.resolution.as_ref();
+    let importer = resolution
+        .map_err(Clone::clone)
+        .and_then(|resolution| resolution.tree.follow(&rooted));
     let extension = ts
         .path
         .rsplit('/')
@@ -265,8 +272,8 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
     let ts_extension = matches!(extension, Some("ts" | "tsx"));
     let module = module_format(extension, ts.has_module_syntax, || {
         if imports.iter().any(|i| i.needs_format(ts_extension)) {
-            repo.tree
-                .package_scope(importer.as_deref().map_err(Clone::clone)?)
+            let path = importer.as_deref().map_err(Clone::clone)?;
+            resolution.map_err(Clone::clone)?.tree.package_scope(path)
         } else {
             Ok(None)
         }
@@ -291,11 +298,10 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
         };
         if import.verbatim_only {
             match verbatim.get_or_insert_with(|| {
-                let reader = repo.tree.reader.expect("repository context has a reader");
-                importer
-                    .as_deref()
-                    .map_err(Clone::clone)
-                    .and_then(|path| reader.verbatim_module_syntax(&repo.loaders, path))
+                let path = importer.as_deref().map_err(Clone::clone)?;
+                let Resolution { tree, loaders } = resolution.map_err(Clone::clone)?;
+                let reader = tree.reader.expect("repository context has a reader");
+                reader.verbatim_module_syntax(loaders, path)
             }) {
                 Ok(true) => {}
                 Ok(false) => continue,

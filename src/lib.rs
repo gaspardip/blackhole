@@ -230,17 +230,17 @@ fn scan_files<'a, S: Send>(
         config.engine_settings(),
         config.banned_imports(),
         |enabled| {
-            let paths = enabled.then(|| inventory(&mut source)).transpose()?;
+            let paths = enabled.then(|| inventory(&mut source).map_err(|error| error.to_string()));
             let reader = packs::boundary::Reader::new(move |name| read(&mut source, name));
-            Ok((paths, reader, ()))
+            (paths, reader, ())
         },
-        |scanner, reader, ()| {
+        |scanner, reader, ()| -> io::Result<()> {
             for name in names.filter(|name| !config.exclude.is_match(name)) {
                 if let Some(bytes) = reader.read(name)? {
                     scanner.file(name, &bytes, &mut findings);
                 }
             }
-            reader.finish()
+            Ok(())
         },
     )?;
     engine::sort_findings(&mut findings);
