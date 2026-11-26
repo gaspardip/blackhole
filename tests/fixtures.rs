@@ -3,7 +3,7 @@ mod trees;
 
 use blackhole_check::{
     config,
-    engine::{Rule, Run, registry, run_configured},
+    engine::{Rule, Run, registry, run_with_config},
 };
 use std::{
     collections::BTreeSet,
@@ -76,10 +76,9 @@ impl Case {
             .find(|(path, _)| path == "blackhole.toml")
             .map_or(&[][..], |(_, bytes)| bytes.as_slice());
         let config = config::parse(policy).unwrap();
-        let hits = run_configured(
+        let hits = run_with_config(
             rules,
-            config.engine_settings(),
-            config.banned_imports(),
+            &config,
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
         verify_locations(

@@ -1,0 +1,3 @@
+[[boundaries.folders]]
+from='ui/**'
+deny=['db/x.mjs','db/secret.ts','ui/sub','./%zz']

@@ -1,0 +1,3 @@
+ui/cjs.cts:1:9 boundary/folder-imports [advisory] db/shared.mjs
+ui/esm.mts:1:8 boundary/folder-imports [advisory] db/shared.mjs
+boundary/folder-imports Move the code or depend on the allowed layer. A re-export through another folder is the same violation. List workspace package names in deny to cover imports by name.

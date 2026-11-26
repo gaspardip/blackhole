@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 const EMPTY: &str = "specifier is empty";
 
 pub(super) fn relative(name: &str) -> bool {
@@ -104,6 +106,24 @@ fn url_reading(name: &str) -> Result<String, &'static str> {
         decoded.push(value);
     }
     String::from_utf8(decoded).map_err(|_| invalid)
+}
+
+pub(super) fn unresolved<'a>(path: &str, name: &'a str) -> Cow<'a, str> {
+    if !relative(name) {
+        return name.into();
+    }
+    let mut parts: Vec<_> = path.split('/').collect();
+    parts.pop();
+    for part in name.split('/') {
+        match part {
+            "." | "" => (),
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/").into()
 }
 
 #[cfg(test)]

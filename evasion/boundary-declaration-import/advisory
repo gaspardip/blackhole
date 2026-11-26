@@ -1,0 +1,2 @@
+ui/app.d.ts:1:21 boundary/folder-imports [advisory] db/model.d.ts
+boundary/folder-imports Move the code or depend on the allowed layer. A re-export through another folder is the same violation. List workspace package names in deny to cover imports by name.

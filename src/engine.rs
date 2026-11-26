@@ -1,7 +1,8 @@
 pub use crate::packs::boundary::RepoCtx;
 use crate::{
+    config::{Config, ImportPolicy},
     git::{Batch, Tree},
-    packs::boundary::{Reader, RepositoryPaths},
+    packs::boundary::{Import, Reader, RepositoryPaths},
     verdict::Change,
 };
 use globset::GlobSet;
@@ -14,7 +15,13 @@ use oxc::{
     span::SourceType,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::{cell::Cell, collections::BTreeMap, io, num::NonZeroUsize, path::Path};
+use std::{
+    cell::{Cell, OnceCell},
+    collections::BTreeMap,
+    io,
+    num::NonZeroUsize,
+    path::Path,
+};
 
 pub enum Family {
     Judge,
@@ -87,6 +94,7 @@ pub struct FileCtx<'a> {
 
 pub struct TsCtx<'a> {
     work: Cell<u64>,
+    pub(crate) imports: OnceCell<Vec<Import>>,
     pub(crate) arena: &'a Allocator,
     pub(crate) resolution: crate::packs::ts::values::Resolution<'a>,
     pub path: &'a str,
@@ -180,6 +188,7 @@ pub fn registry() -> &'static [Rule] {
     &[
         crate::packs::boundary::BANNED,
         crate::packs::boundary::SIZE,
+        crate::packs::boundary::FOLDER,
         crate::packs::core::no_suppression::RULE,
         UNPARSEABLE,
         #[cfg(test)]
@@ -306,6 +315,7 @@ fn parse<'a>(
     }
     Ok(TsCtx {
         work: Cell::new(0),
+        imports: OnceCell::new(),
         arena,
         resolution: crate::packs::ts::values::Resolution::default(),
         has_module_syntax: parsed.module_record.has_module_syntax,
@@ -315,6 +325,29 @@ fn parse<'a>(
         semantic: built.semantic,
         comments: &program.comments,
     })
+}
+
+pub(crate) fn dependency_imports(
+    parent: &TsCtx<'_>,
+    path: &str,
+    bytes: &[u8],
+    kind: SourceType,
+) -> Result<(bool, Vec<Import>), String> {
+    let source = Source::new(bytes);
+    let arena = Allocator::default();
+    let ts = source
+        .encoding()
+        .and_then(|()| parse(&arena, path, source.text(), kind))
+        .map_err(|(_, note)| format!("{path}: {note}"))?;
+    let mut imports = crate::packs::boundary::collect_imports(&ts);
+    imports.retain(|import| {
+        ts.record_work(1);
+        import.is_reexport()
+    });
+    parent
+        .work
+        .set(parent.work.get().saturating_add(ts.work.get()));
+    Ok((ts.has_module_syntax, imports))
 }
 
 pub(crate) fn source_type(path: &str) -> Option<SourceType> {
@@ -540,13 +573,14 @@ impl Scanner<'_, '_> {
 pub(crate) fn scan<'source, S, T>(
     rules: &[Rule],
     settings: Settings,
-    bans: &[String],
+    policy: ImportPolicy<'_>,
     prepare: impl FnOnce(bool) -> (Option<Result<RepositoryPaths, String>>, Reader<'source>, S),
     check: impl FnOnce(Scanner<'_, 'source>, &Reader<'source>, S) -> T,
 ) -> T {
-    let enabled = !bans.is_empty() && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)));
+    let enabled = (!policy.bans.is_empty() || !policy.folders.is_empty())
+        && rules.iter().any(|rule| matches!(rule.run, Run::Repo(_)));
     let (paths, reader, state) = prepare(enabled);
-    let repository = paths.map(|paths| RepoCtx::new(paths, &reader, bans));
+    let repository = paths.map(|paths| RepoCtx::new(paths, &reader, policy));
     check(
         Scanner {
             rules,
@@ -592,11 +626,46 @@ pub fn run_with_work<'a>(
     bans: &[String],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> (Vec<Finding>, u64) {
+    run_memory(
+        rules,
+        settings,
+        ImportPolicy {
+            bans,
+            ..ImportPolicy::default()
+        },
+        files,
+    )
+}
+
+/// Applies repository policy to files already selected by the caller.
+///
+/// # Panics
+/// Panics if a rule reports an offset past the end of its input.
+pub fn run_with_config<'a>(
+    rules: &[Rule],
+    config: &Config,
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Vec<Finding> {
+    run_memory(
+        rules,
+        config.engine_settings(),
+        config.import_policy(),
+        files,
+    )
+    .0
+}
+
+fn run_memory<'a>(
+    rules: &[Rule],
+    settings: Settings,
+    policy: ImportPolicy<'_>,
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
     scan(
         rules,
         settings,
-        bans,
+        policy,
         |enabled| {
             let mut pending = files.into_iter();
             let mut inventory = Vec::new();

@@ -1,0 +1,12 @@
+import type {T} from "@app/db";
+export * from "@app/db";
+import x = require("@app/db");
+import(`@app/db`);
+require("@app/db/fp");
+import(name);
+require(name);
+import "../db";
+import "../db/item.js";
+import "alias";
+import "../db/missing";
+import "#alias";

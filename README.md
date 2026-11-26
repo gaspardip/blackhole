@@ -108,7 +108,7 @@ selection details.
 
 `boundary/banned-imports` reports configured module names and their slash
 subpaths in TypeScript and JavaScript as advisory findings that do not change
-the verdict. Use the same `[boundaries]` table for both boundary settings.
+the verdict. Use the same `[boundaries]` table for all boundary settings.
 
 ```toml
 [boundaries]
@@ -163,6 +163,22 @@ isolates head code from credentials and from the final evidence. A file uploaded
 by a PR job can claim arbitrary hits or omit executable lines. Until that
 integration exists, enabling coverage leaves changed source red on GitHub
 when the judge runs without evidence.
+
+`boundary/folder-imports` reports imports from a matching source file when
+a dependency matches a denied path or package name. It follows re-exports
+and reports at the import in the source folder. Findings are advisory and
+leave the verdict unchanged.
+
+```toml
+[[boundaries.folders]]
+from = "ui/**"
+deny = ["db/**", "@app/db", "@app/db/**"]
+```
+
+Globs match repository-relative paths or package specifiers. List workspace
+package names and any subpaths in `deny` to cover dependencies imported by
+name. See the [folder-imports contract](docs/contracts/boundary/folder-imports.md)
+for the supported import forms and resolution limits.
 
 ## GitHub judge
 

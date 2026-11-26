@@ -24,6 +24,7 @@ fn check(path: &str, text: &str, limit: usize, findings: &mut Findings) {
 }
 
 mod bases;
+mod folder;
 mod imports;
 mod links;
 mod module_object;
@@ -31,8 +32,10 @@ mod resolver;
 mod specifier;
 mod values;
 
-use crate::engine::TsCtx;
-use imports::{Import, Kind};
+use crate::{config::ImportPolicy, engine::TsCtx};
+pub use folder::FOLDER;
+use imports::Kind;
+pub(crate) use imports::{Import, collect as collect_imports};
 use oxc_resolver::PackageType;
 pub(crate) use resolver::Reader;
 use resolver::{Charge, Conditions, Loaders, Tree, TypeImportTarget};
@@ -40,6 +43,7 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 pub const BANNED: Rule = Rule {
@@ -66,21 +70,26 @@ struct Resolution<'a, 'source> {
 
 pub struct RepoCtx<'a, 'source> {
     resolution: Result<Resolution<'a, 'source>, String>,
-    bans: &'a [String],
+    policy: ImportPolicy<'a>,
+    exports: Mutex<BTreeMap<String, Arc<folder::ExportSource>>>,
 }
 
 impl<'a, 'source> RepoCtx<'a, 'source> {
     pub(crate) fn new(
         paths: Result<RepositoryPaths, String>,
         reader: &'a Reader<'source>,
-        bans: &'a [String],
+        policy: ImportPolicy<'a>,
     ) -> Self {
         let resolution = paths.map(|paths| {
             let tree = Tree::from_paths(paths, reader);
-            let loaders = tree.loaders();
+            let loaders = tree.loaders(!policy.folders.is_empty());
             Resolution { tree, loaders }
         });
-        Self { resolution, bans }
+        Self {
+            resolution,
+            policy,
+            exports: Mutex::default(),
+        }
     }
 
     fn package_target(
@@ -101,8 +110,8 @@ impl<'a, 'source> RepoCtx<'a, 'source> {
                 reader.type_import_target(loader, tree, mode, path, name, charge)?
         {
             return Ok(match target {
-                TypeImportTarget::Blocked | TypeImportTarget::Local => None,
-                TypeImportTarget::Package(package) => Some(package),
+                TypeImportTarget::Blocked | TypeImportTarget::Local(_) => None,
+                TypeImportTarget::Package { name, .. } => Some(name),
             });
         }
         reader.package_target(tree, mode, path, name, charge)
@@ -243,12 +252,12 @@ fn note(
             module.map_err(Clone::clone)?;
         }
         let target = repo.package_target(path, mode, &name, charge)?;
-        if denied(&name, repo.bans) {
+        if denied(&name, repo.policy.bans) {
             return Ok(Some(name));
         }
         if target
             .as_deref()
-            .is_some_and(|name| denied(name, repo.bans))
+            .is_some_and(|name| denied(name, repo.policy.bans))
         {
             return Ok(target);
         }
@@ -257,7 +266,10 @@ fn note(
 }
 
 fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
-    let imports = imports::collect(ts, ts.program.source_type.is_typescript_definition());
+    if repo.policy.bans.is_empty() {
+        return;
+    }
+    let imports = ts.imports.get_or_init(|| collect_imports(ts));
     if imports.is_empty() {
         return;
     }
@@ -282,25 +294,10 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
             Ok(None)
         }
     });
-    let remaining = Cell::new(
-        ts.semantic
-            .nodes()
-            .len()
-            .saturating_mul(40)
-            .saturating_add(1024),
-    );
-    let charge = || {
-        let next = remaining
-            .get()
-            .checked_sub(1)
-            .ok_or_else(|| "package manifest resolution exceeded the work budget".to_owned())?;
-        remaining.set(next);
-        ts.record_work(1);
-        Ok(())
-    };
+    let charge = work_budget(ts);
     let mut verbatim = None;
     let mut last = None;
-    for import in &imports {
+    for import in imports {
         ts.take_work(1);
         if last == Some(import.offset) {
             continue;
@@ -331,5 +328,24 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
         }
         findings.report(import.offset as usize, Some(&note));
         last = Some(import.offset);
+    }
+}
+
+fn work_budget<'a>(ts: &'a TsCtx<'_>) -> impl Fn() -> Result<(), String> + 'a {
+    let remaining = Cell::new(
+        ts.semantic
+            .nodes()
+            .len()
+            .saturating_mul(40)
+            .saturating_add(1024),
+    );
+    move || {
+        let next = remaining
+            .get()
+            .checked_sub(1)
+            .ok_or_else(|| "package manifest resolution exceeded the work budget".to_owned())?;
+        remaining.set(next);
+        ts.record_work(1);
+        Ok(())
     }
 }

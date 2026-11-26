@@ -35,9 +35,10 @@ fn findings(root: &Path, tree: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?)
 }
 
-fn banned_fixture_findings(source: &Path) -> Result<Vec<String>> {
+fn boundary_fixture_findings(source: &Path, rule: &str) -> Result<Vec<String>> {
     let mut lines = Vec::new();
-    let reject = source.join("rules/boundary/banned-imports/reject");
+    let reject = source.join(format!("rules/{rule}/reject"));
+    let marker = format!(" {rule} ");
     for case in fs::read_dir(reject)? {
         let tree = case?.path().join("tree");
         let path = tree.strip_prefix(source)?;
@@ -47,7 +48,7 @@ fn banned_fixture_findings(source: &Path) -> Result<Vec<String>> {
         let out = findings(repo.path(), prefix)?;
         lines.extend(
             out.lines()
-                .filter(|line| line.contains(" boundary/banned-imports "))
+                .filter(|line| line.contains(&marker))
                 .map(|line| format!("{prefix}/{line}")),
         );
     }
@@ -66,7 +67,9 @@ fn verify(tree: &str) -> Result<()> {
         .map(str::to_owned)
         .collect();
     if tree == "rules" {
-        lines.extend(banned_fixture_findings(source)?);
+        for rule in ["boundary/banned-imports", "boundary/folder-imports"] {
+            lines.extend(boundary_fixture_findings(source, rule)?);
+        }
     }
     lines.sort_unstable();
     let mut actual = String::new();
