@@ -1,4 +1,4 @@
-use std::{env, fs, io, path::Path, process::Command};
+use std::{env, path::Path, process::Command};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // A hook or `git rebase --exec` exports git variables, and with them a fixture's commands would write to the caller's repository.
@@ -27,25 +27,4 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String> {
         return Err(String::from_utf8(out.stderr)?.into());
     }
     Ok(String::from_utf8(out.stdout)?.trim().into())
-}
-
-fn copy(src: &Path, dest: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(src)? {
-        let e = entry?;
-        let p = dest.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            fs::create_dir(&p)?;
-            copy(&e.path(), &p)?;
-        } else if e.file_name() != ".keep" {
-            fs::copy(e.path(), p)?;
-        }
-    }
-    Ok(())
-}
-
-pub fn commit(case: &Path, root: &Path, side: &str) -> Result<String> {
-    copy(&case.join(side), root)?;
-    git(root, &["add", "-A"])?;
-    git(root, &["commit", "--allow-empty", "-qm", side])?;
-    git(root, &["rev-parse", "HEAD"])
 }
