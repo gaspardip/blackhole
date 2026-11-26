@@ -66,9 +66,14 @@ impl Config {
         }
     }
 
+    #[must_use]
+    pub fn banned_imports(&self) -> &[String] {
+        &self.banned_imports
+    }
+
     pub(crate) fn import_policy(&self) -> ImportPolicy<'_> {
         ImportPolicy {
-            bans: &self.banned_imports,
+            bans: self.banned_imports(),
             folder_origins: &self.folder_origins,
             folder_denies: &self.folder_denies,
         }

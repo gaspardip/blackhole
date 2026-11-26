@@ -50,6 +50,14 @@ fn lines_for<'a>(out: &'a str, prefix: &str) -> Vec<&'a str> {
         .collect()
 }
 
+#[test]
+fn config_exposes_the_configured_banned_imports() {
+    let config =
+        blackhole_check::config::parse(b"[boundaries]\nbanned-imports=['restricted', 'node:path']")
+            .unwrap();
+    assert_eq!(config.banned_imports(), ["restricted", "node:path"]);
+}
+
 const UNKNOWN: &str = "specifier is not a literal";
 
 fn findings(path: &str, source: &str, expected: &[(usize, usize, &str)]) {
