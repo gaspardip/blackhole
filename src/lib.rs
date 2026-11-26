@@ -36,6 +36,7 @@ mod packs {
         pub(crate) mod no_skipped_tests;
         pub(crate) mod no_test_aware_code;
         pub(crate) mod no_test_doubles;
+        pub(crate) mod no_test_removal;
         pub(crate) mod no_unknown_parameters;
         pub(crate) mod no_unknown_returns;
         pub(crate) mod no_unknown_type_aliases;
@@ -47,7 +48,7 @@ mod packs {
         mod regions;
         mod saved_methods;
         pub(crate) mod strict_msw;
-        mod test_context;
+        pub(crate) mod test_context;
         mod transports;
         pub(crate) mod values;
     }
@@ -235,7 +236,11 @@ fn report(
                 || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
         })
         .collect();
-    for f in &findings {
+    print_findings(&findings, output)
+}
+
+fn print_findings(findings: &[&engine::Finding], output: &mut impl Write) -> io::Result<()> {
+    for f in findings {
         write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
         if f.gate == engine::Gate::Advisory {
             write!(output, " [advisory]")?;

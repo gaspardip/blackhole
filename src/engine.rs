@@ -39,7 +39,14 @@ pub enum Run {
     File(fn(&FileCtx<'_>, &mut Findings)),
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
+    Diff,
     ParseError,
+}
+
+impl Run {
+    pub(crate) const fn can_allow(&self) -> bool {
+        !matches!(self, Self::ParseError | Self::Diff)
+    }
 }
 
 pub struct FileCtx<'a> {
@@ -128,18 +135,20 @@ pub struct Finding {
     pub note: Option<String>,
 }
 
+const UNPARSEABLE: Rule = Rule {
+    id: "core/unparseable",
+    family: Family::Judge,
+    gate: Gate::Blocking,
+    provenance: "A syntax error would hide the file from parsed rules.",
+    fix: "Make the file parse. The judge must be able to read it.",
+    run: Run::ParseError,
+};
+
 #[must_use]
 pub fn registry() -> &'static [Rule] {
     &[
         crate::packs::core::no_suppression::RULE,
-        Rule {
-            id: "core/unparseable",
-            family: Family::Judge,
-            gate: Gate::Blocking,
-            provenance: "A syntax error would hide the file from parsed rules.",
-            fix: "Make the file parse. The judge must be able to read it.",
-            run: Run::ParseError,
-        },
+        UNPARSEABLE,
         #[cfg(test)]
         crate::advisory_tests::RULE,
         crate::packs::ts::no_assertionless_tests::RULE,
@@ -161,6 +170,7 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_skipped_tests::RULE,
         crate::packs::ts::no_test_aware_code::RULE,
         crate::packs::ts::no_test_doubles::RULE,
+        crate::packs::ts::no_test_removal::RULE,
         crate::packs::ts::no_unknown_parameters::RULE,
         crate::packs::ts::no_unknown_returns::RULE,
         crate::packs::ts::no_unknown_type_aliases::RULE,
@@ -212,9 +222,7 @@ fn decode(bytes: &[u8]) -> (String, Option<usize>) {
 }
 
 pub(crate) fn can_allow(rules: &[Rule], id: &str) -> bool {
-    rules
-        .iter()
-        .any(|r| r.id == id && !matches!(r.run, Run::ParseError))
+    rules.iter().any(|r| r.id == id && r.run.can_allow())
 }
 
 fn diagnostic(error: &OxcDiagnostic) -> (usize, String) {
@@ -275,13 +283,41 @@ fn parse<'a>(
     })
 }
 
-fn source_type(path: &str) -> Option<SourceType> {
+pub(crate) fn source_type(path: &str) -> Option<SourceType> {
     let name = path.rsplit('/').next()?.to_ascii_lowercase();
     let kind = SourceType::from_path(&name)
         .ok()
         .or_else(|| SourceType::from_extension(name.strip_prefix('.')?).ok())?;
     // The TypeScript compiler reads JSX in every JavaScript file, whatever its extension.
     Some(kind.with_jsx(kind.is_jsx() || kind.is_javascript()))
+}
+
+pub(crate) fn parse_diagnostics(original: &str, path: &str, bytes: &[u8]) -> Vec<Finding> {
+    let mut diagnostics = run(&[UNPARSEABLE], [(original, bytes)]);
+    for finding in &mut diagnostics {
+        path.clone_into(&mut finding.path);
+    }
+    diagnostics
+}
+
+pub(crate) fn with_parsed<T: Default + Send>(
+    path: &str,
+    original: &str,
+    bytes: &[u8],
+    visit: fn(&TsCtx<'_>) -> T,
+) -> std::io::Result<T> {
+    let Some(kind) = source_type(path).or_else(|| source_type(original)) else {
+        return Ok(T::default());
+    };
+    let (text, malformed) = decode(bytes);
+    if malformed.is_some() || text.contains('\0') {
+        return Ok(T::default());
+    }
+    parser_thread(|| {
+        let arena = Allocator::default();
+        parse(&arena, path, &text, kind).map_or_else(|_| T::default(), |ts| visit(&ts))
+    })?
+    .map_err(|_| std::io::Error::other(format!("Parser panicked while counting tests in {path:?}")))
 }
 
 type Hit<'a> = (usize, &'a Rule, Option<String>);
@@ -324,10 +360,22 @@ fn collect<'r>(
                     findings.report(*at, Some(message));
                 }
             }
+            Run::Diff => (),
         }
         hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule, note)));
     }
     hits
+}
+
+fn parser_thread<T: Send>(f: impl FnOnce() -> T + Send) -> std::io::Result<std::thread::Result<T>> {
+    // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
+    const STACK_BYTES: usize = 768 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        Ok(std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn_scoped(scope, f)?
+            .join())
+    })
 }
 
 fn parsed_hits<'r>(
@@ -336,21 +384,14 @@ fn parsed_hits<'r>(
     text: &str,
     kind: SourceType,
 ) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
-    // shortcut: a file nested deeper than this stack aborts the run (red, never green); judge files in a child process when a real repository hits it.
-    const STACK_BYTES: usize = 768 * 1024 * 1024;
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(STACK_BYTES)
-            .spawn_scoped(scope, || {
-                let arena = Allocator::default();
-                let mut ts = parse(&arena, path, text, kind)?;
-                let hits = collect(rules, path, text, Ok(Some(&mut ts)));
-                Ok((hits, ts.work.get()))
-            })
-            .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
-            .join()
-            .map_err(|_| (0, "Parser panicked".to_owned()))?
+    parser_thread(|| {
+        let arena = Allocator::default();
+        let mut ts = parse(&arena, path, text, kind)?;
+        let hits = collect(rules, path, text, Ok(Some(&mut ts)));
+        Ok((hits, ts.work.get()))
     })
+    .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
+    .map_err(|_| (0, "Parser panicked".to_owned()))?
 }
 
 /// # Panics

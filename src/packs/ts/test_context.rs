@@ -15,8 +15,11 @@ use oxc::span::GetSpan;
 use oxc::syntax::{node::NodeId, operator::BinaryOperator};
 
 pub(super) fn test_file(ctx: &TsCtx<'_>) -> bool {
-    let path = ctx.path;
-    ctx.record_string_work(path.len());
+    ctx.record_string_work(ctx.path.len());
+    test_file_path(ctx.path)
+}
+
+pub(crate) fn test_file_path(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
     file.split('.').any(|part| {

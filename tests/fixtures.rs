@@ -1,3 +1,6 @@
+mod common;
+mod trees;
+
 use blackhole_check::engine::{Rule, registry, run};
 use std::{
     collections::BTreeSet,
@@ -67,29 +70,82 @@ impl Case {
             rules,
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
-        let Some(expected) = &self.expect else {
-            assert!(hits.is_empty(), "{}", path.display());
-            return;
-        };
-        assert!(!hits.is_empty(), "no finding for {}", path.display());
-        let mut actual = String::new();
-        for hit in hits {
-            if self.directory {
-                write!(actual, "{}:", hit.path).unwrap();
-            }
-            writeln!(actual, "{}:{}", hit.line, hit.col).unwrap();
+        verify_locations(
+            self.expect.as_deref(),
+            path,
+            hits.into_iter().map(|hit| {
+                let prefix = if self.directory {
+                    hit.path
+                } else {
+                    String::new()
+                };
+                (prefix, hit.line, hit.col)
+            }),
+        );
+    }
+}
+
+fn verify_locations(
+    expected: Option<&Path>,
+    path: &Path,
+    hits: impl IntoIterator<Item = (String, usize, usize)>,
+) {
+    let mut actual = String::new();
+    for (name, line, col) in hits {
+        if !name.is_empty() {
+            write!(actual, "{name}:").unwrap();
         }
-        if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
-            fs::write(expected, actual).unwrap();
-        } else {
-            assert_eq!(
-                fs::read_to_string(expected).unwrap(),
-                actual,
-                "{}",
-                path.display()
-            );
+        writeln!(actual, "{line}:{col}").unwrap();
+    }
+    let Some(expected) = expected else {
+        assert!(actual.is_empty(), "{}: {actual}", path.display());
+        return;
+    };
+    assert!(!actual.is_empty(), "no finding for {}", path.display());
+    if std::env::var("BLACKHOLE_BLESS").as_deref() == Ok("1") {
+        fs::write(expected, actual).unwrap();
+    } else {
+        assert_eq!(
+            fs::read_to_string(expected).unwrap(),
+            actual,
+            "{}",
+            path.display()
+        );
+    }
+}
+
+fn diff_case(path: &Path, side: &str, rule: &Rule) -> common::Result<()> {
+    let expected = (side == "reject").then(|| path.join("expect"));
+    let mut required = BTreeSet::from([path.join("base"), path.join("head")]);
+    required.extend(expected.iter().cloned());
+    assert_eq!(entries(path), required, "{}", path.display());
+
+    let temp = tempfile::tempdir()?;
+    let (base, head) = trees::revisions(path, temp.path())?;
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(temp.path())
+        .args(["ci", "--base", &base, "--head", &head])
+        .output()?;
+    let text = String::from_utf8(out.stdout)?;
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(expected.is_some())),
+        "{}: {text}{}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stderr.is_empty(), "{:?}", out.stderr);
+    let marker = format!(" {} ", rule.id);
+    let mut hits = Vec::new();
+    for line in text.lines() {
+        if let Some((pos, _)) = line.split_once(&marker) {
+            let (pos, col) = pos.rsplit_once(':').ok_or("missing column")?;
+            let (name, line) = pos.rsplit_once(':').ok_or("missing line")?;
+            hits.push((name.to_owned(), line.parse()?, col.parse()?));
         }
     }
+    verify_locations(expected.as_deref(), path, hits);
+    Ok(())
 }
 
 fn verify(rule: &Rule, dir: &Path) {
@@ -115,7 +171,11 @@ fn verify(rule: &Rule, dir: &Path) {
                 assert!(folder.join(name).is_file(), "orphan {}", path.display());
                 continue;
             }
-            Case::load(&path, side).verify(&path, rule);
+            if matches!(rule.run, blackhole_check::engine::Run::Diff) {
+                diff_case(&path, side, rule).unwrap();
+            } else {
+                Case::load(&path, side).verify(&path, rule);
+            }
         }
     }
 }

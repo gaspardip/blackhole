@@ -1,11 +1,15 @@
 use crate::{
     config,
+    engine::{self, Finding},
     git::{self, Batch, Tree},
     ledger::{self, Counts},
     objections::{self, Date, Rows},
-    verdict::{self, Approvals, Inputs, Verdict},
+    packs::ts::{no_test_removal, test_context::test_file_path},
+    verdict::{self, Approvals, Change, Inputs, Verdict},
 };
+use globset::GlobSet;
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::Path,
@@ -29,6 +33,68 @@ fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
         day,
     )
 }
+
+fn renamed_test_diagnostics(
+    head: &Tree,
+    changes: &[Change],
+    excludes: &GlobSet,
+    batch: &mut Batch,
+) -> io::Result<Vec<Finding>> {
+    let mut findings = Vec::new();
+    for change in changes {
+        if let Some(old) = change.old()
+            && test_file_path(old)
+            && !excludes.is_match(old)
+            && !excludes.is_match(&change.path)
+            && engine::source_type(old).is_some()
+            && engine::source_type(&change.path).is_none()
+            && let Some(bytes) = head.read(&change.path, batch)?
+        {
+            findings.extend(engine::parse_diagnostics(old, &change.path, &bytes));
+        }
+    }
+    Ok(findings)
+}
+
+fn test_removals(
+    base: &Tree,
+    head: &Tree,
+    changes: &[Change],
+    excludes: &GlobSet,
+    batch: &mut Batch,
+) -> io::Result<Vec<Finding>> {
+    let renames: BTreeMap<_, _> = changes
+        .iter()
+        .filter_map(|c| Some((c.old()?, c.path.as_str())))
+        .collect();
+    let mut findings = Vec::new();
+    for old in base
+        .paths()
+        .filter(|p| test_file_path(p) && !excludes.is_match(p))
+    {
+        let Some(before) = base.blob(old, batch)? else {
+            continue;
+        };
+        let new = renames.get(old).copied().unwrap_or(old);
+        let after = if excludes.is_match(new) {
+            None
+        } else {
+            head.blob(new, batch)?
+        };
+        let Some(after) = after else {
+            findings.push(no_test_removal::deleted(old));
+            continue;
+        };
+        if before != after || old != new {
+            let before = batch.read(before)?;
+            let after = batch.read(after)?;
+            findings.extend(no_test_removal::compare(old, new, &before, &after)?);
+        }
+    }
+    findings.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(findings)
+}
+
 fn evaluate(
     base: &str,
     head: &str,
@@ -55,10 +121,15 @@ fn evaluate(
     let head_ledger = ledger(&head_tree, &mut batch);
     let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
-    let findings = crate::scan_files(
+    let mut findings = crate::scan_files(
         head_tree.paths().filter(|p| !excludes.is_match(p)),
         |path| head_tree.read(path, &mut batch),
     )?;
+    let rename_findings = renamed_test_diagnostics(&head_tree, &changes, excludes, &mut batch)?;
+    if !rename_findings.is_empty() {
+        findings.extend(rename_findings);
+        findings.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
+    }
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,
@@ -73,6 +144,11 @@ fn evaluate(
         },
         &base_config.guard,
     )?;
+    if !approved {
+        verdict.test_removals(&test_removals(
+            &base_tree, &head_tree, &changes, excludes, &mut batch,
+        )?)?;
+    }
     if let Some(lcov) = &base_config.lcov {
         let delta = crate::coverage::changed(
             &changes,

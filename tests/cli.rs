@@ -1221,3 +1221,17 @@ fn a_missing_object_is_not_fetched() {
     run(root, &["ci", "--base", &missing, "--head", "HEAD"], 2);
     assert!(!marker.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_directory_link_under_tests_is_not_a_removed_test_file() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join("tests")).unwrap();
+    fs::write(root.join("tests/data.txt"), "sample").unwrap();
+    std::os::unix::fs::symlink(".", root.join("tests/assets")).unwrap();
+    commit(root);
+    fs::remove_file(root.join("tests/assets")).unwrap();
+    commit(root);
+    run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 0);
+}

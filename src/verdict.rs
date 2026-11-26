@@ -55,7 +55,7 @@ pub struct Change {
     pub path: String,
 }
 impl Change {
-    fn old(&self) -> Option<&str> {
+    pub(crate) fn old(&self) -> Option<&str> {
         match &self.kind {
             Kind::Moved(old) => Some(old),
             _ => None,
@@ -79,6 +79,14 @@ pub struct Verdict {
     pub lines: Vec<u8>,
 }
 impl Verdict {
+    pub(crate) fn test_removals(&mut self, findings: &[Finding]) -> io::Result<()> {
+        if !findings.is_empty() {
+            self.gates.insert("tests");
+            crate::print_findings(&findings.iter().collect::<Vec<_>>(), &mut self.lines)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn behind() -> Self {
         // shortcut: judging the merge result instead needs git merge-tree, do it when requiring up-to-date branches hurts
         Self {

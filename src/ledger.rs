@@ -1,4 +1,4 @@
-use crate::engine::{Finding, Gate, Rule, Run, registry};
+use crate::engine::{Finding, Gate, Rule, registry};
 use std::{collections::BTreeMap, fmt::Write, io};
 
 pub type Key = (String, String);
@@ -36,7 +36,7 @@ pub fn parse(bytes: &[u8], rules: &[Rule]) -> io::Result<Counts> {
         };
         let rule = rules
             .iter()
-            .find(|r| r.id == rule && !matches!(r.run, Run::ParseError))
+            .find(|r| r.id == rule && r.run.can_allow())
             .ok_or_else(|| error("unknown or prohibited rule"))?;
         let count = count_of(count).ok_or_else(|| error("invalid count"))?;
         if invalid_path(path) {

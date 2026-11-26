@@ -85,7 +85,21 @@ fn tautology<'a>(
             || first.is_some_and(|arg| same(ctx, subject, arg))
     })
 }
-fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+pub(super) struct Inventory {
+    cases: usize,
+    assertions: BTreeMap<u32, Option<usize>>,
+    helpers: BTreeMap<u32, oxc::span::Span>,
+    tests: Vec<(usize, oxc::span::Span)>,
+}
+
+impl Inventory {
+    pub(super) fn counts(&self) -> (usize, usize) {
+        (self.cases, self.assertions.len())
+    }
+}
+
+pub(super) fn inventory(ctx: &TsCtx<'_>) -> Inventory {
+    let mut cases = 0;
     let mut assertions = BTreeMap::<u32, Option<usize>>::new();
     let mut helpers = BTreeMap::new();
     let mut tests = Vec::new();
@@ -169,10 +183,26 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         {
             continue;
         }
+        cases += 1;
         if let Some(body) = inv.test_body(ctx) {
             tests.push((position(), body));
         }
     }
+    Inventory {
+        cases,
+        assertions,
+        helpers,
+        tests,
+    }
+}
+
+fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
+    let Inventory {
+        tests,
+        assertions,
+        helpers,
+        ..
+    } = inventory(ctx);
     report_assertions(ctx, tests, &assertions, &helpers, findings);
 }
 
