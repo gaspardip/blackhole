@@ -348,3 +348,13 @@ fn global_filename_write_reports_at_the_assignment() {
         &[(2, 1, UNKNOWN)],
     );
 }
+
+#[test]
+fn node_module_source_map_queries_do_not_load_code() {
+    let source = "import {findSourceMap, register} from 'node:module';\n\
+                  import * as modules from 'node:module';\n\
+                  findSourceMap(name);\n\
+                  modules.findSourceMap(name);\n\
+                  register(name);";
+    findings("app.mjs", source, &[(1, 24, UNKNOWN)]);
+}

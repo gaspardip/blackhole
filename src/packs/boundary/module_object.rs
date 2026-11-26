@@ -93,7 +93,24 @@ impl Value {
             (Module, Some("filename" | "loaded" | "id" | "path" | "isPreloading" | "hot")) => Data,
             (Data | Metadata | UnreadMember | Promise(_), _)
             | (Global | Process, Some(_))
-            | (Class, Some("builtinModules" | "getSourceMapsSupport" | "isBuiltin"))
+            | (
+                Class,
+                Some(
+                    "builtinModules"
+                    | "constants"
+                    | "enableCompileCache"
+                    | "findPackageJSON"
+                    | "findSourceMap"
+                    | "flushCompileCache"
+                    | "getCompileCacheDir"
+                    | "getSourceMapsSupport"
+                    | "isBuiltin"
+                    | "setSourceMapsSupport"
+                    | "SourceMap"
+                    | "stripTypeScriptTypes"
+                    | "syncBuiltinESMExports",
+                ),
+            )
             | (Resolve, Some("paths"))
             | (Module, Some("exports")) => return None,
             _ => UnreadMember,
