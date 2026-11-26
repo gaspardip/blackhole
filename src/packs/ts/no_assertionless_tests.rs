@@ -15,7 +15,7 @@ fn literal(ctx: &TsCtx<'_>, e: &Expression<'_>) -> bool {
     e.is_literal() || matches!(e,Expression::TemplateLiteral(t) if t.expressions.is_empty())
 }
 fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bool {
-    use super::values::{resolve, symbol, unwrapped};
+    use super::values::{resolve, same_key, same_string_bytes, symbol, unwrapped};
     let (a, b) = (unwrapped(ctx, a), unwrapped(ctx, b));
     match (a, b) {
         (Expression::Identifier(_), Expression::Identifier(_)) => {
@@ -24,21 +24,27 @@ fn same<'a>(ctx: &TsCtx<'a>, a: &'a Expression<'a>, b: &'a Expression<'a>) -> bo
                 (Expression::Identifier(x), Expression::Identifier(y)) => {
                     match (symbol(ctx, x), symbol(ctx, y)) {
                         (Some(x), Some(y)) => x == y,
-                        (None, None) => x.name == y.name,
+                        (None, None) => same_key(ctx, x.name.as_str(), y.name.as_str()),
                         _ => false,
                     }
                 }
                 _ => a.span() == b.span(),
             }
         }
-        (Expression::StringLiteral(x), Expression::StringLiteral(y)) => x.value == y.value,
+        (Expression::StringLiteral(x), Expression::StringLiteral(y)) => {
+            same_string_bytes(ctx, x.value.as_bytes(), y.value.as_bytes())
+        }
         (Expression::NumericLiteral(x), Expression::NumericLiteral(y)) => {
             x.value.to_bits() == y.value.to_bits()
         }
-        (Expression::BigIntLiteral(x), Expression::BigIntLiteral(y)) => x.value == y.value,
-        (x, y) if literal(ctx, x) && literal(ctx, y) => {
-            x.span().source_text(ctx.text) == y.span().source_text(ctx.text)
+        (Expression::BigIntLiteral(x), Expression::BigIntLiteral(y)) => {
+            same_key(ctx, x.value.as_str(), y.value.as_str())
         }
+        (x, y) if literal(ctx, x) && literal(ctx, y) => same_key(
+            ctx,
+            x.span().source_text(ctx.text),
+            y.span().source_text(ctx.text),
+        ),
         _ => false,
     }
 }
@@ -73,9 +79,8 @@ fn tautology<'a>(
     ) && expect.arg(0).is_some_and(|subject| {
         literal(ctx, resolve(ctx, subject))
             && call.unreadable_args.is_none()
-            && call
-                .args
-                .iter()
+            && ctx
+                .counted(call.args.iter())
                 .all(|arg| arg.is_some_and(|value| literal(ctx, resolve(ctx, value))))
             || first.is_some_and(|arg| same(ctx, subject, arg))
     })

@@ -1,7 +1,7 @@
 use super::values::symbol;
 use super::{
     double_mutations::writes,
-    values::{MemberKeys, declaration, invoked, path, resolve},
+    values::{MemberKeys, declaration, invoked, path, resolve, same_key},
 };
 use crate::engine::{Findings, TsCtx};
 use oxc::{
@@ -21,9 +21,8 @@ fn same<'a>(
     let (mut left, mut right) = (left, right);
     let mut seen = std::collections::HashSet::new();
     while seen.insert(left.span()) {
-        if MemberKeys(ctx).read(left).is_none()
-            || MemberKeys(ctx).read(left) != MemberKeys(ctx).read(right)
-        {
+        let keys = MemberKeys(ctx).read(left).zip(MemberKeys(ctx).read(right));
+        if !keys.is_some_and(|(left, right)| same_key(ctx, left, right)) {
             return false;
         }
         let (left_object, right_object) =
@@ -34,7 +33,8 @@ fn same<'a>(
         if let (Expression::Identifier(first), Expression::Identifier(second)) =
             (left_object, right_object)
         {
-            return first.name == second.name && symbol(ctx, first) == symbol(ctx, second);
+            return symbol(ctx, first) == symbol(ctx, second)
+                && same_key(ctx, first.name.as_str(), second.name.as_str());
         }
         let (Some(first), Some(second)) = (
             left_object.get_member_expr(),

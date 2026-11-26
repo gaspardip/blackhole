@@ -27,6 +27,8 @@ use std::{
     collections::HashMap,
     rc::Rc,
 };
+type Projections<'a> =
+    HashMap<(oxc::syntax::node::NodeId, *const str), Option<&'a ObjectProperty<'a>>>;
 type AccumulatorAliases<'a> = HashMap<(SymbolId, SymbolId), &'a Expression<'a>>;
 
 #[derive(Default)]
@@ -50,6 +52,7 @@ pub(crate) struct Resolution<'a> {
     aliases: RefCell<HashMap<SymbolId, &'a Expression<'a>>>,
     accumulator_aliases: RefCell<AccumulatorAliases<'a>>,
     strings: strings::StringCache,
+    projections: RefCell<Projections<'a>>,
     objects: RefCell<HashMap<u32, Properties<'a>>>,
     pub(super) transport_options: RefCell<HashMap<u32, super::transports::TransportOption<'a>>>,
     calls: RefCell<HashMap<oxc::span::Span, Rc<InvocationTarget<'a>>>>,
@@ -141,9 +144,8 @@ pub(super) fn destructured<'a>(
     pattern: &'a oxc::ast::ast::ObjectPattern<'a>,
     matches: impl Fn(&oxc::ast::ast::BindingIdentifier<'a>) -> bool,
 ) -> Option<&'a str> {
-    let property = pattern
-        .properties
-        .iter()
+    let property = ctx
+        .counted(pattern.properties.iter())
         .find(|p| p.value.get_binding_identifier().is_some_and(&matches))?;
     key(ctx, &property.key)
 }
@@ -556,23 +558,42 @@ pub(super) fn binding_value_until<'a>(
     expr
 }
 
+pub(super) fn static_name<'a>(
+    ctx: &TsCtx<'_>,
+    key: &PropertyKey<'a>,
+) -> Option<oxc::ast::StaticPropertyName<'a>> {
+    if let PropertyKey::RegExpLiteral(regex) = key {
+        ctx.record_string_work(regex.span.size() as usize);
+    }
+    key.static_name()
+}
+
 fn projection<'a>(
     ctx: &TsCtx<'a>,
     object: &'a Expression<'a>,
-    name: &str,
-) -> Option<&'a oxc::ast::ast::ObjectProperty<'a>> {
+    name: &'a str,
+) -> Option<&'a ObjectProperty<'a>> {
     let Expression::ObjectExpression(obj) = binding_value(ctx, object) else {
         return None;
     };
-    for field in obj.properties.iter().rev() {
-        let ObjectPropertyKind::ObjectProperty(p) = field else {
-            return None;
-        };
-        if p.key.static_name()? == name {
-            return (p.kind == oxc::ast::ast::PropertyKind::Init).then_some(p);
-        }
-    }
-    None
+    // The same borrowed selector can occur at many reads of one object.
+    let lookup = (obj.node_id(), std::ptr::from_ref(name));
+    *ctx.resolution
+        .projections
+        .borrow_mut()
+        .entry(lookup)
+        .or_insert_with(|| {
+            for field in ctx.counted(obj.properties.iter().rev()) {
+                let ObjectPropertyKind::ObjectProperty(p) = field else {
+                    return None;
+                };
+                let key = static_name(ctx, &p.key)?;
+                if same_string_bytes(ctx, key.as_js_str().as_bytes(), name.as_bytes()) {
+                    return (p.kind == oxc::ast::ast::PropertyKind::Init).then_some(p);
+                }
+            }
+            None
+        })
 }
 
 fn instance_field<'a>(
@@ -591,11 +612,17 @@ fn instance_field<'a>(
         return None;
     }
     let mut value = None;
-    for element in &class.body.body {
+    for element in ctx.counted(class.body.body.iter()) {
         let oxc::ast::ast::ClassElement::PropertyDefinition(field) = element else {
             return None;
         };
-        if !field.r#static && field.key.static_name()? == name {
+        if !field.r#static
+            && same_string_bytes(
+                ctx,
+                static_name(ctx, &field.key)?.as_js_str().as_bytes(),
+                name.as_bytes(),
+            )
+        {
             value = field.value.as_ref();
         }
     }
@@ -865,7 +892,7 @@ pub(super) fn enclosing_call<'a>(
                     let Some(site) = site(ctx, node.kind()) else {
                         continue;
                     };
-                    for arg in site.call.args.iter().flatten() {
+                    for arg in ctx.counted(site.call.args.iter()).flatten() {
                         let value = unwrapped(ctx, arg);
                         if value.is_function() {
                             callbacks
@@ -878,8 +905,7 @@ pub(super) fn enclosing_call<'a>(
                 callbacks
             });
             let calls = callbacks.get(&ctx.semantic.nodes().get_node(id).span())?;
-            calls
-                .iter()
+            ctx.counted(calls.iter())
                 .find(|c| super::test_context::runner(ctx, c).test_or_suite())
                 .or_else(|| calls.first())
                 .cloned()
@@ -968,6 +994,7 @@ impl<'a> InvocationTarget<'a> {
         Rc::clone(self.expanded.get_or_init(|| {
             let (pending, intrinsic_targets) = self.pending.take();
             let args = pending.finish(ctx);
+            ctx.record_work(self.path.as_ref().map_or(0, Vec::len));
             Rc::new(Invocation {
                 callee: self.callee,
                 path: self.path.clone(),
@@ -1210,31 +1237,47 @@ pub(super) struct Properties<'a> {
 }
 pub(super) trait ObjectSummary<'a>: Clone + Default {
     fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>);
-    fn unreadable(&mut self);
-    fn overlay(&mut self, other: &Self);
+    fn unreadable(&mut self, ctx: &TsCtx<'_>);
+    fn overlay(&mut self, ctx: &TsCtx<'_>, other: &Self);
+    fn copy_work(&self) -> usize;
 }
+impl<'a> Properties<'a> {
+    fn insert(&mut self, ctx: &TsCtx<'_>, name: &'a str, property: &'a ObjectProperty<'a>) {
+        // A node compares at most eleven keys, and each lower level at least doubles the tree.
+        let comparisons = 11 * self.named.len().max(1).ilog2() as usize + 11;
+        ctx.record_work(
+            name.len()
+                .max(1)
+                .saturating_mul(self.named.len().min(comparisons)),
+        );
+        self.named.insert(name, property);
+    }
+}
+
 impl<'a> ObjectSummary<'a> for Properties<'a> {
     fn field(&mut self, ctx: &TsCtx<'a>, property: &'a ObjectProperty<'a>) {
         if let Some(name) = key(ctx, &property.key) {
-            self.named.insert(name, property);
+            self.insert(ctx, name, property);
         } else {
-            self.unreadable();
+            self.unreadable(ctx);
         }
     }
-    fn unreadable(&mut self) {
+    fn unreadable(&mut self, ctx: &TsCtx<'_>) {
+        ctx.record_work(self.named.len());
         self.unknown = true;
         self.named.clear();
     }
-    fn overlay(&mut self, other: &Self) {
+    fn overlay(&mut self, ctx: &TsCtx<'_>, other: &Self) {
         if other.unknown {
-            self.unreadable();
+            self.unreadable(ctx);
         }
-        self.named.extend(
-            other
-                .named
-                .iter()
-                .map(|(&name, &property)| (name, property)),
-        );
+        for (&name, &property) in ctx.counted(other.named.iter()) {
+            self.insert(ctx, name, property);
+        }
+    }
+
+    fn copy_work(&self) -> usize {
+        self.named.len()
     }
 }
 pub(super) fn properties<'a>(
@@ -1260,6 +1303,7 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
     };
     let mut cache = cache.borrow_mut();
     if let Some(hit) = cache.get(&root.span.start) {
+        ctx.record_work(hit.copy_work());
         return Some(hit.clone());
     }
     let mut active = HashSet::from([root.span.start]);
@@ -1276,25 +1320,27 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
             let start = finished.object.span.start;
             active.remove(&start);
             if !finished.cyclic {
+                ctx.record_work(finished.summary.copy_work());
                 cache.insert(start, finished.summary.clone());
             }
             let Some(parent) = stack.last_mut() else {
                 return Some(finished.summary);
             };
             parent.cyclic |= finished.cyclic;
-            parent.summary.overlay(&finished.summary);
+            parent.summary.overlay(ctx, &finished.summary);
             continue;
         };
+        ctx.record_work(1);
         frame.index += 1;
         match property {
             ObjectPropertyKind::ObjectProperty(p) => frame.summary.field(ctx, p),
             ObjectPropertyKind::SpreadProperty(s) => {
                 let Expression::ObjectExpression(child) = resolve(ctx, &s.argument) else {
-                    frame.summary.unreadable();
+                    frame.summary.unreadable(ctx);
                     continue;
                 };
                 if let Some(hit) = cache.get(&child.span.start) {
-                    frame.summary.overlay(hit);
+                    frame.summary.overlay(ctx, hit);
                 } else if active.insert(child.span.start) {
                     stack.push(Frame {
                         object: child,
@@ -1304,7 +1350,7 @@ pub(super) fn object_summary<'a, S: ObjectSummary<'a>>(
                     });
                 } else {
                     frame.cyclic = true;
-                    frame.summary.unreadable();
+                    frame.summary.unreadable(ctx);
                 }
             }
         }

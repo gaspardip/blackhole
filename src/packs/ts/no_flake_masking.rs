@@ -27,16 +27,17 @@ fn inspect<'a>(
     let Some(opts) = super::values::properties(ctx, expr) else {
         return false;
     };
-    report_options(expr, opts, keys, findings);
+    report_options(ctx, expr, opts, keys, findings);
     true
 }
 fn report_options(
+    ctx: &TsCtx<'_>,
     expr: &Expression<'_>,
     opts: Properties<'_>,
     keys: &[&str],
     findings: &mut Findings,
 ) {
-    for (k, p) in opts.named {
+    for (k, p) in ctx.counted(opts.named.into_iter()) {
         if keys.contains(&k) {
             findings.report(p.span.start as usize, None);
         }
@@ -99,7 +100,7 @@ fn config_retries<'a>(
             if let Some(projects) = options.named.get("projects") {
                 pending.push(&projects.value);
             }
-            report_options(&test.value, options, &["retry"], findings);
+            report_options(ctx, &test.value, options, &["retry"], findings);
         } else {
             pending.extend(super::values::alternatives(value));
         }
@@ -110,9 +111,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     for n in ctx.nodes() {
         match n.kind() {
-            AstKind::ExportDefaultDeclaration(export)
-                if super::config_responses::config(ctx.path) =>
-            {
+            AstKind::ExportDefaultDeclaration(export) if super::config_responses::config(ctx) => {
                 let roots = match &export.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                         config_returns(ctx, AstKind::Function(f))
@@ -177,7 +176,13 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                         for slot in p.test_options(ctx, &call).into_iter().flatten() {
                             match slot {
                                 TestOption::Object(arg, props) => {
-                                    report_options(arg, props, &["retry", "timeout"], findings);
+                                    report_options(
+                                        ctx,
+                                        arg,
+                                        props,
+                                        &["retry", "timeout"],
+                                        findings,
+                                    );
                                 }
                                 TestOption::Opaque {
                                     at,

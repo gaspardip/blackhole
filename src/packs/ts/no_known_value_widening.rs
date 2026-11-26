@@ -94,10 +94,14 @@ fn guard_argument<'a>(
 ) -> Option<(&'a Expression<'a>, Judged<()>)> {
     let (params, ret) = local_function(ctx, &call.callee)?;
     let subject = predicate_subject(ret?)?;
-    let (index, annotation) = params.items.iter().enumerate().find_map(|(index, p)| {
-        let (name, ty) = super::function_types::parameter(AstKind::FormalParameter(p))?;
-        (name == Some(subject)).then_some((index, ty))
-    })?;
+    let (index, annotation) =
+        ctx.counted(params.items.iter())
+            .enumerate()
+            .find_map(|(index, p)| {
+                let (name, ty) = super::function_types::parameter(AstKind::FormalParameter(p))?;
+                name.is_some_and(|name| super::values::same_key(ctx, name, subject))
+                    .then_some((index, ty))
+            })?;
     let arg = call.arguments.get(index)?.as_expression()?;
     match resolution.contains_unknown(ctx, annotation) {
         Ok(true) => {}

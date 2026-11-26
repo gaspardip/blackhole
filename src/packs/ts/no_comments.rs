@@ -29,7 +29,8 @@ fn js_whitespace(c: char) -> bool {
     oxc::syntax::identifier::is_white_space(c) || is_line_terminator(c)
 }
 
-fn directive(raw: &str) -> bool {
+fn directive(ctx: &TsCtx<'_>, raw: &str) -> bool {
+    ctx.record_string_work(raw.len());
     let value = raw
         .strip_prefix('!')
         .unwrap_or(raw)
@@ -155,6 +156,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
                 for spec in &n.specifiers {
                     ctx.record_work(1);
                     if let ModuleExportName::IdentifierReference(r) = &spec.local {
+                        ctx.record_string_work(r.name.len());
                         bindings.extend(scoping.get_root_binding(r.name));
                     }
                 }
@@ -165,6 +167,7 @@ fn public_declarations(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
                     .as_expression()
                     .map(Expression::without_parentheses)
                 {
+                    ctx.record_string_work(r.name.len());
                     bindings.extend(scoping.get_root_binding(r.name));
                 }
             }
@@ -273,10 +276,8 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
     let mut pending: Vec<_> = public.iter().copied().collect();
     while let Some(owner) = pending.pop() {
         ctx.record_work(1);
-        for symbol in references
-            .remove(&owner)
-            .into_iter()
-            .flatten()
+        for symbol in ctx
+            .counted(references.remove(&owner).into_iter().flatten())
             .filter(|s| expanded.insert(*s))
         {
             pending.extend(
@@ -285,7 +286,10 @@ fn exposure(ctx: &TsCtx<'_>) -> Exposure {
             );
         }
         if let Some(targets) = edges.remove(&owner) {
-            pending.extend(targets.into_iter().filter(|id| public.insert(*id)));
+            pending.extend(
+                ctx.counted(targets.into_iter())
+                    .filter(|id| public.insert(*id)),
+            );
         }
     }
     Exposure { owners, public }
@@ -306,6 +310,7 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
             return (c.is_block()
                 && raw.starts_with('*')
                 && !["@internal", "@private"].iter().any(|tag| {
+                    ctx.record_string_work(raw.len());
                     raw.match_indices(tag)
                         .any(|(i, _)| word_end(&raw[i + tag.len()..]))
                 }))
@@ -316,12 +321,20 @@ fn doc_before(ctx: &TsCtx<'_>, mut start: u32, directives: &HashSet<u32>) -> Opt
     None
 }
 
-fn warning(comment: &Comment, raw: &str) -> bool {
-    comment.is_line()
-        && raw
-            .trim_start_matches(js_whitespace)
-            .strip_prefix("WARNING:")
-            .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
+fn warning(ctx: &TsCtx<'_>, comment: &Comment, raw: &str) -> bool {
+    if !comment.is_line() {
+        return false;
+    }
+    ctx.record_string_work(raw.len());
+    raw.trim_start_matches(js_whitespace)
+        .strip_prefix("WARNING:")
+        .is_some_and(|v| !v.trim_matches(js_whitespace).is_empty())
+}
+
+fn suppressed(ctx: &TsCtx<'_>, comment: &Comment) -> bool {
+    let raw = comment.span.source_text(ctx.text);
+    ctx.record_string_work(raw.len());
+    suppressed_comment(raw)
 }
 
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
@@ -330,10 +343,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
     }
     let directives: HashSet<_> = ctx
         .counted(ctx.comments.iter())
-        .filter(|c| {
-            directive(c.content_span().source_text(ctx.text))
-                && !suppressed_comment(c.span.source_text(ctx.text))
-        })
+        .filter(|c| directive(ctx, c.content_span().source_text(ctx.text)) && !suppressed(ctx, c))
         .map(|c| c.span.start)
         .collect();
     let exposure = exposure(ctx);
@@ -368,8 +378,8 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
             continue;
         }
         let allowed = documented.contains(&c.span.start)
-            || warning(c, c.content_span().source_text(ctx.text));
-        if !allowed || suppressed_comment(c.span.source_text(ctx.text)) {
+            || warning(ctx, c, c.content_span().source_text(ctx.text));
+        if !allowed || suppressed(ctx, c) {
             findings.report(c.span.start as usize, None);
         }
     }

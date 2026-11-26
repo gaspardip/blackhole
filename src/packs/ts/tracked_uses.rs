@@ -80,7 +80,7 @@ fn owner<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>) -> Option<&'static str>
     ) {
         return Some("ts/no-fixed-sleep");
     }
-    let runner = Runner::from_path(origin, &path)?;
+    let runner = Runner::from_path(ctx, origin, &path)?;
     let names = runner.short();
     let single_name = matches!(names, Some([_]));
     if (origin != Origin::Global && runner.is_empty())
@@ -128,6 +128,7 @@ fn inspect_value<'a>(ctx: &TsCtx<'a>, value: &'a Expression<'a>, escapes: &mut V
                 .get_member_expr()
                 .map_or_else(|| value.span(), |m| super::member_span(ctx, m));
             let name = span.source_text(ctx.text);
+            ctx.record_string_work(name.len());
             escapes.push(Escape {
                 rule,
                 start: span.start as usize,
@@ -141,7 +142,7 @@ fn escapes(ctx: &TsCtx<'_>) -> Vec<Escape> {
     let mut targets = HashSet::new();
     for node in ctx.nodes() {
         if let Some(site) = super::site(ctx, node.kind()) {
-            targets.extend(site.call.intrinsic_targets.iter().copied());
+            targets.extend(ctx.counted(site.call.intrinsic_targets.iter().copied()));
         }
     }
     let mut escapes = Vec::new();
@@ -221,8 +222,9 @@ fn escapes(ctx: &TsCtx<'_>) -> Vec<Escape> {
 }
 
 pub(in crate::packs::ts) fn report(ctx: &TsCtx<'_>, rule: &str, findings: &mut Findings) {
-    for usage in ctx.resolution.escapes.get_or_init(|| escapes(ctx)) {
+    for usage in ctx.counted(ctx.resolution.escapes.get_or_init(|| escapes(ctx)).iter()) {
         if usage.rule == rule {
+            ctx.record_string_work(usage.message.len());
             findings.report(usage.start, Some(&usage.message));
         }
     }

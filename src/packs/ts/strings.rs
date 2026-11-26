@@ -10,10 +10,12 @@ use std::{cell::RefCell, collections::HashMap};
 const SHAPE: &[u8; 5] = b"shape";
 const EDGE: usize = SHAPE.len() - 1;
 
-pub(in crate::packs::ts) fn contains_shape(bytes: &[u8]) -> bool {
-    bytes
+pub(in crate::packs::ts) fn contains_shape(ctx: &TsCtx<'_>, bytes: &[u8]) -> bool {
+    let found = bytes
         .windows(SHAPE.len())
-        .any(|part| part.eq_ignore_ascii_case(SHAPE))
+        .position(|part| part.eq_ignore_ascii_case(SHAPE));
+    ctx.record_string_work(found.map_or(bytes.len().saturating_sub(EDGE), |index| index + 1));
+    found.is_some()
 }
 
 #[derive(Clone, Copy)]
@@ -24,7 +26,7 @@ struct ShapeMatch {
 }
 
 impl ShapeMatch {
-    fn leaf(bytes: &[u8]) -> Self {
+    fn leaf(ctx: &TsCtx<'_>, bytes: &[u8]) -> Self {
         let edge = bytes.len().min(EDGE);
         let mut prefix = [0; EDGE];
         let mut suffix = [0; EDGE];
@@ -33,11 +35,11 @@ impl ShapeMatch {
         Self {
             prefix,
             suffix,
-            found: contains_shape(bytes),
+            found: contains_shape(ctx, bytes),
         }
     }
 
-    fn join(self, right: Self, left_len: usize, right_len: usize) -> Self {
+    fn join(self, ctx: &TsCtx<'_>, right: Self, left_len: usize, right_len: usize) -> Self {
         let mut prefix = self.prefix;
         let left_edge = left_len.min(EDGE);
         prefix[left_edge..].copy_from_slice(&right.prefix[..EDGE - left_edge]);
@@ -50,7 +52,7 @@ impl ShapeMatch {
         Self {
             prefix,
             suffix,
-            found: self.found || right.found || contains_shape(&boundary),
+            found: self.found || right.found || contains_shape(ctx, &boundary),
         }
     }
 }
@@ -64,26 +66,26 @@ pub(super) struct Fold {
 }
 
 impl Fold {
-    fn leaf(text: JSStr<'_>) -> Self {
+    fn leaf(ctx: &TsCtx<'_>, text: JSStr<'_>) -> Self {
         let bytes = text.as_bytes();
         Self {
             len: text.len(),
             starts_low: matches!(bytes, [0xed, 0xb0..=0xbf, _, ..]),
             ends_high: matches!(bytes, [.., 0xed, 0xa0..=0xaf, _]),
-            shape: ShapeMatch::leaf(bytes),
+            shape: ShapeMatch::leaf(ctx, bytes),
         }
     }
 
-    fn add(self, right: Self, budget: usize) -> Option<Self> {
+    fn add(self, right: Self, ctx: &TsCtx<'_>) -> Option<Self> {
         // Adjacent lone surrogates become one four-byte scalar.
         let joined_surrogates = self.ends_high && right.starts_low;
         let len = (self.len - 2 * usize::from(joined_surrogates)).checked_add(right.len)?;
-        (len <= budget).then(|| Self {
+        (len <= ctx.text.len()).then(|| Self {
             len,
             starts_low: self.starts_low || (self.len == 0 && right.starts_low),
             ends_high: right.ends_high || (right.len == 0 && self.ends_high),
             // Surrogate pairing cannot add or remove an ASCII match.
-            shape: self.shape.join(right.shape, self.len, right.len),
+            shape: self.shape.join(ctx, right.shape, self.len, right.len),
         })
     }
 }
@@ -150,17 +152,14 @@ fn fold<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<Fold> {
                 (
                     id,
                     leaf.filter(|leaf| leaf.len() <= ctx.text.len())
-                        .map(|leaf| {
-                            ctx.record_string_work(leaf.len());
-                            Fold::leaf(leaf)
-                        }),
+                        .map(|leaf| Fold::leaf(ctx, leaf)),
                 )
             }
             Step::Copy(id, next) => (id, cache[&next]),
             Step::Add(id, left, right) => {
                 let value = cache[&left]
                     .zip(cache[&right])
-                    .and_then(|(left, right)| left.add(right, ctx.text.len()));
+                    .and_then(|(left, right)| left.add(right, ctx));
                 (id, value)
             }
         };

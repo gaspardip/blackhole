@@ -586,7 +586,7 @@ fn implicit_namespace_exports(
 ) -> Option<bool> {
     let mut ambient = ns.declare || ctx.program.source_type.is_typescript_definition();
     if !ambient {
-        for ancestor in ctx.ancestors(ns.node_id()) {
+        for ancestor in ctx.semantic.nodes().ancestors(ns.node_id()) {
             if !budget.take(1) {
                 return None;
             }
@@ -672,7 +672,12 @@ impl Environments {
                         return None;
                     }
                     if self.namespace_exported(ctx, ns, decl, budget)? {
+                        ctx.record_string_work(name.len());
+                        let capacity = exports.capacity();
                         exports.entry(name.to_string()).or_default().push(candidate);
+                        if exports.capacity() != capacity {
+                            ctx.record_work(exports.keys().map(String::len).sum());
+                        }
                         break;
                     }
                 }
@@ -873,10 +878,18 @@ impl Environments {
         member: &str,
         budget: &mut Budget,
     ) -> Option<&[SymbolId]> {
+        ctx.record_work(symbols.len());
         if !self.namespace_exports.contains_key(symbols) {
             let exports = self.namespace_exports(ctx, symbols, budget)?;
+            ctx.record_work(symbols.len().saturating_mul(2));
+            let capacity = self.namespace_exports.capacity();
             self.namespace_exports.insert(symbols.to_vec(), exports);
+            if self.namespace_exports.capacity() != capacity {
+                ctx.record_work(self.namespace_exports.keys().map(Vec::len).sum());
+            }
         }
+        ctx.record_work(symbols.len());
+        ctx.record_string_work(member.len());
         let candidates = self.namespace_exports[symbols].get(member)?;
         budget.take(candidates.len() - 1).then_some(candidates)
     }
@@ -1692,13 +1705,18 @@ impl Environments {
     }
 }
 
-fn same_gap(text: &str, left: u32, left_end: u32, right: u32, right_end: u32) -> bool {
-    let gap = |start: u32, end: u32| {
-        text[start as usize..end as usize]
-            .chars()
-            .filter(|c| !c.is_whitespace())
-    };
-    gap(left, left_end).eq(gap(right, right_end))
+fn same_gap(ctx: &TsCtx<'_>, left: u32, left_end: u32, right: u32, right_end: u32) -> bool {
+    let mut left_bytes = 0;
+    let mut right_bytes = 0;
+    let gap = |start: u32, end: u32| ctx.text[start as usize..end as usize].chars();
+    let same = gap(left, left_end)
+        .inspect(|c| left_bytes += c.len_utf8())
+        .filter(|c| !c.is_whitespace())
+        .eq(gap(right, right_end)
+            .inspect(|c| right_bytes += c.len_utf8())
+            .filter(|c| !c.is_whitespace()));
+    ctx.record_work(left_bytes + right_bytes);
+    same
 }
 
 fn empty_members(
@@ -1909,9 +1927,9 @@ impl Resolution {
                 return Ok(false);
             }
             let (mut ax, mut bx) = (ak.span().start, bk.span().start);
-            for (x, y) in xs.into_iter().zip(ys) {
+            for (x, y) in ctx.counted(xs.into_iter().zip(ys)) {
                 let (sx, sy) = (nodes.kind(x).span(), nodes.kind(y).span());
-                if !same_gap(ctx.text, ax, sx.start.max(ax), bx, sy.start.max(bx)) {
+                if !same_gap(ctx, ax, sx.start.max(ax), bx, sy.start.max(bx)) {
                     return Ok(false);
                 }
                 ax = ax.max(sx.end);
@@ -1927,13 +1945,7 @@ impl Resolution {
                     },
                 ));
             }
-            if !same_gap(
-                ctx.text,
-                ax,
-                ak.span().end.max(ax),
-                bx,
-                bk.span().end.max(bx),
-            ) {
+            if !same_gap(ctx, ax, ak.span().end.max(ax), bx, bk.span().end.max(bx)) {
                 return Ok(false);
             }
         }
@@ -2352,6 +2364,7 @@ mod tests {
         use crate::engine::{run, run_with_work};
         use std::fmt::Write as _;
 
+        const READS: usize = 4_000;
         for (origin, note) in [
             (
                 "type Origin = string; declare const root: Origin;",
@@ -2365,11 +2378,12 @@ mod tests {
             for i in 1..=4000 {
                 writeln!(source, "const v{i} = v{};", i - 1).unwrap();
             }
-            source.push_str(&"guard(v4000);\n".repeat(4000));
+            source.push_str(&"guard(v4000);\n".repeat(READS));
             let (hits, work) = run_with_work(&[guard::<0, 0>()], "guard.ts", source.as_bytes());
-            let cap = (source.len() / 3) as u64;
+            // Each call visits one parameter and compares its one-byte name.
+            let cap = (source.len() / 3 + 2 * READS) as u64;
             assert!(work <= cap, "{work} work exceeds {cap}");
-            assert_eq!(hits.len(), 4000);
+            assert_eq!(hits.len(), READS);
             for (i, hit) in hits.iter().enumerate() {
                 assert_eq!(
                     (hit.line, hit.col, hit.note.as_deref()),

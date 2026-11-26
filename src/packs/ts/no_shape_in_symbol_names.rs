@@ -100,8 +100,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
                 }
                 _ => continue,
             };
-            ctx.record_string_work(name.len());
-            (contains_shape(name), node.span())
+            (contains_shape(ctx, name), node.span())
         };
         if has_shape && reported.insert(span) {
             findings.report(span.start as usize, None);

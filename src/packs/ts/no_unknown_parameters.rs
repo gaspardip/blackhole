@@ -27,7 +27,7 @@ fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
         let owner = nodes.parent_kind(nodes.parent_id(id));
         if returns(owner)
             .and_then(predicate_subject)
-            .is_some_and(|subject| name.is_some_and(|n| n == subject))
+            .is_some_and(|subject| name.is_some_and(|n| super::values::same_key(ctx, n, subject)))
         {
             continue;
         }

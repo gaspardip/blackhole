@@ -25,6 +25,7 @@ fn worker_entry<'a>(ctx: &TsCtx<'a>, receiver: &'a Expression<'a>) -> bool {
     let Some(relative) = path.strip_prefix("../") else {
         return false;
     };
+    ctx.record_string_work(relative.len());
     let entry = relative.trim_start_matches("../");
     if !(matches!(entry, "src" | "src/index")
         || entry
@@ -33,6 +34,7 @@ fn worker_entry<'a>(ctx: &TsCtx<'a>, receiver: &'a Expression<'a>) -> bool {
     {
         return false;
     }
+    ctx.record_string_work(ctx.path.len());
     let parts: Vec<_> = ctx.path.split(['/', '\\']).collect();
     parts.windows(5).any(|parts| {
         parts[0] == "src"
@@ -113,10 +115,12 @@ fn check_bindings<'a>(
                     ObjectPropertyKind::SpreadProperty(s) => pending.push(&s.argument),
                     ObjectPropertyKind::ObjectProperty(p)
                         if super::values::key(ctx, &p.key).is_none_or(|k| {
-                            k.starts_with(|c: char| c.is_ascii_uppercase())
-                                && k.bytes().all(|b| {
+                            k.starts_with(|c: char| c.is_ascii_uppercase()) && {
+                                ctx.record_string_work(k.len());
+                                k.bytes().all(|b| {
                                     b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
                                 })
+                            }
                         }) && super::bindings::contains_function(ctx, &p.value) =>
                     {
                         if reported.insert(o.span) {
@@ -146,14 +150,14 @@ fn runner_import<'a>(ctx: &TsCtx<'a>, kind: AstKind<'a>) -> bool {
     }
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    let test_code = super::test_context::test_file(ctx.path)
-        || ctx.nodes().any(|n| runner_import(ctx, n.kind()));
+    let test_code =
+        super::test_context::test_file(ctx) || ctx.nodes().any(|n| runner_import(ctx, n.kind()));
     super::values::tracked_uses::report(ctx, RULE.id, findings);
     if test_code {
         super::saved_methods::check(ctx, findings);
     }
     let mut reported = std::collections::HashSet::new();
-    let config = super::config_responses::config(ctx.path);
+    let config = super::config_responses::config(ctx);
     for node in ctx.nodes() {
         if test_code && let Some(at) = super::transports::report(ctx, node.kind(), &mut reported) {
             findings.report(at, None);

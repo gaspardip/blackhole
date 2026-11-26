@@ -340,10 +340,8 @@ fn copies<'a>(
             let call = target.expand(ctx, false);
             call.arg(0)
                 .is_some_and(|e| fresh_target(ctx, e, callback, targets, regions))
-                && call
-                    .positional()
-                    .iter()
-                    .skip(1)
+                && ctx
+                    .counted(call.positional().iter().skip(1))
                     .flatten()
                     .any(|e| accumulator(e))
         }

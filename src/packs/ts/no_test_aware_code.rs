@@ -104,7 +104,7 @@ fn worker<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>, computed: bool) -> bool
     super::values::key(ctx, key).map_or(computed, |name| marker(name, Marker::Worker))
 }
 fn check(ctx: &TsCtx<'_>, findings: &mut Findings) {
-    if test_file(ctx.path) {
+    if test_file(ctx) {
         return;
     }
     for (id, node) in ctx.nodes_with_ids() {

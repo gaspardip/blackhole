@@ -119,7 +119,10 @@ pub(super) fn call_writes<'a>(ctx: &TsCtx<'a>, call: &Invocation<'a>) -> bool {
             literal(ctx, e).map_or_else(|| !resolve(ctx, e).is_literal(), protected)
         }),
         Mutation::DefineMany => call.arg(1).is_some_and(defines),
-        Mutation::Assign => call.args.iter().skip(1).flatten().any(|e| defines(e)),
+        Mutation::Assign => ctx
+            .counted(call.args.iter().skip(1))
+            .flatten()
+            .any(|e| defines(e)),
     }
 }
 
@@ -200,9 +203,9 @@ pub(super) fn replacement_method<'a>(
             | "mockStepResult"
             | "mockStepError"
     ) && !local_class(ctx, receiver).is_some_and(|(class, is_static)| {
-        class.body.body.iter().any(|element| {
+        ctx.counted(class.body.body.iter()).any(|element| {
             matches!(element, oxc::ast::ast::ClassElement::MethodDefinition(m)
-                if m.r#static == is_static && m.key.static_name() == Some(method.into()))
+                if m.r#static == is_static && super::values::static_name(ctx, &m.key).is_some_and(|name| name == method))
         })
     })
 }

@@ -12,7 +12,9 @@ use oxc::{
 };
 use std::collections::HashSet;
 
-pub(super) fn config(path: &str) -> bool {
+pub(super) fn config(ctx: &TsCtx<'_>) -> bool {
+    let path = ctx.path;
+    ctx.record_string_work(path.len());
     let name = path.rsplit(['/', '\\']).next().unwrap_or_default();
     let mut parts = name.split('.');
     parts.next() == Some("vitest")
