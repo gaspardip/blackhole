@@ -108,3 +108,19 @@ Advisory until the resolution cases under Does not catch are addressed. Findings
   scanned source file.
 - Known false positive: `log += process` reports at `process`
   (`whole_process_and_global_values_report_at_the_use`).
+
+## Known limits
+
+With a ban list configured, these can still change an exit code or run
+uncounted work:
+
+- In `ci`, a corrupt blob that only this rule reads can stop the shared
+  `git cat-file` batch, so `ci` exits 2.
+- A failed write of advisory output (for example stdout on a full disk)
+  turns exit 0 into exit 2.
+- TypeScript `paths` candidates are probed before the work budget is
+  charged.
+- Wildcard substitution allocates the capture once per `*` in the target
+  under a single charge.
+- A long constant specifier is copied for each call that uses it, and
+  each lookup compares against the whole ban list uncharged.
