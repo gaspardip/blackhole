@@ -201,6 +201,27 @@ fn inline_type_specifiers_load_under_verbatim_module_syntax() {
 }
 
 #[test]
+fn allowed_inline_type_import_skips_unavailable_verbatim_config() {
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            (
+                "tsconfig.json",
+                r#"{"extends":"missing-config/tsconfig.json"}"#,
+            ),
+            ("a.ts", r#"import { type X } from "./local";"#),
+            ("local.ts", "export type X = string;"),
+        ],
+        &[],
+        0,
+    );
+    assert!(out.is_empty(), "{out}");
+}
+
+#[test]
 fn loader_sources_share_the_base_check() {
     for (file, declaration, callee, own_base) in [
         ("a.cjs", "", "require.main.require", false),

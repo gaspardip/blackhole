@@ -271,37 +271,38 @@ fn banned(ts: &TsCtx<'_>, repo: &RepoCtx<'_, '_>, findings: &mut Findings) {
             Ok(None)
         }
     });
-    let verbatim = if imports.iter().any(|i| i.verbatim_only) {
-        let reader = repo.tree.reader.expect("repository context has a reader");
-        importer
-            .as_deref()
-            .map_err(Clone::clone)
-            .and_then(|path| reader.verbatim_module_syntax(&repo.loaders, path))
-    } else {
-        Ok(false)
-    };
+    let mut verbatim = None;
     let mut last = None;
     for import in &imports {
         ts.take_work(1);
         if last == Some(import.offset) {
             continue;
         }
-        let note = match (import.verbatim_only, &verbatim) {
-            (true, Ok(false)) => continue,
-            (true, Err(error)) => Some(error.clone()),
-            _ => note(
-                repo,
-                import,
-                importer.as_deref(),
-                module.as_ref().copied(),
-                extension,
-                ts_extension,
-            )
-            .unwrap_or_else(Some),
+        let Some(mut note) = note(
+            repo,
+            import,
+            importer.as_deref(),
+            module.as_ref().copied(),
+            extension,
+            ts_extension,
+        )
+        .unwrap_or_else(Some) else {
+            continue;
         };
-        if let Some(note) = note {
-            findings.report(import.offset as usize, Some(&note));
-            last = Some(import.offset);
+        if import.verbatim_only {
+            match verbatim.get_or_insert_with(|| {
+                let reader = repo.tree.reader.expect("repository context has a reader");
+                importer
+                    .as_deref()
+                    .map_err(Clone::clone)
+                    .and_then(|path| reader.verbatim_module_syntax(&repo.loaders, path))
+            }) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => note.clone_from(error),
+            }
         }
+        findings.report(import.offset as usize, Some(&note));
+        last = Some(import.offset);
     }
 }
