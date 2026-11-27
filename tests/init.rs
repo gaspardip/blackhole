@@ -1993,26 +1993,52 @@ fn the_judge_reports_green_only_while_the_base_tip_is_the_judged_one() {
     let fake = bin.join("blackhole");
     fs::write(&fake, "#!/bin/sh\nexit \"$FAKE_CODE\"\n").unwrap();
     fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // gh answers with the pull request's state, base branch and head as the run sees them at the end.
+    let shims = tempdir().unwrap();
+    let gh = shims.path().join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\ncase \" $* \" in *\" repos/owner/repo/pulls/5 \"*) printf '%s\\n' \"$FAKE_PULL\";; *) exit 1;; esac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        shims.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     let moved = "0".repeat(40);
-    for (code, base, status, green) in [
-        ("0", judged.release.as_str(), 0, true),
-        ("0", moved.as_str(), 1, false),
-        ("1", judged.release.as_str(), 1, false),
+    let current = format!("open\trelease\t{}", judged.head);
+    let retargeted = format!("open\tmain\t{}", judged.head);
+    let pushed = format!("open\trelease\t{moved}");
+    let closed = format!("closed\trelease\t{}", judged.head);
+    for (code, base, pull, status, green) in [
+        ("0", judged.release.as_str(), current.as_str(), 0, true),
+        ("0", moved.as_str(), current.as_str(), 1, false),
+        ("1", judged.release.as_str(), current.as_str(), 1, false),
+        ("0", judged.release.as_str(), retargeted.as_str(), 1, false),
+        ("0", judged.release.as_str(), pushed.as_str(), 1, false),
+        ("0", judged.release.as_str(), closed.as_str(), 1, false),
     ] {
         let out = run_step(
             &judged,
             "Judge the head",
-            &[("FAKE_CODE", code), ("BASE_SHA", base)],
+            &[
+                ("FAKE_CODE", code),
+                ("BASE_SHA", base),
+                ("FAKE_PULL", pull),
+                ("PATH", &path),
+            ],
         );
         let stdout = String::from_utf8(out.stdout.clone()).unwrap();
-        assert_eq!(out.status.code(), Some(status), "{base}: {out:?}");
+        assert_eq!(out.status.code(), Some(status), "{base} {pull}: {out:?}");
         assert_eq!(
             stdout.contains("blackhole ci: green"),
             green,
-            "{base}: {stdout}"
+            "{base} {pull}: {stdout}"
         );
         if code == "0" && !green {
-            assert!(stdout.contains("The base branch moved"), "{stdout}");
+            assert!(stdout.contains("changed while the judge ran"), "{stdout}");
         }
     }
 }

@@ -24,8 +24,9 @@ of the pull request's own base branch. It installs the
 exact `@gaspardip/blackhole` version that wrote it with `--ignore-scripts`,
 checks the registry signatures and the version, fetches the head into a bare
 repository without checking it out, and reads only `contents` and
-`pull-requests`. It reports green only while that base tip is still the
-branch's tip after judging. Its job posts the check
+`pull-requests`. It reports green only while, after judging, the pull request
+is open with the same base branch and head, and that branch's tip is the
+judged base. Its job posts the check
 `blackhole`. It collects reviews and reviewer permissions for `--approvals`.
 `blackhole-review.yml` relays review submissions and dismissals with no token
 permissions. `blackhole-rerun.yml` runs from the default branch and reruns the

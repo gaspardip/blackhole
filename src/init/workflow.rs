@@ -120,11 +120,13 @@ jobs:
             > "${RUNNER_TEMP}/judge.log" 2>&1 || code=$?
           moved=
           if [ "${code}" -eq 0 ]; then
+            # A green for a retargeted pull request, or on a base that is no longer the branch tip, would not cover the merge.
+            pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.state, .base.ref, .head.sha] | @tsv')" || pull=
             auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
-            # A green judged on a base that is no longer the branch tip would not cover the merge.
             tip="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: basic ${auth}" \
               git ls-remote "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "refs/heads/${BASE_REF}")" || tip=
-            if [ "${tip}" != "$(printf '%s\trefs/heads/%s' "${BASE_SHA}" "${BASE_REF}")" ]; then
+            if [ "${pull}" != "$(printf 'open\t%s\t%s' "${BASE_REF}" "${HEAD_SHA}")" ] ||
+              [ "${tip}" != "$(printf '%s\trefs/heads/%s' "${BASE_SHA}" "${BASE_REF}")" ]; then
               moved=1
               code=1
             fi
@@ -136,7 +138,7 @@ jobs:
           if [ "${code}" -eq 0 ]; then
             printf '\nblackhole ci: green\n'
           elif [ -n "${moved}" ]; then
-            printf '\nThe base branch moved while the judge ran, or its tip could not be read; rerun the judge.\n'
+            printf '\nThe pull request or its base branch changed while the judge ran, or could not be read; rerun the judge.\n'
           fi
           printf '\n::%s::\n' "${marker}"
           exit "${code}"
