@@ -1,4 +1,4 @@
-use crate::github::{self, ACTIONS_APP, Failure, Repo, Response};
+use crate::github::{self, ACTIONS_APP, CHECK, Failure, Repo, Response};
 use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
 
@@ -17,8 +17,8 @@ fn not(reason: impl Into<String>) -> Stop {
 
 impl From<Failure> for Stop {
     fn from(failure: Failure) -> Self {
-        match failure {
-            Failure::NoSession => not("cannot read GitHub (install and sign in to gh)"),
+        match &failure {
+            Failure::NoSession => not(failure.to_string()),
             Failure::Unreachable(error) => Self {
                 code: 75,
                 reason: format!("cannot read GitHub ({error}; rerun init once GitHub answers)"),
@@ -77,8 +77,8 @@ pub(super) fn verdict(root: &Path, workflow: &[u8]) -> Result<(), Stop> {
         .ok_or_else(|| unexpected(&endpoint, &response))?;
     let encoded = github::encode(branch);
     on_branch(&repo, branch, &encoded, workflow)?;
-    let rules = required(&repo, branch, &encoded)?;
-    credential(&repo, &login, &info, &user, &rules)
+    let rulesets = required(&repo, branch, &encoded)?;
+    credential(&repo, &login, &info, &user, rulesets)
 }
 
 fn on_branch(repo: &Repo, branch: &str, encoded: &str, workflow: &[u8]) -> Result<(), Stop> {
@@ -107,19 +107,19 @@ fn on_branch(repo: &Repo, branch: &str, encoded: &str, workflow: &[u8]) -> Resul
     Ok(())
 }
 
-// The rules GitHub applies to the branch, once they require pull requests and the blackhole check from GitHub Actions.
-fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<Vec<Value>, Stop> {
+// The rulesets GitHub applies to the branch, once they require pull requests and the blackhole check from GitHub Actions.
+fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, Stop> {
     let slug = &repo.slug;
     let endpoint = format!("repos/{slug}/rules/branches/{encoded}?per_page=100");
     let rules = json(&endpoint, &get(repo, &endpoint, &[])?)?;
-    let rules = rules.as_array().cloned().unwrap_or_default();
+    let rules = rules.as_array().map(Vec::as_slice).unwrap_or_default();
     let mut pull_requests = rules.iter().any(|rule| rule["type"] == "pull_request");
     let mut sources: Vec<Option<u64>> = rules
         .iter()
         .filter(|rule| rule["type"] == "required_status_checks")
         .filter_map(|rule| rule["parameters"]["required_status_checks"].as_array())
         .flatten()
-        .filter(|check| check["context"] == "blackhole")
+        .filter(|check| check["context"] == CHECK)
         .map(|check| check["integration_id"].as_u64())
         .collect();
     let classic = if pull_requests && sources.contains(&Some(ACTIONS_APP)) {
@@ -142,7 +142,7 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<Vec<Value>, Stop
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|check| check["context"] == "blackhole")
+                .filter(|check| check["context"] == CHECK)
                 .map(|check| check["app_id"].as_u64()),
         );
     }
@@ -174,7 +174,10 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<Vec<Value>, Stop
             ))
         });
     }
-    Ok(rules)
+    Ok(rules
+        .iter()
+        .filter_map(|rule| rule["ruleset_id"].as_u64())
+        .collect())
 }
 
 fn credential(
@@ -182,7 +185,7 @@ fn credential(
     login: &str,
     info: &Value,
     user: &Response,
-    rules: &[Value],
+    rulesets: BTreeSet<u64>,
 ) -> Result<(), Stop> {
     let slug = &repo.slug;
     match info["permissions"]["admin"].as_bool() {
@@ -198,10 +201,6 @@ fn credential(
             )));
         }
     }
-    let rulesets: BTreeSet<u64> = rules
-        .iter()
-        .filter_map(|rule| rule["ruleset_id"].as_u64())
-        .collect();
     for id in rulesets {
         let endpoint = format!("repos/{slug}/rulesets/{id}");
         let ruleset = json(&endpoint, &get(repo, &endpoint, &[])?)?;

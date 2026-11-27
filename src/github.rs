@@ -1,5 +1,5 @@
 use std::{
-    fmt::Write,
+    fmt::{self, Write},
     io,
     path::Path,
     process::{Command, Stdio},
@@ -7,6 +7,8 @@ use std::{
 
 /// The GitHub Actions app, the only source a required `blackhole` check may come from.
 pub(crate) const ACTIONS_APP: u64 = 15368;
+/// The name of the judge's check run and required status check.
+pub(crate) const CHECK: &str = "blackhole";
 
 pub(crate) struct Repo {
     pub(crate) host: String,
@@ -64,6 +66,15 @@ pub(crate) enum Failure {
     NoSession,
     /// GitHub could not answer for a reason outside the repository's settings.
     Unreachable(String),
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSession => f.write_str("cannot read GitHub (install and sign in to gh)"),
+            Self::Unreachable(e) => write!(f, "cannot read GitHub ({e})"),
+        }
+    }
 }
 
 pub(crate) struct Response {

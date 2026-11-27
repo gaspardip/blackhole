@@ -1,8 +1,9 @@
 use crate::{
+    ci,
     engine::{self, Gate},
     files::{LEDGER_PATH, OBJECTIONS_PATH},
     git::{self, Batch, Tree},
-    github::{self, ACTIONS_APP, Failure, Repo, Response},
+    github::{self, ACTIONS_APP, CHECK, Repo, Response},
     init::workflow::{self, PATH as WORKFLOW_PATH},
     ledger,
 };
@@ -56,13 +57,6 @@ impl Forgery {
     }
 }
 
-fn error(failure: Failure) -> io::Error {
-    match failure {
-        Failure::NoSession => io::Error::other("cannot read GitHub (install and sign in to gh)"),
-        Failure::Unreachable(e) => io::Error::other(format!("cannot read GitHub ({e})")),
-    }
-}
-
 fn call(
     repo: &Repo,
     method: &str,
@@ -70,7 +64,8 @@ fn call(
     args: &[&str],
     want: u16,
 ) -> io::Result<Response> {
-    let response = github::api(&repo.host, method, endpoint, args).map_err(error)?;
+    let response = github::api(&repo.host, method, endpoint, args)
+        .map_err(|failure| io::Error::other(failure.to_string()))?;
     if response.status == want {
         Ok(response)
     } else {
@@ -123,40 +118,47 @@ fn text(bytes: Vec<u8>) -> io::Result<String> {
     Ok(text.trim_end().to_owned())
 }
 
-fn commit(parent: &str, forgery: &Forgery) -> io::Result<String> {
+// Commits each forgery on top of the one before it and returns every commit, last forgery last.
+fn commits(tip: &str, forgeries: &[&Forgery]) -> io::Result<Vec<String>> {
     let index = env::temp_dir().join(format!("blackhole-canary-{}.index", std::process::id()));
     let indexed = |args: &[&str]| {
         git::output(git::command().env("GIT_INDEX_FILE", &index).args(args)).and_then(text)
     };
     let result = (|| {
-        indexed(&["read-tree", parent])?;
-        match &forgery.change {
-            Change::Write(path, bytes) => {
-                let blob = hash(bytes)?;
-                indexed(&[
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    &format!("100644,{blob},{path}"),
-                ])?;
+        indexed(&["read-tree", tip])?;
+        let mut chain: Vec<String> = Vec::new();
+        for forgery in forgeries {
+            match &forgery.change {
+                Change::Write(path, bytes) => {
+                    let blob = hash(bytes)?;
+                    indexed(&[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("100644,{blob},{path}"),
+                    ])?;
+                }
+                Change::Delete(path) => {
+                    indexed(&["update-index", "--force-remove", "--", path])?;
+                }
             }
-            Change::Delete(path) => {
-                indexed(&["update-index", "--force-remove", "--", path])?;
-            }
+            let tree = indexed(&["write-tree"])?;
+            let parent = chain.last().map_or(tip, String::as_str);
+            let message = format!("blackhole canary: {}", forgery.what);
+            let commit = git::output(
+                git::command()
+                    .envs([
+                        ("GIT_AUTHOR_NAME", "blackhole canary"),
+                        ("GIT_AUTHOR_EMAIL", "canary@blackhole.invalid"),
+                        ("GIT_COMMITTER_NAME", "blackhole canary"),
+                        ("GIT_COMMITTER_EMAIL", "canary@blackhole.invalid"),
+                    ])
+                    .args(["commit-tree", &tree, "-p", parent, "-m", &message]),
+            )
+            .and_then(text)?;
+            chain.push(commit);
         }
-        let tree = indexed(&["write-tree"])?;
-        let message = format!("blackhole canary: {}", forgery.what);
-        git::output(
-            git::command()
-                .envs([
-                    ("GIT_AUTHOR_NAME", "blackhole canary"),
-                    ("GIT_AUTHOR_EMAIL", "canary@blackhole.invalid"),
-                    ("GIT_COMMITTER_NAME", "blackhole canary"),
-                    ("GIT_COMMITTER_EMAIL", "canary@blackhole.invalid"),
-                ])
-                .args(["commit-tree", &tree, "-p", parent, "-m", &message]),
-        )
-        .and_then(text)
+        Ok(chain)
     })();
     match std::fs::remove_file(&index) {
         Err(e) if e.kind() != io::ErrorKind::NotFound && result.is_ok() => Err(e),
@@ -173,12 +175,13 @@ fn appended(existing: Option<Vec<u8>>, fresh: &[u8]) -> Vec<u8> {
     bytes
 }
 
-// One forgery for each gate the base policy can turn red; the workflow edit comes last because GitHub may refuse its push.
-fn forgeries(tip: &str) -> io::Result<Vec<Forgery>> {
+// One forgery for each gate the base policy can turn red, and the workflow edit apart because GitHub may refuse its push.
+fn forgeries(tip: &str) -> io::Result<(Vec<Forgery>, Forgery)> {
     let tree = Tree::load(tip)?;
     let mut batch = Batch::start()?;
+    let mut counts = ci::ledger(&tree, &mut batch)?;
+    let config = ci::configuration(&tree, &mut batch)?;
     let mut read = |path| tree.judge_file(path, &mut batch);
-    let mut counts = ledger::load(read(LEDGER_PATH)?.as_deref())?;
     if let Some(count) = counts.values_mut().next() {
         *count += 1;
     } else {
@@ -212,7 +215,6 @@ fn forgeries(tip: &str) -> io::Result<Vec<Forgery>> {
         },
     ];
     let judge = appended(read(WORKFLOW_PATH)?, workflow::content().as_bytes());
-    let config = crate::config::parse(&read("blackhole.toml")?.unwrap_or_default())?;
     batch.finish()?;
     if let Some(test) = tree.paths().find(|path| {
         crate::packs::ts::test_context::test_file_path(path) && !config.exclude.is_match(path)
@@ -228,12 +230,12 @@ fn forgeries(tip: &str) -> io::Result<Vec<Forgery>> {
         what: format!("add a finding in {FINDING}"),
         change: Change::Write(FINDING, b"# noqa\n".to_vec()),
     });
-    list.push(Forgery {
+    let workflow = Forgery {
         gate: "protected",
         what: format!("edit {WORKFLOW_PATH}"),
         change: Change::Write(WORKFLOW_PATH, judge),
-    });
-    Ok(list)
+    };
+    Ok((list, workflow))
 }
 
 enum Push {
@@ -304,7 +306,7 @@ impl Run<'_> {
             .ok_or_else(|| io::Error::other("GitHub returned no pull request number"))?;
         self.note(&format!("pr {number}"))?;
         let endpoint =
-            format!("repos/{slug}/commits/{head}/check-runs?check_name=blackhole&per_page=100");
+            format!("repos/{slug}/commits/{head}/check-runs?check_name={CHECK}&per_page=100");
         let deadline = Instant::now() + self.timeout;
         let run = loop {
             let runs = json(&call(self.repo, "GET", &endpoint, &[], 200)?)?;
@@ -347,7 +349,7 @@ impl Run<'_> {
 // The last summary line wins: diagnostics before it can quote any text a forged path holds.
 fn gates(log: &str) -> Vec<&str> {
     log.lines()
-        .filter_map(|line| line.split_once("blackhole ci: red (").map(|(_, rest)| rest))
+        .filter_map(|line| line.split_once(ci::RED).map(|(_, rest)| rest))
         .next_back()
         .and_then(|rest| rest.split_once(')'))
         .map(|(gates, _)| gates.split(", ").collect())
@@ -402,15 +404,11 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
         &format!("refs/heads/{base}"),
     ]))?;
     let tip = git::commit("FETCH_HEAD")?;
-    let list = forgeries(&tip)?;
-    let (workflow, pushed_first) = list
-        .split_last()
-        .ok_or_else(|| io::Error::other("no forgeries"))?;
-    let mut head = tip;
-    for forgery in pushed_first {
-        head = commit(&head, forgery)?;
-    }
-    let workflow_head = commit(&head, workflow)?;
+    let (list, workflow) = forgeries(&tip)?;
+    let mut chain = commits(&tip, &list.iter().chain([&workflow]).collect::<Vec<_>>())?;
+    let (Some(workflow_head), Some(mut head)) = (chain.pop(), chain.pop()) else {
+        return Err(io::Error::other("no forgeries"));
+    };
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -436,7 +434,7 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
         if !refused {
             head = workflow_head;
         }
-        let outcome = run.judge(&head, list.len())?;
+        let outcome = run.judge(&head, list.len() + 1)?;
         Ok::<_, io::Error>((refused, outcome))
     })();
     drop(pipe);
@@ -449,7 +447,7 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
             io::Error::other(format!("{e}; cleanup failed, {manual}"))
         }
     })?;
-    let code = report(out, &list, refused, &outcome)?;
+    let code = report(out, &list, &workflow, refused, &outcome)?;
     if !status.success() {
         return Err(io::Error::other(format!("cleanup failed; {manual}")));
     }
@@ -460,10 +458,11 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
     Ok(code)
 }
 
-// The workflow edit is last, and a refused push of it is GitHub stopping it.
+// A refused push of the workflow edit is GitHub stopping it.
 fn report(
     out: &mut impl Write,
     forgeries: &[Forgery],
+    workflow: &Forgery,
     refused: bool,
     outcome: &Outcome,
 ) -> io::Result<u8> {
@@ -477,8 +476,9 @@ fn report(
     let timed_out = matches!(outcome, Outcome::TimedOut(_));
     let named = gates(log);
     let mut code = if timed_out { 75 } else { 0 };
-    for (index, forgery) in forgeries.iter().enumerate() {
-        let verdict = if refused && index + 1 == forgeries.len() {
+    let all = forgeries.iter().map(|f| (f, false));
+    for (forgery, is_workflow) in all.chain([(workflow, true)]) {
+        let verdict = if refused && is_workflow {
             "stopped by GitHub, which refused the push because gh's credential cannot change workflows"
         } else if timed_out {
             "no verdict"

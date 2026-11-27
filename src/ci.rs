@@ -13,16 +13,19 @@ use std::{
     path::Path,
 };
 
-fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
+pub(crate) fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
     ledger::load(tree.judge_file(LEDGER_PATH, batch)?.as_deref())
 }
-fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
+pub(crate) fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
     config::parse(
         &tree
             .judge_file("blackhole.toml", batch)?
             .unwrap_or_default(),
     )
 }
+/// How the last line of a red verdict starts; the canary reads the gates after it.
+pub(crate) const RED: &str = "blackhole ci: red (";
+
 fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
     objections::parse(
         &tree.judge_file(OBJECTIONS_PATH, batch)?.unwrap_or_default(),
@@ -167,7 +170,7 @@ pub fn run_with_coverage(
     }
     writeln!(
         out,
-        "blackhole ci: red ({})",
+        "{RED}{})",
         result.gates.into_iter().collect::<Vec<_>>().join(", ")
     )?;
     Ok(true)

@@ -11,6 +11,14 @@ use std::{
 const INVALID_HOOKS: &str = "unexpected hooks configuration";
 const CLAUDE: &str = ".claude/settings.json";
 const CODEX: &str = ".codex/hooks.json";
+// Every file init can write, so a revert of the adoption commit restores each one.
+const ADOPTED: [&str; 5] = [
+    "blackhole.toml",
+    CLAUDE,
+    CODEX,
+    workflow::PATH,
+    crate::files::LEDGER_PATH,
+];
 const PREVIOUS_ROOT: &str = "git --no-lazy-fetch rev-parse --show-toplevel";
 // Match the CLI's Git environment without changing the environment of the hook itself.
 const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
@@ -392,15 +400,8 @@ fn install(root: &Path, path: &str, data: Option<&[u8]>) -> io::Result<()> {
 fn unignored(root: &Path) -> io::Result<()> {
     let out = crate::git::command()
         .current_dir(root)
-        .args([
-            "check-ignore",
-            "--",
-            "blackhole.toml",
-            CLAUDE,
-            CODEX,
-            workflow::PATH,
-        ])
-        .arg(crate::files::LEDGER_PATH)
+        .args(["check-ignore", "--"])
+        .args(ADOPTED)
         .output()?;
     match out.status.code() {
         Some(1) => Ok(()),
