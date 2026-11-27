@@ -132,7 +132,8 @@ fn protected(i: &Inputs<'_>, moved: &Counts, guard: &GlobSet, v: &mut Verdict) -
         v.gates.insert("protected");
         writeln!(
             v.lines,
-            "protected: {path}: a person has to approve this change"
+            "protected: {}: a person has to approve this change",
+            crate::diagnostic_text(path)
         )?;
     }
     Ok(())
@@ -149,9 +150,14 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
                 .and_then(|e| e.downcast_ref::<objections::RowError>())
                 .and_then(|e| e.key.as_ref())
             {
-                write!(v.lines, "{rule} {path}: ")?;
+                write!(
+                    v.lines,
+                    "{} {}: ",
+                    crate::diagnostic_text(rule),
+                    crate::diagnostic_text(path)
+                )?;
             }
-            writeln!(v.lines, "{e}")?;
+            writeln!(v.lines, "{}", crate::diagnostic_text(&e.to_string()))?;
         }
         Ok(head) => {
             for (key, r) in head {
@@ -169,7 +175,8 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
                     writeln!(
                         v.lines,
                         "objection: {} {}: invalid transition",
-                        key.0, key.1
+                        crate::diagnostic_text(&key.0),
+                        crate::diagnostic_text(&key.1)
                     )?;
                 } else if i.approved || prev == Some(r) {
                     rows.insert(key.clone(), r.clone());
@@ -211,7 +218,7 @@ pub(crate) fn judge_with_guard(
     let rows = eligible(i, &mut v)?;
     if let Err(e) = i.head_ledger {
         v.gates.insert("ledger");
-        writeln!(v.lines, "{e}")?;
+        writeln!(v.lines, "{}", crate::diagnostic_text(&e.to_string()))?;
     }
     let actual = ledger::counts(i.findings);
     let stale = ledger::excess(head, &actual);

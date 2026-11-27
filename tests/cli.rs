@@ -639,6 +639,25 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
     assert_eq!(fs::read(root.join("a.py")).unwrap(), b"# noqa unstaged");
 }
 
+#[cfg(unix)]
+#[test]
+fn ci_gate_lines_escape_paths_that_spell_other_lines() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let forged = root.join(".github/x\nb.py:1:1 core/no-suppression forged");
+    fs::create_dir_all(forged.parent().unwrap()).unwrap();
+    fs::write(forged, "").unwrap();
+    commit(root);
+    let out = run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 1);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "protected: .github/x\\nb.py:1:1 core/no-suppression forged: a person has to approve this change\nblackhole ci: red (protected)\n"
+    );
+}
+
 #[test]
 fn ci_is_behind_when_head_lacks_base() {
     let dir = repo();
