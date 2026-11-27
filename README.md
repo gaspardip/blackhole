@@ -75,7 +75,8 @@ blackhole ci: no verdict: <cause>
 The agent hooks block on red. On no verdict they judge once more, then block
 with `blackhole: no verdict: <cause>`, post-edit included. The stop hook lets
 the agent stop when Claude Code or Codex sets `stop_hook_active`, so an outage
-cannot loop forever. Only no verdict releases it: a red stop still blocks.
+cannot loop forever, and shows the cause as a `systemMessage`. Only no verdict
+releases it: a red stop still blocks.
 Without git, both launchers need `blackhole` on PATH and block without it.
 Invoked directly, the post-edit hook exits 1 on an unreadable payload, and a
 failing hook also exits 1 where no `.git` exists in any parent directory. The

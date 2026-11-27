@@ -64,9 +64,14 @@ pub fn run(event: Event) -> ExitCode {
     if fault != crate::Fault::NoVerdict {
         let _ = writeln!(out, "blackhole: {cause}");
     } else if matches!(event, Event::Stop) && continued(&bytes) {
-        let _ = writeln!(
-            out,
+        // Both hosts drop stderr when a hook exits 0 but show a systemMessage from stdout.
+        let message = format!(
             "blackhole: no verdict: {cause}; the judgment could not run, so the agent may stop"
+        );
+        let _ = writeln!(
+            io::stdout(),
+            "{}",
+            serde_json::json!({ "systemMessage": message })
         );
         return ExitCode::SUCCESS;
     } else {

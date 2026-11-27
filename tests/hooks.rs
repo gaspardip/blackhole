@@ -312,16 +312,14 @@ fn stop_reads_its_whole_payload_before_blocking() {
     assert_ne!(hook(dir.path(), "stop", &payload, 2), b"");
 }
 
-fn stop_without_git(root: &Path, active: bool, status: i32) -> String {
+fn stop_without_git(root: &Path, active: bool, status: i32) -> std::process::Output {
     let empty = tempdir().unwrap();
     let mut cmd = common::command(env!("CARGO_BIN_EXE_blackhole"));
     cmd.args(["hook", "stop"])
         .current_dir(root)
         .env("PATH", empty.path());
     let payload = json!({"stop_hook_active":active}).to_string();
-    let out = agent::run_input(&mut cmd, payload.as_bytes(), status, false);
-    assert_eq!(out.stdout, b"");
-    String::from_utf8(out.stderr).unwrap()
+    agent::run_input(&mut cmd, payload.as_bytes(), status, false)
 }
 
 #[cfg(unix)]
@@ -362,16 +360,22 @@ fn the_loop_guard_releases_only_when_the_environment_fails() {
     fs::write(root.join(".git/config"), "").unwrap();
 
     // Claude and Codex set this flag when a stop hook already continued the turn, so an outage cannot loop forever.
+    // Both hosts drop stderr when a hook exits 0, so the warning is a systemMessage on stdout.
     let released = stop_without_git(root, true, 0);
+    assert_eq!(released.stderr, b"", "{released:?}");
+    assert_eq!(released.stdout.split_inclusive(|&b| b == b'\n').count(), 1);
+    assert!(released.stdout.ends_with(b"\n"));
+    let output: Value = serde_json::from_slice(&released.stdout).unwrap();
+    let message = output["systemMessage"].as_str().unwrap();
     assert!(
-        released.starts_with("blackhole: no verdict: ")
-            && released
-                .trim_end()
-                .ends_with("the judgment could not run, so the agent may stop"),
-        "{released}"
+        message.starts_with("blackhole: no verdict: ")
+            && message.ends_with("the judgment could not run, so the agent may stop"),
+        "{message}"
     );
-    assert_eq!(released.lines().count(), 1);
+    assert_eq!(output.as_object().unwrap().len(), 1);
     let blocked = stop_without_git(root, false, 2);
+    assert_eq!(blocked.stdout, b"");
+    let blocked = String::from_utf8(blocked.stderr).unwrap();
     assert!(blocked.starts_with("blackhole: no verdict: "), "{blocked}");
 }
 

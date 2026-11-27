@@ -896,8 +896,19 @@ fn the_launcher_uses_only_path_without_git() {
                     status,
                     false,
                 );
+                // A released stop shows its warning as a systemMessage, since hosts drop stderr on exit 0.
+                let shown = if status == 0 {
+                    let message: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    message["systemMessage"]
+                        .as_str()
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec()
+                } else {
+                    output.stderr.clone()
+                };
                 assert!(
-                    output.stderr.starts_with(expected.as_bytes()),
+                    shown.starts_with(expected.as_bytes()),
                     "{name} {cwd:?} {active}: {output:?}"
                 );
             }
