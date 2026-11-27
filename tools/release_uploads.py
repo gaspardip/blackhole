@@ -69,6 +69,7 @@ def github_release(repo: str, tag: str) -> dict | None:
 
 def publish_github(tag: str, npm: Path, crate: Path, sums: Path) -> None:
     repo = os.environ["GITHUB_REPOSITORY"]
+    notes = os.environ["RELEASE_NOTES"]
     prerelease = os.environ["NPM_DIST_TAG"] == "next"
     checksums = {
         name: checksum
@@ -85,6 +86,8 @@ def publish_github(tag: str, npm: Path, crate: Path, sums: Path) -> None:
     if release is not None:
         if release["prerelease"] is not prerelease:
             raise ValueError("GitHub release has a different prerelease setting")
+        if not draft and (release["name"] != tag or release["body"] != notes):
+            raise ValueError("GitHub release has a different title or notes")
         for asset in release["assets"]:
             name = asset["name"]
             if name not in expected or asset["digest"] != expected[name]:
@@ -94,13 +97,16 @@ def publish_github(tag: str, npm: Path, crate: Path, sums: Path) -> None:
         flags = ["--prerelease"] if prerelease else []
         subprocess.run([
             "gh", "release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
-            "--title", tag, "--notes", os.environ["RELEASE_NOTES"], *flags,
+            "--title", tag, "--notes", notes, *flags,
         ], check=True)
     missing = [str(path) for path in (npm, crate, sums) if path.name not in present]
     if missing:
         subprocess.run(["gh", "release", "upload", tag, "--repo", repo, *missing], check=True)
     if draft:
-        subprocess.run(["gh", "release", "edit", tag, "--repo", repo, "--draft=false"], check=True)
+        subprocess.run([
+            "gh", "release", "edit", tag, "--repo", repo, "--draft=false",
+            "--title", tag, "--notes", notes,
+        ], check=True)
 
 
 if __name__ == "__main__":

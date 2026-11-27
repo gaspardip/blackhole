@@ -93,11 +93,14 @@ class ReleaseUploads(unittest.TestCase):
         self.assertIn("--draft", commands[0])
         self.assertIn("--prerelease", commands[0])
         self.assertEqual(commands[1][-3:], [str(self.npm), str(self.crate), str(self.sums)])
-        self.assertIn("--draft=false", commands[2])
+        self.assertEqual(commands[2][-5:], ["--draft=false", "--title", TAG, "--notes", "Candidate"])
 
     def test_github_resumes_a_draft_without_reuploading_matching_assets(self) -> None:
         asset = {"name": self.crate.name, "digest": f"sha256:{SHA256}"}
-        draft = {"tag_name": TAG, "draft": True, "prerelease": True, "assets": [asset]}
+        draft = {
+            "tag_name": TAG, "draft": True, "prerelease": True, "assets": [asset],
+            "name": "Edited title", "body": "Edited notes",
+        }
         with patch.dict("os.environ", ENV), \
              patch("release_uploads.urlopen", return_value=response([draft])), \
              patch("release_uploads.subprocess.run") as gh:
@@ -106,6 +109,7 @@ class ReleaseUploads(unittest.TestCase):
         self.assertEqual([command[2] for command in commands], ["upload", "edit"])
         self.assertEqual(commands[0][-2:], [str(self.npm), str(self.sums)])
         self.assertNotIn(str(self.crate), commands[0])
+        self.assertEqual(commands[1][-5:], ["--draft=false", "--title", TAG, "--notes", "Candidate"])
 
     def test_github_skips_a_complete_matching_release(self) -> None:
         sums_sha = "19a05c5d142cc56b07cac500240109127bd26f0618994eba0c91a8c0e8bc1935"
@@ -113,7 +117,10 @@ class ReleaseUploads(unittest.TestCase):
             {"name": path.name, "digest": f"sha256:{digest}"}
             for path, digest in [(self.crate, SHA256), (self.npm, SHA256), (self.sums, sums_sha)]
         ]
-        release = {"tag_name": TAG, "draft": False, "prerelease": True, "assets": assets}
+        release = {
+            "tag_name": TAG, "draft": False, "prerelease": True, "assets": assets,
+            "name": TAG, "body": "Candidate",
+        }
         with patch.dict("os.environ", ENV), \
              patch("release_uploads.urlopen", return_value=response([release])), \
              patch("release_uploads.subprocess.run") as gh:
@@ -122,13 +129,29 @@ class ReleaseUploads(unittest.TestCase):
 
     def test_github_refuses_to_change_a_release_with_mismatched_digests(self) -> None:
         asset = {"name": self.crate.name, "digest": "sha256:wrong"}
-        release = {"tag_name": TAG, "draft": False, "prerelease": True, "assets": [asset]}
+        release = {
+            "tag_name": TAG, "draft": False, "prerelease": True, "assets": [asset],
+            "name": TAG, "body": "Candidate",
+        }
         with patch.dict("os.environ", ENV), \
              patch("release_uploads.urlopen", return_value=response([release])), \
              patch("release_uploads.subprocess.run") as gh:
             with self.assertRaisesRegex(ValueError, "candidate.crate.*digest"):
                 publish_github(TAG, self.npm, self.crate, self.sums)
             gh.assert_not_called()
+
+    def test_github_refuses_to_change_a_published_release_with_mismatched_metadata(self) -> None:
+        release = {
+            "tag_name": TAG, "draft": False, "prerelease": True, "assets": [],
+            "name": TAG, "body": "Candidate",
+        }
+        for field in ("body", "name"):
+            with self.subTest(field=field), patch.dict("os.environ", ENV), \
+                 patch("release_uploads.urlopen", return_value=response([release | {field: "Edited"}])), \
+                 patch("release_uploads.subprocess.run") as gh:
+                with self.assertRaisesRegex(ValueError, "title or notes"):
+                    publish_github(TAG, self.npm, self.crate, self.sums)
+                gh.assert_not_called()
 
     def test_github_does_not_upload_on_a_lookup_error(self) -> None:
         with patch.dict("os.environ", ENV), \
