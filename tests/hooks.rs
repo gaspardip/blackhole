@@ -297,6 +297,20 @@ fn blocking_hooks_block_when_git_reports_the_wrong_checkout_root() {
     }
 }
 
+#[test]
+fn stop_reads_its_whole_payload_before_blocking() {
+    let dir = repo();
+    let outside = tempdir().unwrap();
+    common::git(
+        dir.path(),
+        &["config", "core.worktree", outside.path().to_str().unwrap()],
+    )
+    .unwrap();
+    // A payload larger than a pipe buffer fails to arrive unless the hook drains stdin.
+    let payload = json!({"stop_hook_active": false, "pad": "x".repeat(1 << 20)});
+    assert_ne!(hook(dir.path(), "stop", &payload, 2), b"");
+}
+
 fn stop_without_git(root: &Path, active: bool, status: i32) -> String {
     let empty = tempdir().unwrap();
     let mut cmd = common::command(env!("CARGO_BIN_EXE_blackhole"));
@@ -1103,13 +1117,8 @@ fn ignored_tools_skip_input_typing() {
 #[should_panic(expected = "incomplete test input")]
 fn ordinary_run_requires_complete_input() {
     let dir = repo();
-    let _ = run(
-        dir.path(),
-        &["hook", "stop"],
-        &" ".repeat(1024 * 1024),
-        0,
-        false,
-    );
+    // `check` never reads stdin, so the harness must report the input it could not deliver.
+    let _ = run(dir.path(), &["check"], &" ".repeat(1024 * 1024), 0, false);
 }
 
 #[cfg(unix)]

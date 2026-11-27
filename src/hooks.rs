@@ -21,16 +21,16 @@ const LIMIT: u64 = 64 * 1024 * 1024;
 #[must_use]
 pub fn run(event: Event) -> ExitCode {
     let mut out = HookOutput(io::stderr().lock());
-    // Stop judges the checkout and needs its payload only for the loop guard.
-    let payload = match event {
-        Event::Stop => Ok(Vec::new()),
-        Event::PreEdit | Event::PostEdit => payload(),
+    // The agent writes the payload before it waits, so it is drained first; Stop needs it only for the loop guard.
+    let payload = match payload() {
+        Err(_) if matches!(event, Event::Stop) => Ok(Vec::new()),
+        read => read,
     };
-    let (text, result) = match payload {
+    let (bytes, (text, result)) = match payload {
         Ok(bytes) => {
             let first = attempt(event, &bytes);
             // A failure that is no verdict can be transient, so it gets a second judgment.
-            if first
+            let judged = if first
                 .1
                 .as_ref()
                 .is_err_and(|e| crate::fault(e) == crate::Fault::NoVerdict)
@@ -38,9 +38,10 @@ pub fn run(event: Event) -> ExitCode {
                 attempt(event, &bytes)
             } else {
                 first
-            }
+            };
+            (bytes, judged)
         }
-        Err(error) => (Vec::new(), Err(error)),
+        Err(error) => (Vec::new(), (Vec::new(), Err(error))),
     };
     let _ = out.write_all(&text);
     let error = match result {
@@ -52,7 +53,7 @@ pub fn run(event: Event) -> ExitCode {
     let fault = crate::fault(&error);
     if fault != crate::Fault::NoVerdict {
         let _ = writeln!(out, "blackhole: {cause}");
-    } else if matches!(event, Event::Stop) && continued() {
+    } else if matches!(event, Event::Stop) && continued(&bytes) {
         let _ = writeln!(
             out,
             "blackhole: no verdict: {cause}; the judgment could not run, so the agent may stop"
@@ -88,16 +89,13 @@ fn payload() -> io::Result<Vec<u8>> {
 }
 
 // Claude Code and Codex set `stop_hook_active` once a stop hook has continued the turn; an unreadable payload keeps the block.
-fn continued() -> bool {
+fn continued(bytes: &[u8]) -> bool {
     #[derive(Deserialize)]
     struct Stop {
         #[serde(default)]
         stop_hook_active: bool,
     }
-    payload()
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Stop>(&bytes).ok())
-        .is_some_and(|stop| stop.stop_hook_active)
+    serde_json::from_slice::<Stop>(bytes).is_ok_and(|stop| stop.stop_hook_active)
 }
 
 struct HookOutput<'a>(io::StderrLock<'a>);
