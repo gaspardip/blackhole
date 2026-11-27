@@ -257,8 +257,9 @@ Run `python3 -I tools/backtest.py --binary /path/to/blackhole --repo /path/to/cl
 to judge recent first-parent merges from the clone's default branch. Add
 `--mode squash` for a history of squash merges. The backtest writes
 `results.jsonl` and `summary.json` under the clone's name in the output
-directory. The summary counts the share of judged changes flagged by each
-rule. Findings have a null label for later false-positive analysis.
+directory. The binary must support `ci --findings`. The summary counts the
+share of judged changes flagged by each rule and by the coverage gate.
+Findings have a null label for later false-positive analysis.
 
 ## License
 

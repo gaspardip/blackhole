@@ -197,6 +197,20 @@ class Backtest(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(git_files(), before)
 
+    def test_findings_use_records_for_paths_that_look_like_a_gate(self) -> None:
+        self.merge(
+            "protected: new.test.ts",
+            'test.skip("new", () => { expect("word".length).toBe(4); });\n',
+        )
+
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual((rows[0]["state"], rows[0]["gates"]), ("red", ["findings"]))
+        self.assertEqual(rows[0]["findings"], [
+            {"path": "protected: new.test.ts", "line": 1, "rule": "ts/no-skipped-tests",
+             "label": None},
+        ])
+        self.assertEqual(summary["rules"], {"ts/no-skipped-tests": {"changes": 1, "flag_rate": 1.0}})
+
     def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
         path = ".github/note\nnew.test.ts:1:2 ts/no-skipped-tests marker"
         (self.repo / path).parent.mkdir(parents=True)
@@ -214,17 +228,14 @@ class Backtest(unittest.TestCase):
 
         rows, summary = self.run_backtest(self.binary)
         self.assertEqual((rows[0]["state"], rows[0]["gates"]), ("red", ["coverage"]))
-        self.assertEqual(rows[0]["findings"], [
-            {"path": None, "line": None, "rule": "coverage", "label": None},
-        ])
+        self.assertEqual(rows[0]["findings"], [])
         self.assertEqual(summary["rules"], {"coverage": {"changes": 1, "flag_rate": 1.0}})
 
-    def test_red_findings_without_recognized_records_are_unparsed(self) -> None:
+    def test_judged_changes_count_even_with_an_empty_findings_file(self) -> None:
         self.merge("new.ts", "export const value = 1;\n")
         binary = self.root / "fake"
         lines = [
-            "new.ts:1:2 unknown/not-a-rule note",
-            "new.ts:1:2 ts/no-skipped-tests malformed\tmessage",
+            "new.ts:1:2 ts/no-skipped-tests marker",
             "blackhole ci: red (findings)",
         ]
         binary.write_text(
@@ -235,11 +246,10 @@ class Backtest(unittest.TestCase):
         binary.chmod(0o700)
 
         rows, summary = self.run_backtest(binary)
-        self.assertEqual((rows[0]["state"], rows[0]["exit_code"]), ("unparsed", 1))
+        self.assertEqual((rows[0]["state"], rows[0]["exit_code"]), ("red", 1))
         self.assertEqual(rows[0]["gates"], ["findings"])
         self.assertEqual(rows[0]["findings"], [])
-        self.assertEqual(rows[0]["raw_output"], "\n".join(lines) + "\n")
-        self.assertEqual((summary["judged"], summary["states"]["unparsed"]), (0, 1))
+        self.assertEqual((summary["judged"], summary["states"]["red"]), (1, 1))
         self.assertEqual(summary["rules"], {})
 
     def test_objection_is_judged_on_the_original_commit_utc_date(self) -> None:
