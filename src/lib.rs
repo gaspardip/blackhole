@@ -380,7 +380,7 @@ fn scan(
         names,
         (),
         |()| inventory(root, listing),
-        |(), name| files::read(&root.join(name)).map_err(|e| unreadable(name, &e)),
+        |(), name| files::read(root, name).map_err(|e| unreadable(name, &e)),
     )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;

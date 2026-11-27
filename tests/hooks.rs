@@ -1608,3 +1608,47 @@ fn coverage_checks_both_blob_sizes_before_requesting_their_bodies() {
         }
     }
 }
+
+#[test]
+fn check_and_stop_distinguish_a_replaced_tracked_file_from_a_gitlink() {
+    let dir = repo();
+    let root = dir.path();
+    common::git(root, &["commit", "--allow-empty", "-qm", "base"]).unwrap();
+    let base = common::git(root, &["rev-parse", "HEAD"]).unwrap();
+    common::git(
+        root,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{base},module"),
+        ],
+    )
+    .unwrap();
+    fs::create_dir(root.join("module")).unwrap();
+    assert_eq!(check(root, &[], 0), b"");
+    assert_eq!(hook(root, "stop", &json!({}), 0), b"");
+
+    let path = root.join("a.py");
+    fs::write(&path, "pass\n").unwrap();
+    common::git(root, &["add", "a.py"]).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let [checked, stopped] = [&["check"][..], &["hook", "stop"]].map(|args| {
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap()
+    });
+    assert_eq!(
+        [checked.status.code(), stopped.status.code()],
+        [Some(1), Some(2)],
+        "{checked:?} {stopped:?}"
+    );
+    assert!(
+        checked.stdout.starts_with(b"blackhole: cannot read a.py: "),
+        "{checked:?}"
+    );
+    assert_eq!(stopped.stderr, checked.stdout);
+}

@@ -93,45 +93,54 @@ pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
     Ok(dir)
 }
 
-// A file can go away or turn into a directory between the listing and the read, and then it has nothing to check.
 // A link to a file is read under the link's name, or a link could hide what kind of file it is.
-pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    crate::deadline::activity(|| {
-        format!(
-            "reading {}",
-            crate::diagnostic_text(&path.to_string_lossy())
-        )
+pub(crate) fn read(root: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+    let path = root.join(name);
+    crate::deadline::activity(|| format!("reading {}", crate::diagnostic_text(name)));
+    let found = fs::symlink_metadata(&path).and_then(|meta| {
+        let link = meta.is_symlink();
+        let meta = if link { fs::metadata(&path)? } else { meta };
+        if meta.is_file() {
+            fs::read(&path).map(Some)
+        } else if meta.is_dir() && (link || !tracked_file(root, name)?) {
+            Ok(None)
+        } else {
+            Err(io::Error::other("expected a regular file"))
+        }
     });
-    let found = fs::symlink_metadata(path)
-        .and_then(|meta| {
-            if meta.is_symlink() {
-                fs::metadata(path)
-            } else {
-                Ok(meta)
-            }
-        })
-        .and_then(|meta| {
-            if meta.is_file() {
-                fs::read(path).map(Some)
-            } else if meta.is_dir() {
-                Ok(None)
-            } else {
-                Err(io::Error::other("expected a regular file"))
-            }
-        });
     match found {
         Err(e)
             if matches!(
                 e.kind(),
-                io::ErrorKind::NotFound
-                    | io::ErrorKind::NotADirectory
-                    | io::ErrorKind::IsADirectory
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
             ) =>
         {
             Ok(None)
         }
+        Err(e) if e.kind() == io::ErrorKind::IsADirectory && !tracked_file(root, name)? => Ok(None),
         other => other,
     }
+}
+
+fn tracked_file(root: &Path, name: &str) -> io::Result<bool> {
+    let entries = git(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            name,
+        ],
+    )?;
+    Ok(entries.split(|&b| b == 0).any(|entry| {
+        let mut fields = entry.splitn(2, |&b| b == b'\t');
+        fields
+            .next()
+            .is_some_and(|mode| !mode.starts_with(b"160000 "))
+            && fields.next() == Some(name.as_bytes())
+    }))
 }
 
 // What two names of one file share, wherever a link or a second name leads to it.
