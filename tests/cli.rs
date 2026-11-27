@@ -43,6 +43,15 @@ fn names(dir: &Path) -> Vec<std::ffi::OsString> {
 }
 
 #[test]
+fn check_escapes_newlines_in_finding_paths() {
+    let dir = repo();
+    fs::write(dir.path().join("line\nbreak.py"), "# noqa").unwrap();
+    let text = String::from_utf8(check(dir.path(), &[], 1).stdout).unwrap();
+    assert_eq!(text.lines().count(), 2);
+    assert!(text.starts_with(r"line\nbreak.py:1:1 "));
+}
+
+#[test]
 fn clean_selection_is_silent() {
     let dir = repo();
     let root = dir.path();
@@ -269,8 +278,8 @@ fn absent_baseline() {
     assert_eq!(found, check(root, &[], 1).stdout);
     let found = String::from_utf8(found).unwrap();
     for line in [
-        format!("a\tb.py:1:1 {RULE}\n"),
-        format!("a\nb.py:1:1 {RULE}\n"),
+        format!("a\\tb.py:1:1 {RULE}\n"),
+        format!("a\\nb.py:1:1 {RULE}\n"),
     ] {
         assert!(found.contains(&line), "{found:?}");
     }
@@ -462,6 +471,20 @@ fn a_broken_entry_on_the_way_is_not_a_directory_that_is_gone() {
     fs::remove_file(root.join("gone")).unwrap();
     std::os::unix::fs::symlink("../old-location", root.join("gone")).unwrap();
     check(root, &["gone/deep/file.py"], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn check_selects_a_departed_ledger_row_through_a_directory_link() {
+    let dir = repo();
+    let root = dir.path();
+    baseline(root, &[("link/gone.py", 1)]);
+    fs::create_dir(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    assert_eq!(
+        check(root, &["link/gone.py"], 1).stdout,
+        format!("link/gone.py {RULE}: ledger allows 1, found 0; run blackhole ledger\n").as_bytes()
+    );
 }
 
 #[test]

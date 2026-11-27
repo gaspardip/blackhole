@@ -8,6 +8,36 @@ that can be switched off, and a judge the agent cannot edit.
 
 Status: pre-release. Nothing is published yet.
 
+## Agent hooks
+
+Run `blackhole init` from anywhere in the checkout. It creates a root
+`blackhole.toml` if needed, records existing allowable findings in the first
+ledger, and installs project hooks for Claude Code and Codex. Rerunning it
+keeps the existing ledger. Trust the project hooks in your agent to activate
+them.
+
+Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
+`blackhole hook post-edit` reports findings in the edited files. At the end of
+a turn, `blackhole hook stop` checks the whole repository. The launchers use the
+checkout's executable `node_modules/.bin/blackhole` when available and the root
+git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
+With neither, the hook blocks.
+
+Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
+Pre-edit compares the ledger path case-insensitively, but it does not catch
+aliases of a ledger that does not exist yet on filesystems that ignore some
+Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
+`ci` still judge the ledger.
+
+The hooks also do not catch these cases:
+
+- The npm install's `blackhole` needs `node` on the hook's PATH. Without it the
+  shim exits 127, which Codex treats as non-blocking.
+- A checkout directory whose name ends in a newline can make the launcher
+  resolve the wrong root.
+- A Codex hook that rewrites a patch after blackhole has checked it can change
+  which files the edit touches.
+
 ## Working on this repo
 
 ```sh
