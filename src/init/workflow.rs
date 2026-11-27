@@ -73,12 +73,22 @@ jobs:
               --jq '.[] | (.author.login, .committer.login) | select(. != null)'
             printf '%s\n' "${PR_AUTHOR}"
           } | jq -R . | jq -s unique > "${RUNNER_TEMP}/authors.json"
-          gh api --paginate "${pr}/reviews?per_page=100" \
-            --jq '.[] | select(.user != null) | [.user.login, .state, .commit_id] | @tsv' |
-            while IFS=$'\t' read -r login state commit; do
-              permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${login}/permission" --jq .permission)"
-              jq -n --arg login "${login}" --arg state "${state}" --arg commit "${commit}" \
-                --arg permission "${permission}" '{$login, $state, $commit, $permission}'
+          gh api --paginate "${pr}/reviews?per_page=100" |
+            jq -rs --arg head "${HEAD_SHA}" '
+              [.[][] | select(.user != null and .state != "COMMENTED")]
+              | group_by(.user.login | ascii_downcase)[]
+              | last | select(.state == "APPROVED" and .commit_id == $head) | .user.login
+            ' |
+            while IFS= read -r login; do
+              if response="$(gh api -i "repos/${GITHUB_REPOSITORY}/collaborators/${login}/permission")"; then
+                permission="$(sed '1,/^[[:space:]]*$/d' <<< "${response}" | jq -er '.permission | strings')"
+              else
+                IFS=' ' read -r protocol status _ <<< "${response}"
+                [[ "${protocol}" = HTTP/* && "${status}" = 404 ]] || exit 1
+                permission=none
+              fi
+              jq -n --arg login "${login}" --arg commit "${HEAD_SHA}" \
+                --arg permission "${permission}" '{$login, state: "APPROVED", $commit, $permission}'
             done |
             jq -s --slurpfile authors "${RUNNER_TEMP}/authors.json" '{authors: $authors[0], reviews: .}' \
               > "${RUNNER_TEMP}/approvals.json"

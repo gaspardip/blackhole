@@ -74,7 +74,7 @@ fn adopted() -> Adopter {
         br#"{"number":12}"#,
     );
     fake.respond("PATCH", "repos/owner/repo/pulls/12", 200, &[], b"{}");
-    fake.respond("GET", OPEN_PRS, 200, &[], b"12\n");
+    fake.respond("GET", OPEN_PRS, 200, &[], br#"[{"number":12}]"#);
     fake.respond("DELETE", REF, 204, &[], b"");
     Adopter {
         _dir: dir,
@@ -338,7 +338,7 @@ fn a_rejected_first_push_still_cleans_up_an_absent_branch() {
     let hook = adopter.remote.join("hooks/pre-receive");
     fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"");
+    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"[]");
     adopter.fake.respond("DELETE", REF, 422, &[], b"{}");
     let out = run(&adopter.root, &adopter.fake, &["canary"]);
     assert_eq!(out.status.code(), Some(2));
@@ -362,7 +362,7 @@ fn a_push_and_cleanup_failure_emits_one_escaped_line() {
     )
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"");
+    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"[]");
     adopter
         .fake
         .fail("DELETE", REF, 1, "raw cleanup error\nmore details\n");

@@ -868,6 +868,108 @@ fn writes_the_judge_workflow_pinned_to_this_version() {
     }
 }
 
+const PR_COMMITS: &str = "repos/owner/repo/pulls/42/commits?per_page=100";
+const PR_REVIEWS: &str = "repos/owner/repo/pulls/42/reviews?per_page=100";
+const RETIRED_PERMISSION: &str = "repos/owner/repo/collaborators/Retired/permission";
+const GONE_PERMISSION: &str = "repos/owner/repo/collaborators/gone/permission";
+
+fn collect_approvals(runner: &Path, fake: &gh::FakeGh, head: &str) -> std::process::Output {
+    let workflow = String::from_utf8(generated_workflow()).unwrap();
+    let (_, approvals) = workflow
+        .split_once("      - name: Collect approvals of the head\n")
+        .unwrap();
+    let (_, script) = approvals.split_once("        run: |\n").unwrap();
+    let (script, _) = script.split_once("      - name: Judge the head\n").unwrap();
+    let script = script
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    common::command("bash")
+        .args(["-eo", "pipefail", "-c", &script])
+        .env("PATH", fake.path())
+        .env("RUNNER_TEMP", runner)
+        .env("GITHUB_REPOSITORY", "owner/repo")
+        .env("PR_NUMBER", "42")
+        .env("PR_AUTHOR", "opener")
+        .env("HEAD_SHA", head)
+        .output()
+        .unwrap()
+}
+
+fn approval_api(head: &str) -> gh::FakeGh {
+    let fake = gh::FakeGh::new();
+    let commits = json!([{"sha":head,"author":{"login":"writer"},"committer":null}]);
+    fake.respond("GET", PR_COMMITS, 200, &[], commits.to_string().as_bytes());
+    let review = |login: &str, state: &str, commit: &str| json!({"user":{"login":login},"state":state,"commit_id":commit});
+    let first = json!([
+        review("retired", "APPROVED", head),
+        review("active", "APPROVED", head),
+        review("gone", "APPROVED", head),
+        review("old", "APPROVED", "parent"),
+    ]);
+    let second = json!([
+        review("Retired", "DISMISSED", head),
+        review("active", "COMMENTED", head),
+    ]);
+    fake.respond(
+        "GET",
+        PR_REVIEWS,
+        200,
+        &[],
+        format!("{first}\n{second}").as_bytes(),
+    );
+    for login in ["retired", "Retired", "gone", "old"] {
+        let endpoint = format!("repos/owner/repo/collaborators/{login}/permission");
+        fake.respond("GET", &endpoint, 404, &[], b"{}");
+    }
+    fake.respond(
+        "GET",
+        "repos/owner/repo/collaborators/active/permission",
+        200,
+        &[],
+        br#"{"permission":"write"}"#,
+    );
+    fake
+}
+
+#[test]
+fn approval_collection_checks_only_current_approvers_and_accepts_missing_collaborators() {
+    let runner = tempdir().unwrap();
+    let head = "current";
+    let fake = approval_api(head);
+    let out = collect_approvals(runner.path(), &fake, head);
+    assert!(out.status.success(), "{out:?}\n{:#?}", fake.calls());
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(
+        approvals,
+        json!({
+            "authors":["opener","writer"],
+            "reviews":[
+                {"login":"active","state":"APPROVED","commit":head,"permission":"write"},
+                {"login":"gone","state":"APPROVED","commit":head,"permission":"none"},
+            ]
+        })
+    );
+    let calls = fake.calls();
+    assert!(
+        calls.iter().all(|call| !call.ends_with(RETIRED_PERMISSION)
+            && !call.contains("/collaborators/retired/")
+            && !call.contains("/collaborators/old/")),
+        "{calls:#?}"
+    );
+    assert!(
+        serde_json::from_value::<blackhole_check::verdict::Approvals>(approvals)
+            .unwrap()
+            .approved(head)
+    );
+
+    fake.respond("GET", GONE_PERMISSION, 502, &[], b"{}");
+    let out = collect_approvals(runner.path(), &fake, head);
+    assert!(!out.status.success(), "{out:?}");
+}
+
 #[test]
 fn keeps_an_identical_workflow_and_refuses_a_different_one() {
     let dir = repo();

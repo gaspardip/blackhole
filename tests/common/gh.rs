@@ -15,11 +15,16 @@ pub struct FakeGh {
 const SCRIPT: &str = r#"#!/bin/sh
 dir=@DIR@
 printf '%s\n' "$*" >> "$dir/calls"
-for last; do :; done
-method=GET prev=
+last= method=GET query= prev=
 for arg; do
-  [ "$prev" = --method ] && method=$arg
-  prev=$arg
+  case $prev in
+    --method) method=$arg; prev=; continue ;;
+    --jq) query=$arg; prev=; continue ;;
+  esac
+  case $arg in
+    --method|--jq) prev=$arg ;;
+    repos/*|user) last=$arg ;;
+  esac
 done
 key() { printf '%s %s' "$method" "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'; }
 file="$dir/responses/$(key "$last")"
@@ -30,11 +35,16 @@ if [ ! -f "$file" ]; then
   exit 1
 fi
 [ ! -f "$file.err" ] || cat "$file.err" >&2
-case " $* " in
-  *" -i "*) cat "$file" ;;
-  *) sed '1,/^\r$/d' "$file" ;;
-esac
-exit "$(cat "$file.exit")"
+status=$(cat "$file.exit")
+if [ -n "$query" ] && [ "$status" = 0 ]; then
+  sed '1,/^[[:space:]]*$/d' "$file" | jq -r "$query" || exit 1
+else
+  case " $* " in
+    *" -i "*) cat "$file" ;;
+    *) sed '1,/^[[:space:]]*$/d' "$file" ;;
+  esac
+fi
+exit "$status"
 "#;
 
 fn key(method: &str, endpoint: &str) -> String {
