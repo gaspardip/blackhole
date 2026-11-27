@@ -272,20 +272,18 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
         let checked = format!(
             r#"if {top} && {nearest} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
         );
-        // Without git only a root the host names can pick the install that reports no verdict; Codex names none, and an inherited variable is not its root.
-        let project = if codex {
-            String::new()
-        } else {
-            format!(
-                r#"if ! command -v git >/dev/null 2>&1 && [ -n "${{CLAUDE_PROJECT_DIR:-}}" ] && local_bin="$CLAUDE_PROJECT_DIR/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
-            )
-        };
-        let command = format!("{checked}{project}{global}");
+        let project = format!(
+            r#"if ! command -v git >/dev/null 2>&1 && [ -n "${{CLAUDE_PROJECT_DIR:-}}" ] && local_bin="$CLAUDE_PROJECT_DIR/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
+        );
+        let command = format!("{checked}{global}");
         let known = [
             format!("blackhole hook {cmd}"),
             launcher(PREVIOUS_ROOT),
             launcher(ISOLATED_ROOT),
-            format!("{checked}{global}"),
+            format!("{checked}{project}{global}"),
+            format!(
+                r#"if {nearest} && local_bin="$dir/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ] && {{ ! command -v git >/dev/null 2>&1 || {{ {top} && [ "$dir" = "$top" ]; }}; }}; then exec "$local_bin" hook {cmd}; fi; {global}"#
+            ),
         ];
         let mut found = false;
         for group in entries.iter_mut().filter_map(Json::as_object_mut) {

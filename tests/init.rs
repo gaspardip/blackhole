@@ -35,6 +35,14 @@ fn checked_launcher(event: &str) -> String {
     )
 }
 
+fn project_launcher(event: &str) -> String {
+    let checked = checked_launcher(event);
+    let (local, global) = checked.split_once("; fi; command -v blackhole").unwrap();
+    format!(
+        r#"{local}; fi; if ! command -v git >/dev/null 2>&1 && [ -n "${{CLAUDE_PROJECT_DIR:-}}" ] && local_bin="$CLAUDE_PROJECT_DIR/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {event}; fi; command -v blackhole{global}"#
+    )
+}
+
 fn init(root: &Path, success: bool) -> String {
     let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
     // A run that fails reports no file as written.
@@ -55,6 +63,7 @@ fn installs_and_merges_once() {
                     {"type":"command","command":previous_launcher("stop")},
                     {"type":"command","command":old_launcher(ISOLATED_ROOT, "stop")},
                     {"type":"command","command":checked_launcher("stop")},
+                    {"type":"command","command":project_launcher("stop")},
                     {"type":"command","command":"second"}
                 ]}
             ],
@@ -87,13 +96,9 @@ fn installs_and_merges_once() {
         assert_ne!(stop, "blackhole hook stop");
         assert_ne!(stop, &Value::String(previous_launcher("stop")));
         assert_ne!(stop, &Value::String(old_launcher(ISOLATED_ROOT, "stop")));
-        // Codex names no project root, so its launcher has nothing to add for a missing git.
-        assert_eq!(
-            stop == &Value::String(checked_launcher("stop")),
-            name == ".codex/hooks.json"
-        );
+        assert_eq!(stop, &Value::String(checked_launcher("stop")));
         let mut upgraded = original.clone();
-        for index in [0, 1, 2, 3] {
+        for index in [0, 1, 2, 3, 4] {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
         }
         for event in ["PreToolUse", "PostToolUse"] {
@@ -810,7 +815,7 @@ fn narrower_guards_get_a_full_one_beside_them() {
 }
 
 #[test]
-fn the_local_launcher_releases_the_stop_guard_without_git() {
+fn the_launcher_uses_only_path_without_git() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = repo();
     let root = dir.path();
@@ -827,36 +832,56 @@ fn the_local_launcher_releases_the_stop_guard_without_git() {
     fs::write(&fake, "#!/bin/sh\n: >\"$0.ran\"\n").unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let empty = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    symlink(
+        env!("CARGO_BIN_EXE_blackhole"),
+        global.path().join("blackhole"),
+    )
+    .unwrap();
     for name in HOOK_FILES {
         let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
         let command = doc["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        for (cwd, project) in [(root, Some(root)), (&stray, Some(root)), (&stray, None)] {
-            let mut sh = common::command("/bin/sh");
-            sh.args(["-c", command])
-                .current_dir(cwd)
-                .env("PATH", empty.path())
-                .env_remove("CLAUDE_PROJECT_DIR");
-            if let Some(project) = project {
-                sh.env("CLAUDE_PROJECT_DIR", project);
-            }
-            // Only Claude Code names the project root, and only that root's install can report the outage.
-            let trusted = project.is_some() && name == ".claude/settings.json";
-            for (active, status) in [(true, 0), (false, 2)] {
+        for cwd in [root, &stray] {
+            for (path, active, status, expected) in [
+                (
+                    empty.path(),
+                    true,
+                    2,
+                    "blackhole: hook stop needs blackhole on PATH",
+                ),
+                (
+                    empty.path(),
+                    false,
+                    2,
+                    "blackhole: hook stop needs blackhole on PATH",
+                ),
+                (
+                    global.path(),
+                    true,
+                    0,
+                    "blackhole: no verdict: cannot run git: ",
+                ),
+                (
+                    global.path(),
+                    false,
+                    2,
+                    "blackhole: no verdict: cannot run git: ",
+                ),
+            ] {
                 let output = agent::run_input(
-                    &mut sh,
+                    common::command("/bin/sh")
+                        .args(["-c", command])
+                        .current_dir(cwd)
+                        .env("PATH", path)
+                        .env("CLAUDE_PROJECT_DIR", root),
                     json!({"stop_hook_active": active}).to_string().as_bytes(),
-                    if trusted { status } else { 2 },
+                    status,
                     false,
                 );
-                let expected: &[u8] = if trusted {
-                    b"blackhole: no verdict: cannot run git: "
-                } else {
-                    b"blackhole: hook stop needs blackhole on PATH"
-                };
                 assert!(
-                    output.stderr.starts_with(expected),
+                    output.stderr.starts_with(expected.as_bytes()),
                     "{name} {cwd:?} {active}: {output:?}"
                 );
             }

@@ -76,9 +76,8 @@ The agent hooks block on red. On no verdict they judge once more, then block
 with `blackhole: no verdict: <cause>`, post-edit included. The stop hook lets
 the agent stop when Claude Code or Codex sets `stop_hook_active`, so an outage
 cannot loop forever. Only no verdict releases it: a red stop still blocks.
-Without git, the Claude Code launcher runs the binary under `CLAUDE_PROJECT_DIR`
-so the release reaches it. Codex names no project root, so there the hook needs
-`blackhole` on PATH and blocks without it. A payload the post-edit hook cannot read exits 1, since the
+Without git, both launchers need `blackhole` on PATH and block without it.
+A payload the post-edit hook cannot read exits 1, since the
 edit has already happened, and a failing hook exits 1 without blocking only
 where no `.git` exists in any parent directory.
 
