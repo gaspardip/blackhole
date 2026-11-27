@@ -160,6 +160,33 @@ class Backtest(unittest.TestCase):
                 self.assertEqual((result.returncode, output.exists()), (1, False))
                 self.assertIn("inside the source clone", result.stderr)
 
+    def test_refuses_output_in_a_symlinked_object_directory(self) -> None:
+        self.merge("clean.ts", "export const value = 1;\n")
+        objects = self.repo / ".git/objects"
+        external = self.root / "objects"
+        objects.rename(external)
+        objects.symlink_to(external, target_is_directory=True)
+        output = external / "reports"
+
+        result = self.invoke_backtest(self.binary, "--out", str(output))
+        self.assertEqual((result.returncode, output.exists()), (1, False))
+        self.assertIn("inside the source clone", result.stderr)
+
+    def test_refuses_report_in_an_alternate_object_directory(self) -> None:
+        self.merge("clean.ts", "export const value = 1;\n")
+        external = self.root / "alternate\nobjects"
+        external.mkdir()
+        objects = self.repo / ".git/objects"
+        (objects / "info/alternates").write_text('"../../../alternate\\nobjects"\n')
+        self.out.mkdir()
+        output = external / "reports"
+        report = self.out / self.repo.name
+        report.symlink_to(output, target_is_directory=True)
+
+        result = self.invoke_backtest(self.binary)
+        self.assertEqual((result.returncode, output.exists()), (1, False))
+        self.assertIn("inside the source clone", result.stderr)
+
     def test_refuses_a_nested_source_repo(self) -> None:
         nested = self.repo / "nested"
         nested.mkdir()

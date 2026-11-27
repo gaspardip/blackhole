@@ -1,5 +1,6 @@
 """Judge recently merged changes in a local clone with an installed blackhole."""
 import argparse
+import codecs
 import json
 import os
 import re
@@ -14,6 +15,7 @@ POLICY = ("blackhole.toml", ".blackhole/ledger")
 OBJECTIONS = ".blackhole/objections"
 STATES = {0: "green", 1: "red", 3: "waiting", 75: "no_verdict"}
 RED_GATES = re.compile(r"blackhole ci: red \(([a-z]+(?:, [a-z]+)*)\)")
+ALTERNATE = re.compile(rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)".?|([^\n]+)', re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,29 @@ def judge(
     return Verdict(state, today, result.returncode, last_line, findings, gates=gates)
 
 
+def object_directories(objects: Path) -> set[Path]:
+    pending = [objects]
+    seen: set[Path] = set()
+    while pending:
+        directory = pending.pop().resolve()
+        if directory in seen:
+            continue
+        seen.add(directory)
+        try:
+            alternates = (directory / "info/alternates").read_bytes()
+        except FileNotFoundError:
+            continue
+        for match in ALTERNATE.finditer(alternates.split(b"\0", 1)[0]):
+            quoted, path = match.groups()
+            if quoted is not None:
+                path = codecs.escape_decode(quoted)[0].split(b"\0", 1)[0]
+            elif path.startswith(b"#"):
+                continue
+            if path:
+                pending.append(directory / os.fsdecode(path))
+    return seen
+
+
 def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None:
     source_env = environment(Path(os.devnull))
     source_paths = [
@@ -188,6 +213,13 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
     ]
     if repo != source_paths[0]:
         raise RuntimeError(f"source repo must be its worktree root: {source_paths[0]}")
+    object_format, objects = git(
+        repo, source_env, "rev-parse", "--show-object-format", "--path-format=absolute",
+        "--git-path", "objects",
+    ).stdout.removesuffix("\n").split("\n", 1)
+    if "\n" in objects:
+        raise RuntimeError("source object directory contains a newline")
+    source_paths.extend(object_directories(Path(objects)))
     out = out.resolve()
     report = (out / repo.name).resolve()
     for directory in (out, report):
@@ -202,12 +234,6 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
         home.mkdir()
         env = environment(home)
         changes = history(repo, env, mode, limit)
-        object_format, objects = git(
-            repo, env, "rev-parse", "--show-object-format", "--path-format=absolute",
-            "--git-path", "objects",
-        ).stdout.removesuffix("\n").split("\n", 1)
-        if "\n" in objects:
-            raise RuntimeError("source object directory contains a newline")
         results = temp / "results.jsonl"
         with results.open("w", encoding="utf-8") as rows:
             for change in changes:
