@@ -1221,3 +1221,71 @@ fn each_credential_that_can_get_past_the_judge_is_not_guarded() {
         ),
     ]);
 }
+
+// Every entry under the root except `.git`, with directories, so an empty directory left behind shows up.
+fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    let mut entries = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path == root.join(".git") {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                pending.push(path);
+                entries.push((relative, None));
+            } else {
+                entries.push((relative, Some(fs::read(&path).unwrap())));
+            }
+        }
+    }
+    entries.sort();
+    entries
+}
+
+#[test]
+fn a_path_git_ignores_stops_init_before_any_write() {
+    for (rule, path) in [
+        ("blackhole.toml", "blackhole.toml"),
+        (".claude/", ".claude/settings.json"),
+        ("*.json", ".claude/settings.json"),
+        (".github", WORKFLOW),
+        ("/.blackhole/*", ".blackhole/ledger"),
+    ] {
+        let dir = repo();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), format!("{rule}\n")).unwrap();
+        let message = init(root, false);
+        assert_eq!(
+            message,
+            format!(
+                "blackhole: git ignores {path}, so a commit would leave it out (remove the rule that ignores it, then rerun init)\n"
+            ),
+            "{rule}"
+        );
+        assert_eq!(
+            snapshot(root),
+            [(".gitignore".into(), Some(format!("{rule}\n").into_bytes()))],
+            "{rule}"
+        );
+    }
+    // Info/exclude is one of git's ignore sources too.
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".git/info")).unwrap();
+    fs::write(root.join(".git/info/exclude"), ".codex\n").unwrap();
+    assert!(init(root, false).contains("git ignores .codex/hooks.json"));
+}
+
+#[test]
+fn an_ignore_rule_does_not_hide_tracked_settings() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".claude")).unwrap();
+    fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    fs::write(root.join(".gitignore"), ".claude/\n").unwrap();
+    init(root, true);
+}

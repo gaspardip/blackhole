@@ -41,6 +41,7 @@ pub fn run(output: &mut impl Write) -> io::Result<u8> {
         &crate::policy(policy.entered, "objections")?.unwrap_or_default(),
         crate::objections::Date::today()?,
     )?;
+    unignored(&root)?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
     let created = claude.install_then(&root, || {
         codex.install_then(&root, || judge.install_then(&root, || first_ledger(&root)))
@@ -385,6 +386,33 @@ fn install(root: &Path, path: &str, data: Option<&[u8]>) -> io::Result<()> {
         crate::enter(root, &dir[..end], true)?;
     }
     crate::replace(name, data)
+}
+
+// A file git ignores stays out of the adoption commit, so the judge never reads it and a revert leaves it behind.
+fn unignored(root: &Path) -> io::Result<()> {
+    let out = crate::git::command()
+        .current_dir(root)
+        .args([
+            "check-ignore",
+            "--",
+            "blackhole.toml",
+            CLAUDE,
+            CODEX,
+            workflow::PATH,
+        ])
+        .arg(crate::files::LEDGER_PATH)
+        .output()?;
+    match out.status.code() {
+        Some(1) => Ok(()),
+        Some(0) => {
+            let path = String::from_utf8_lossy(&out.stdout);
+            let path = path.lines().next().unwrap_or_default();
+            Err(io::Error::other(format!(
+                "git ignores {path}, so a commit would leave it out (remove the rule that ignores it, then rerun init)"
+            )))
+        }
+        _ => Err(crate::git::failure(&out)),
+    }
 }
 
 fn first_ledger(root: &Path) -> io::Result<Option<usize>> {
