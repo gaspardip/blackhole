@@ -181,7 +181,7 @@ pub(crate) fn check(
             if let Some((line, _)) = records.range(range.clone()).find(|(_, hit)| !**hit) {
                 return Err(io::Error::other(format!(
                     "{}:{line}: changed line has zero hits",
-                    file.path
+                    crate::diagnostic_text(file.path)
                 )));
             }
         }

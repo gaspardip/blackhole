@@ -698,6 +698,49 @@ fn ci_writes_only_findings_to_the_requested_file() {
 }
 
 #[test]
+fn ci_coverage_gate_escapes_changed_paths() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    commit(root);
+    let path = "a\u{2028}b.ts";
+    fs::write(root.join(path), "export const value = 1;\n").unwrap();
+    commit(root);
+
+    let coverage = tempdir().unwrap();
+    let head = git_output(root, &["rev-parse", "HEAD"]);
+    let sha = String::from_utf8(head.stdout).unwrap();
+    let reports = coverage.path().join(sha.trim()).join("reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(
+        reports.join("lcov.info"),
+        format!("SF:{path}\nDA:1,0\nLF:1\nLH:0\nend_of_record\n"),
+    )
+    .unwrap();
+    let out = run(
+        root,
+        &[
+            "ci",
+            "--base",
+            "HEAD~",
+            "--head",
+            "HEAD",
+            "--coverage-dir",
+            coverage.path().to_str().unwrap(),
+        ],
+        1,
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "coverage: a\\u{2028}b.ts:1: changed line has zero hits\nblackhole ci: red (coverage)\n"
+    );
+}
+
+#[test]
 fn ci_is_behind_when_head_lacks_base() {
     let dir = repo();
     let root = dir.path();
