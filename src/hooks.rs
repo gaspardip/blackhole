@@ -151,13 +151,13 @@ fn handle(event: Event, bytes: &[u8], out: &mut Vec<u8>) -> io::Result<bool> {
     let spelling = std::env::current_dir()?.join(supplied);
     let cwd = fs::canonicalize(supplied)
         .and_then(|path| {
-            if path.is_dir() {
+            if fs::metadata(&path)?.is_dir() {
                 Ok(path)
             } else {
                 Err(io::Error::from(io::ErrorKind::NotADirectory))
             }
         })
-        .map_err(|e| crate::usage(format!("invalid hook cwd: {e}")))?;
+        .map_err(|e| crate::unresolvable(&format!("hook cwd {}", supplied.display()), &e))?;
     names.sort_unstable();
     names.dedup();
     let root = crate::files::root()?;

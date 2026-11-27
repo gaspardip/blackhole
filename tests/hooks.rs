@@ -1029,7 +1029,7 @@ fn edit_cwd_is_validated_before_expanding_patch_targets() {
     for (event, status) in EDIT_ERRORS {
         let message = String::from_utf8(hook(dir.path(), event, &payload, status)).unwrap();
         assert!(
-            message.starts_with("blackhole: invalid hook cwd:"),
+            message.starts_with("blackhole: cannot resolve hook cwd "),
             "unexpected cwd diagnostic"
         );
         assert_eq!(message.lines().count(), 1);
@@ -1254,6 +1254,24 @@ fn a_retry_judges_from_the_starting_directory() {
     let out = agent::run_input(&mut cmd, payload.as_bytes(), 2, false);
     assert!(shims.path().join("killed").exists());
     assert_eq!(out.stderr, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_looping_hook_cwd_is_red() {
+    let dir = repo();
+    let root = dir.path();
+    std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
+    let mut payload = edit("Write", "a.py");
+    payload["cwd"] = json!("loop");
+    for event in ["pre-edit", "post-edit"] {
+        let error = String::from_utf8(hook(root, event, &payload, 2)).unwrap();
+        assert!(
+            error.starts_with("blackhole: cannot resolve hook cwd loop: ")
+                && error.contains("remove it"),
+            "{event}: {error}"
+        );
+    }
 }
 
 #[cfg(unix)]
