@@ -1173,9 +1173,8 @@ fn post_edit_validates_targets_before_listing() {
     assert!(broken.starts_with(b"blackhole: blackhole.toml:"));
 }
 
-// A git that the machine stops with a signal never answered, whatever the checkout holds.
 #[cfg(unix)]
-fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
+fn git_shim(dir: &Path, script: &str) {
     use std::os::unix::fs::PermissionsExt;
     let real = String::from_utf8(
         common::command("sh")
@@ -1185,6 +1184,21 @@ fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
             .stdout,
     )
     .unwrap();
+    let shim = dir.join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nreal='{}'\n{script}\nexec \"$real\" \"$@\"\n",
+            real.trim_end()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// A git that the machine stops with a signal never answered, whatever the checkout holds.
+#[cfg(unix)]
+fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
     let state = dir.join("killed");
     let guard = if once {
         format!(
@@ -1199,16 +1213,10 @@ fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
     } else {
         ""
     };
-    let shim = dir.join("git");
-    fs::write(
-        &shim,
-        format!(
-            "#!/bin/sh\ncase \" $* \" in *\" {subcommand} \"*) {request}{guard};; esac\nexec '{}' \"$@\"\n",
-            real.trim_end()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    git_shim(
+        dir,
+        &format!(r#"case " $* " in *" {subcommand} "*) {request}{guard};; esac"#),
+    );
 }
 
 #[cfg(unix)]
@@ -1271,6 +1279,48 @@ fn ci_keeps_the_signal_when_git_stops_during_a_head_blob_read() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_keeps_a_head_blob_crash_red_and_preserves_pending_gates() {
+    let dir = repo();
+    let root = dir.path();
+    let config = "[coverage]\nlcov = \"reports/lcov.info\"\n";
+    fs::write(root.join("blackhole.toml"), config).unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "base"]).unwrap();
+    fs::write(root.join("blackhole.toml"), format!("# head\n{config}")).unwrap();
+    fs::write(root.join("a.py"), "pass\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "head"]).unwrap();
+    let blob = common::git(root, &["rev-parse", "HEAD:a.py"]).unwrap();
+    let shims = tempdir().unwrap();
+    git_shim(
+        shims.path(),
+        &format!(
+            r#"case " $* " in *" cat-file "*)
+                while IFS= read -r request; do
+                    [ "${{request##* }}" != '{blob}' ] || kill -USR1 $$
+                    printf '%s\n' "$request" | "$real" "$@" || exit $?
+                done
+                exit 0;;
+            esac"#
+        ),
+    );
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("PATH", shims.path())
+        .args(["ci", "--base", "HEAD~", "--head", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("git crashed: "), "{stdout}");
+    assert_eq!(
+        stdout.lines().last(),
+        Some("blackhole ci: red (unreadable); waiting (protected)")
+    );
 }
 
 #[cfg(unix)]

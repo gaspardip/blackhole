@@ -310,6 +310,7 @@ pub(crate) fn changes(base: &str, head: &str) -> io::Result<Vec<Change>> {
 pub(crate) struct Batch {
     child: Child,
     reader: BufReader<ChildStdout>,
+    terminal: Option<io::Error>,
 }
 impl Batch {
     pub(crate) fn start() -> io::Result<Self> {
@@ -325,9 +326,16 @@ impl Batch {
                 .take()
                 .ok_or_else(|| io::Error::other("missing git stdout"))?,
         );
-        Ok(Self { child, reader })
+        Ok(Self {
+            child,
+            reader,
+            terminal: None,
+        })
     }
     pub(crate) fn read(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        if let Some(error) = &self.terminal {
+            return Err(repeat(error));
+        }
         match self.read_blob(id) {
             Err(e)
                 if matches!(
@@ -336,11 +344,13 @@ impl Batch {
                 ) =>
             {
                 let status = self.child.wait()?;
-                if status.success() {
-                    Err(e)
+                let error = if status.success() {
+                    e
                 } else {
-                    Err(failure(status, b"git cat-file failed"))
-                }
+                    failure(status, b"git cat-file failed")
+                };
+                self.terminal = Some(repeat(&error));
+                Err(error)
             }
             result => result,
         }
@@ -378,6 +388,10 @@ impl Batch {
         Ok(bytes)
     }
     pub(crate) fn finish(mut self) -> io::Result<()> {
+        // A read already reported this failure, so waiting again would discard the gates found.
+        if self.terminal.is_some() {
+            return Ok(());
+        }
         let status = self.child.wait()?;
         if status.success() {
             Ok(())
@@ -386,6 +400,13 @@ impl Batch {
         }
     }
 }
+fn repeat(error: &io::Error) -> io::Error {
+    match crate::mark(error) {
+        Some(fault) => crate::classified(fault, error),
+        None => io::Error::new(error.kind(), error.to_string()),
+    }
+}
+
 impl Drop for Batch {
     fn drop(&mut self) {
         let _ = self.child.kill();
