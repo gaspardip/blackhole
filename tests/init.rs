@@ -1896,10 +1896,13 @@ fn workflow_step(name: &str) -> String {
         .lines()
         .skip_while(|line| *line != "        run: |");
     lines.next().unwrap();
-    lines
+    let mut script = lines
         .take_while(|line| line.is_empty() || line.starts_with("          "))
-        .map(|line| format!("{}\n", line.get(10..).unwrap_or_default()))
-        .collect()
+        .map(|line| line.get(10..).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    script.push('\n');
+    script
 }
 
 // A GitHub stand-in served over file://, with a default branch, a release branch and pull request 5 into the release branch.

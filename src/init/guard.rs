@@ -130,6 +130,23 @@ fn valid_rule(rule: &Value) -> bool {
                 }))
 }
 
+// Each source that may report the check, and whether its rule makes a pull request merge only on the current tip.
+fn ruleset_sources(rules: &[Value]) -> Vec<(Option<u64>, bool)> {
+    rules
+        .iter()
+        .filter(|rule| rule["type"] == "required_status_checks")
+        .flat_map(|rule| {
+            let strict = rule["parameters"]["strict_required_status_checks_policy"] == true;
+            rule["parameters"]["required_status_checks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|check| check["context"] == CHECK)
+                .map(move |check| (check["integration_id"].as_u64(), strict))
+        })
+        .collect()
+}
+
 // The rulesets GitHub applies to the branch, once they require pull requests and the blackhole check from GitHub Actions.
 fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, Stop> {
     let slug = &repo.slug;
@@ -158,20 +175,7 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
         page += 1;
     }
     let mut pull_requests = rules.iter().any(|rule| rule["type"] == "pull_request");
-    // Each source that may report the check, and whether its rule makes a pull request merge only on the current tip.
-    let mut sources: Vec<(Option<u64>, bool)> = rules
-        .iter()
-        .filter(|rule| rule["type"] == "required_status_checks")
-        .flat_map(|rule| {
-            let strict = rule["parameters"]["strict_required_status_checks_policy"] == true;
-            rule["parameters"]["required_status_checks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|check| check["context"] == CHECK)
-                .map(move |check| (check["integration_id"].as_u64(), strict))
-        })
-        .collect();
+    let mut sources = ruleset_sources(&rules);
     let classic = if pull_requests && sources.contains(&(Some(ACTIONS_APP), true)) {
         Classic::Absent
     } else {
