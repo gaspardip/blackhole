@@ -198,7 +198,7 @@ class Backtest(unittest.TestCase):
         self.assertEqual(git_files(), before)
 
     def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
-        path = ".github/note:1:2 ts/no-skipped-tests marker"
+        path = ".github/note\nnew.test.ts:1:2 ts/no-skipped-tests marker"
         (self.repo / path).parent.mkdir(parents=True)
         self.merge(path, "Protected change\n")
         rows, summary = self.run_backtest(self.binary)
@@ -206,6 +206,41 @@ class Backtest(unittest.TestCase):
         self.assertEqual(summary["rules"], {})
         self.assertEqual(rows[0]["findings"], [])
         self.assertEqual(rows[0]["gates"], ["protected"])
+
+    def test_coverage_gate_counts_as_coverage(self) -> None:
+        config = ROOT / "evasion/coverage-changed/base/blackhole.toml"
+        self.commit("blackhole.toml", config.read_text())
+        self.merge("covered.ts", "export const value = 1;\n")
+
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual((rows[0]["state"], rows[0]["gates"]), ("red", ["coverage"]))
+        self.assertEqual(rows[0]["findings"], [
+            {"path": None, "line": None, "rule": "coverage", "label": None},
+        ])
+        self.assertEqual(summary["rules"], {"coverage": {"changes": 1, "flag_rate": 1.0}})
+
+    def test_red_findings_without_recognized_records_are_unparsed(self) -> None:
+        self.merge("new.ts", "export const value = 1;\n")
+        binary = self.root / "fake"
+        lines = [
+            "new.ts:1:2 unknown/not-a-rule note",
+            "new.ts:1:2 ts/no-skipped-tests malformed\tmessage",
+            "blackhole ci: red (findings)",
+        ]
+        binary.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = init ]; then exec {shlex.quote(str(self.binary))} "$@"; fi\n'
+            + "printf '%s\\n' " + shlex.join(lines) + "\nexit 1\n"
+        )
+        binary.chmod(0o700)
+
+        rows, summary = self.run_backtest(binary)
+        self.assertEqual((rows[0]["state"], rows[0]["exit_code"]), ("unparsed", 1))
+        self.assertEqual(rows[0]["gates"], ["findings"])
+        self.assertEqual(rows[0]["findings"], [])
+        self.assertEqual(rows[0]["raw_output"], "\n".join(lines) + "\n")
+        self.assertEqual((summary["judged"], summary["states"]["unparsed"]), (0, 1))
+        self.assertEqual(summary["rules"], {})
 
     def test_objection_is_judged_on_the_original_commit_utc_date(self) -> None:
         self.env.update(

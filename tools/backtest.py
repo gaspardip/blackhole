@@ -13,10 +13,14 @@ from pathlib import Path
 POLICY = ("blackhole.toml", ".blackhole/ledger")
 OBJECTIONS = ".blackhole/objections"
 STATES = {0: "green", 1: "red", 3: "waiting", 75: "no_verdict"}
-FINDING = re.compile(r"^(.+?):([0-9]+):[0-9]+ ([a-z0-9-]+/[a-z0-9-]+)(?: |$)")
+DIAGNOSTIC_CHAR = r"[^\x00-\x1f\x7f-\x9f\u2028\u2029]"
+FINDING = re.compile(
+    rf"({DIAGNOSTIC_CHAR}+?):([0-9]+):[0-9]+ ([a-z0-9-]+/[a-z0-9-]+)(?: {DIAGNOSTIC_CHAR}*)?",
+)
 RED_GATES = re.compile(r"blackhole ci: red \(([a-z]+(?:, [a-z]+)*)\)")
 GATE_MESSAGE = re.compile(
-    r"^(?:protected: |objection: |coverage: |ledger line [0-9]+: )"
+    r"^(?:protected: |objection: |ledger line [0-9]+: )"
+    r"|(?:^|: )objections line [0-9]+: "
     r"|: ledger allows [0-9]+, found [0-9]+; run blackhole ledger$",
 )
 
@@ -30,8 +34,8 @@ class Change:
 
 @dataclass(frozen=True)
 class Finding:
-    path: str
-    line: int
+    path: str | None
+    line: int | None
     rule: str
     label: None = None
 
@@ -142,7 +146,9 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
     return git(tree, env, "rev-parse", "HEAD").stdout.strip()
 
 
-def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verdict:
+def judge(
+    tree: Path, env: dict[str, str], binary: Path, change: Change, rule_ids: set[str],
+) -> Verdict:
     timestamp = git(tree, env, "show", "-s", "--format=%ct", change.commit).stdout.strip()
     today = datetime.fromtimestamp(int(timestamp), UTC).date().isoformat()
     try:
@@ -165,20 +171,28 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
     git(tree, env, "commit", "--allow-empty", "-m", f"Replay {change.commit}")
     head = git(tree, env, "rev-parse", "HEAD").stdout.strip()
     result = dated_ci(tree, env, binary, base, head, today)
-    lines = result.stdout.splitlines()
+    lines = result.stdout.removesuffix("\n").split("\n") if result.stdout else []
     state = STATES.get(result.returncode, "error")
     last_line = lines[-1] if lines else None
     gates = []
     if state == "red" and last_line and (match := RED_GATES.fullmatch(last_line)):
         gates = match[1].split(", ")
+    coverage = "coverage" in gates and len(lines) >= 2 and lines[-2].startswith("coverage: ")
+    finding_lines = lines[:-2] if coverage else lines
     findings = []
     if state in {"green", "red", "waiting"}:
-        for line in lines:
+        for line in finding_lines:
             if GATE_MESSAGE.search(line):
                 continue
-            if match := FINDING.match(line):
+            if (match := FINDING.fullmatch(line)) and match[3] in rule_ids:
                 path, number, rule = match.groups()
                 findings.append(Finding(path, int(number), rule))
+    if "findings" in gates and not findings:
+        return Verdict(
+            "unparsed", today, result.returncode, last_line, gates=gates, raw_output=result.stdout,
+        )
+    if coverage:
+        findings.append(Finding(None, None, "coverage"))
     return Verdict(state, today, result.returncode, last_line, findings, gates=gates)
 
 
@@ -197,7 +211,11 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
         if any(directory.is_relative_to(source) for source in source_paths):
             raise RuntimeError(f"output or report directory is inside the source clone: {directory}")
     out.mkdir(parents=True, exist_ok=True)
-    states = Counter(dict.fromkeys((*STATES.values(), "error", "skipped", "baseline_failure"), 0))
+    rule_dir = Path(__file__).resolve().parents[1] / "rules"
+    rule_ids = {path.relative_to(rule_dir).as_posix() for path in rule_dir.glob("*/*") if path.is_dir()}
+    states = Counter(dict.fromkeys(
+        (*STATES.values(), "error", "skipped", "baseline_failure", "unparsed"), 0,
+    ))
     rules: Counter[str] = Counter()
     with tempfile.TemporaryDirectory(dir=out) as scratch:
         temp = Path(scratch)
@@ -219,7 +237,7 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
                     git(tree, env, "init", "--template=", f"--object-format={object_format}")
                     (tree / ".git/objects/info/alternates").write_bytes(os.fsencode(objects) + b"\n")
                     git(tree, env, "switch", "--detach", change.base)
-                    verdict = judge(tree, env, binary, change)
+                    verdict = judge(tree, env, binary, change, rule_ids)
                 rows.write(json.dumps({**asdict(change), **asdict(verdict)}) + "\n")
                 states[verdict.state] += 1
                 if verdict.state in {"green", "red"}:
