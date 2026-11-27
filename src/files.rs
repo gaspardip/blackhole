@@ -68,15 +68,9 @@ pub(crate) fn root() -> io::Result<PathBuf> {
     )))
 }
 
-pub(crate) fn in_checkout() -> bool {
-    env::current_dir().is_ok_and(|cwd| {
-        nearest_checkout(&cwd).is_ok_and(|dir| {
-            dir.is_some_and(|dir| {
-                let git = dir.join(".git");
-                git.is_file() || git.join("HEAD").is_file()
-            })
-        })
-    })
+// Only a search that finds no `.git` at all establishes that; a failed search or a broken marker may still be a checkout.
+pub(crate) fn outside_checkout() -> bool {
+    env::current_dir().is_ok_and(|cwd| nearest_checkout(&cwd).is_ok_and(|dir| dir.is_none()))
 }
 
 fn nearest_checkout(cwd: &Path) -> io::Result<Option<&Path>> {
@@ -212,8 +206,7 @@ pub(crate) fn list<'a>(
     for path in paths {
         let named = cwd.join(path);
         let real = resolve(&named, &mut seen).map_err(|e| {
-            let path = named.to_string_lossy();
-            crate::usage(format!("{}: {e}", crate::diagnostic_text(&path)))
+            crate::unresolvable(&crate::diagnostic_text(&named.to_string_lossy()), &e)
         })?;
         let literal = named.strip_prefix(root).ok().filter(|p| {
             !p.components()

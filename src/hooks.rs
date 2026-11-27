@@ -26,6 +26,8 @@ pub fn run(event: Event) -> ExitCode {
         Err(_) if matches!(event, Event::Stop) => Ok(Vec::new()),
         read => read,
     };
+    // Reading the policy moves the process into `.blackhole`, and a retry must resolve the payload from where the agent started.
+    let start = std::env::current_dir();
     let (bytes, (text, result)) = match payload {
         Ok(bytes) => {
             let first = attempt(event, &bytes);
@@ -35,7 +37,10 @@ pub fn run(event: Event) -> ExitCode {
                 .as_ref()
                 .is_err_and(|e| crate::fault(e) == crate::Fault::NoVerdict)
             {
-                attempt(event, &bytes)
+                match start.as_ref().map(std::env::set_current_dir) {
+                    Ok(Err(e)) => (first.0, Err(e)),
+                    _ => attempt(event, &bytes),
+                }
             } else {
                 first
             };
@@ -62,7 +67,7 @@ pub fn run(event: Event) -> ExitCode {
     } else {
         let _ = writeln!(out, "blackhole: no verdict: {cause}");
     }
-    if !crate::files::in_checkout() {
+    if crate::files::outside_checkout() {
         return ExitCode::FAILURE;
     }
     match (fault, event) {
@@ -224,16 +229,14 @@ fn edit_destination(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Op
             }
         }
     }
-    Err(crate::usage(
-        "cannot resolve edit target: too many symbolic links",
+    Err(unresolved(
+        path,
+        &io::Error::other("too many levels of symbolic links"),
     ))
 }
 
 fn unresolved(path: &Path, e: &io::Error) -> io::Error {
-    crate::usage(format!(
-        "Cannot resolve edit target {}: {e}",
-        path.display()
-    ))
+    crate::unresolvable(&format!("edit target {}", path.display()), e)
 }
 
 fn validate_target(path: &Path) -> io::Result<()> {

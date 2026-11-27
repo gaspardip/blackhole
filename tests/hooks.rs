@@ -274,7 +274,8 @@ fn stop_blocks_when_the_checkout_check_cannot_complete() {
 fn blocking_hooks_block_when_git_reports_the_wrong_checkout_root() {
     let dir = repo();
     let root = dir.path();
-    let outside = tempdir().unwrap();
+    // Exit 1 needs a directory with no `.git` above it, which the default temporary directory may not be.
+    let outside = tempfile::tempdir_in("/tmp").unwrap();
     common::git(
         root,
         &["config", "core.worktree", outside.path().to_str().unwrap()],
@@ -380,11 +381,40 @@ fn check_resolution_errors_escape_the_path() {
     let dir = repo();
     let root = dir.path();
     std::os::unix::fs::symlink("loop\n", root.join("loop\n")).unwrap();
-    let out = run(root, &["check", "loop\n/file.py"], "", 2, false);
-    assert_eq!(out.stdout, b"");
-    let error = String::from_utf8(out.stderr).unwrap();
-    assert!(error.contains(r"loop\n/file.py"), "{error:?}");
+    // A looping link is the checkout's to fix, so it is red and names the path.
+    let out = run(root, &["check", "loop\n/file.py"], "", 1, false);
+    assert_eq!(out.stderr, b"");
+    let error = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        error.contains(r"loop\n/file.py") && error.contains("remove it"),
+        "{error:?}"
+    );
     assert_eq!(error.lines().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_targets_keep_the_class_of_their_filesystem_failure() {
+    let dir = repo();
+    let root = dir.path();
+    std::os::unix::fs::symlink("loop.py", root.join("loop.py")).unwrap();
+    for event in ["pre-edit", "post-edit"] {
+        let error = String::from_utf8(hook(root, event, &edit("Write", "loop.py"), 2)).unwrap();
+        assert!(
+            error.starts_with("blackhole: cannot resolve ")
+                && error.contains("loop.py")
+                && error.contains("remove it"),
+            "{event}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_git_marker_is_not_outside_a_checkout() {
+    // The default temporary directory can sit under a stray `.git`, and this test needs one it controls.
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    assert_ne!(hook(dir.path(), "stop", &json!({}), 2), b"");
 }
 
 #[test]
@@ -563,7 +593,7 @@ fn pre_edit_refuses_unreadable_and_ambiguous_targets() {
         let err = run(dir.path(), &["hook", "pre-edit"], data, 2, false).stderr;
         assert_eq!(String::from_utf8(err).unwrap().lines().count(), 1);
     }
-    let outside = tempdir().unwrap();
+    let outside = tempfile::tempdir_in("/tmp").unwrap();
     let _ = run(outside.path(), &["hook", "pre-edit"], "{", 1, false);
 }
 
@@ -1129,11 +1159,7 @@ fn post_edit_validates_targets_before_listing() {
     let root = dir.path();
     fs::write(root.join(OsStr::from_bytes(b"non-utf8-\xff")), "").unwrap();
     let out = hook(root, "post-edit", &edit("Write", "bad\0name"), 1);
-    assert!(
-        String::from_utf8(out)
-            .unwrap()
-            .contains("Cannot resolve edit target")
-    );
+    assert!(String::from_utf8(out).unwrap().contains("cannot resolve "));
     fs::write(root.join("a[1].py"), "# noqa").unwrap();
     let expected = run(root, &["check", "a[1].py"], "", 1, false).stdout;
     assert_eq!(
@@ -1204,4 +1230,25 @@ fn check_keeps_no_verdict_for_a_stopped_machine() {
         .unwrap();
     assert_eq!(out.status.code(), Some(75), "{out:?}");
     assert_eq!(out.stdout, b"", "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_retry_judges_from_the_starting_directory() {
+    let dir = repo();
+    let root = dir.path();
+    let _ = run(root, &["init"], "", 0, false);
+    fs::write(root.join("a.py"), "# noqa").unwrap();
+    let expected = check(root, &["a.py"], 1);
+    let shims = tempdir().unwrap();
+    // The first listing runs after the policy is read from inside `.blackhole`.
+    git_killed_on(shims.path(), "ls-files", true);
+    let mut cmd = common::command(env!("CARGO_BIN_EXE_blackhole"));
+    cmd.args(["hook", "post-edit"])
+        .current_dir(root)
+        .env("PATH", shims.path());
+    let payload = edit("Write", "a.py").to_string();
+    let out = agent::run_input(&mut cmd, payload.as_bytes(), 2, false);
+    assert!(shims.path().join("killed").exists());
+    assert_eq!(out.stderr, expected);
 }

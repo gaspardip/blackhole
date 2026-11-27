@@ -120,6 +120,24 @@ pub(crate) fn unreadable(name: &str, error: &io::Error) -> io::Error {
     )
 }
 
+// A name no filesystem can hold or that leads nowhere is malformed input; any other failure keeps the class of its cause.
+// The caller escapes the name when its output does not.
+pub(crate) fn unresolvable(name: &str, error: &io::Error) -> io::Error {
+    use io::ErrorKind::{InvalidFilename, InvalidInput, NotADirectory, NotFound};
+    let message = format!("cannot resolve {name}: {error}");
+    if matches!(
+        error.kind(),
+        InvalidInput | InvalidFilename | NotFound | NotADirectory
+    ) {
+        usage(message)
+    } else {
+        classified(
+            fault(error),
+            format!("{message}; make it readable or remove it"),
+        )
+    }
+}
+
 fn classified(fault: Fault, message: impl fmt::Display) -> io::Error {
     io::Error::other(Classified {
         fault,
