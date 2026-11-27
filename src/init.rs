@@ -1,4 +1,5 @@
 mod settings_json;
+mod workflow;
 
 use settings_json::{Json, Object};
 use std::{
@@ -19,7 +20,7 @@ $names
 BLACKHOLE_GIT_ENV
 exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
 
-/// Installs project hooks and creates the initial ledger.
+/// Installs project hooks, the judge workflow and the initial ledger.
 ///
 /// # Errors
 /// Reports invalid settings, repository discovery and filesystem failures.
@@ -28,6 +29,7 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
     let _lock = crate::files::lock(&root)?;
     let claude = settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?;
     let codex = settings(&root, CODEX, "^apply_patch$")?;
+    let judge = judge_workflow(&root)?;
     let config = root.join("blackhole.toml");
     let existing = crate::files::policy(&config)?;
     // A malformed ledger or objections file would turn every hook red, so it stops init before anything is written.
@@ -37,13 +39,15 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
         crate::objections::Date::today()?,
     )?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
-    let created =
-        claude.install_then(&root, || codex.install_then(&root, || first_ledger(&root)))?;
+    let created = claude.install_then(&root, || {
+        codex.install_then(&root, || judge.install_then(&root, || first_ledger(&root)))
+    })?;
     let mut report = Vec::new();
     for (path, wrote) in [
         ("blackhole.toml", existing.is_none()),
         (CLAUDE, claude.merged.is_some()),
         (CODEX, codex.merged.is_some()),
+        (workflow::PATH, judge.merged.is_some()),
     ] {
         writeln!(report, "{} {path}", if wrote { "Wrote" } else { "Kept" })?;
     }
@@ -61,7 +65,8 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
     }
     writeln!(
         report,
-        "CI is not set up yet. Hooks give early warning. Shell edits bypass edit hooks. blackhole ci is the judge."
+        "Hooks give early warning. Shell edits bypass edit hooks.\nThe judge is the blackhole check that {} runs once it is on the default branch.",
+        workflow::PATH
     )?;
     writeln!(
         report,
@@ -116,6 +121,33 @@ fn settings<'a>(root: &Path, path: &'a str, matcher: &str) -> io::Result<Setting
         })
     };
     read().map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
+}
+
+fn judge_workflow(root: &Path) -> io::Result<Settings<'static>> {
+    let (dir, name) = parts(workflow::PATH);
+    let wanted = workflow::content().into_bytes();
+    let previous = crate::policy(crate::enter(root, dir, false)?, name)?;
+    let merged = match &previous {
+        None => Some(wanted),
+        Some(existing) if *existing == wanted => None,
+        Some(existing) => {
+            let line = 1 + existing
+                .split(|&b| b == b'\n')
+                .zip(wanted.split(|&b| b == b'\n'))
+                .take_while(|(a, b)| a == b)
+                .count();
+            return Err(io::Error::other(format!(
+                "{} differs from the workflow blackhole {} writes, first at line {line}; remove it and rerun init",
+                workflow::PATH,
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+    };
+    Ok(Settings {
+        path: workflow::PATH,
+        previous,
+        merged,
+    })
 }
 
 fn optional(value: Option<&Json>, valid: impl FnOnce(&Json) -> bool) -> bool {
@@ -331,7 +363,10 @@ fn install(root: &Path, path: &str, data: Option<&[u8]>) -> io::Result<()> {
         return Ok(());
     };
     let (dir, name) = parts(path);
-    crate::enter(root, dir, true)?;
+    // Each level of `.github/workflows` can be missing.
+    for (end, _) in dir.match_indices('/').chain([(dir.len(), "")]) {
+        crate::enter(root, &dir[..end], true)?;
+    }
     crate::replace(name, data)
 }
 

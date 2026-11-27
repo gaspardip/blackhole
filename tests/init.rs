@@ -10,6 +10,7 @@ use std::{fs, path::Path};
 use tempfile::tempdir;
 
 const HOOK_FILES: [&str; 2] = [".claude/settings.json", ".codex/hooks.json"];
+const WORKFLOW: &str = ".github/workflows/blackhole.yml";
 
 const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
 while IFS= read -r name; do
@@ -60,7 +61,7 @@ fn installs_and_merges_once() {
         fs::create_dir(p.parent().unwrap()).unwrap();
         fs::write(p, original.to_string()).unwrap();
     }
-    assert!(init(root, true).contains("CI"));
+    assert!(init(root, true).contains("The judge is the blackhole check"));
     assert_eq!(
         fs::read(root.join("blackhole.toml")).unwrap(),
         b"exclude=[]"
@@ -795,4 +796,87 @@ fn narrower_guards_get_a_full_one_beside_them() {
         group["hooks"][0]["command"] = json!(previous_launcher(cmd));
         Some(group)
     });
+}
+
+#[test]
+fn writes_the_judge_workflow_pinned_to_this_version() {
+    let dir = repo();
+    let root = dir.path();
+    let report = init(root, true);
+    assert!(
+        report
+            .lines()
+            .any(|line| line == format!("Wrote {WORKFLOW}"))
+    );
+    let text = fs::read_to_string(root.join(WORKFLOW)).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(text.contains(&format!(
+        "npm install --ignore-scripts --save-exact --no-audit --no-fund @gaspardip/blackhole@{version}\n"
+    )));
+    assert!(text.contains("\n          npm audit signatures\n"));
+    assert!(text.contains(&format!("= \"blackhole {version}\"\n")));
+    assert!(text.contains(
+        "\non:\n  pull_request_target:\n    types: [opened, reopened, synchronize, edited]\n\npermissions: {}\n"
+    ));
+    assert!(!text.contains("pull_request:") && !text.contains("pull_request_review"));
+    assert_eq!(text.matches("permissions:").count(), 2);
+    assert!(text.contains(
+        "\n    permissions:\n      contents: read\n      pull-requests: read\n    env:\n"
+    ));
+    assert!(text.contains("\n  blackhole:\n    name: blackhole\n    runs-on:"));
+    // The head is fetched as objects into a bare repository and judged there, never checked out or run.
+    assert!(!text.contains("actions/checkout") && !text.contains("checkout -"));
+    assert!(text.contains("git init -q --bare \"${repo}\""));
+    assert!(text.contains("\"refs/pull/${PR_NUMBER}/head:refs/judge/head\""));
+    assert!(text.contains(
+        "(cd \"${RUNNER_TEMP}/judge.git\" && \"${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole\" ci \\\n            --base \"${BASE_SHA}\" --head \"${HEAD_SHA}\" --approvals \"${RUNNER_TEMP}/approvals.json\")"
+    ));
+    let uses: Vec<_> = text.lines().filter(|line| line.contains("uses:")).collect();
+    assert_ne!(uses.len(), 0);
+    for line in uses {
+        let (_, pin) = line.split_once('@').unwrap();
+        let (sha, tag) = pin.split_once(' ').unwrap();
+        assert!(
+            sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert!(tag.starts_with("# v"), "{line}");
+    }
+}
+
+#[test]
+fn keeps_an_identical_workflow_and_refuses_a_different_one() {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let path = root.join(WORKFLOW);
+    let generated = fs::read(&path).unwrap();
+    assert!(
+        init(root, true)
+            .lines()
+            .any(|line| line == format!("Kept {WORKFLOW}"))
+    );
+    assert_eq!(fs::read(&path).unwrap(), generated);
+
+    let fresh = repo();
+    let root = fresh.path();
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    let edited = String::from_utf8(generated.clone()).unwrap().replacen(
+        "pull_request_target",
+        "pull_request",
+        1,
+    );
+    fs::write(root.join(WORKFLOW), &edited).unwrap();
+    let message = init(root, false);
+    assert_eq!(message.lines().count(), 1);
+    assert!(message.contains(WORKFLOW), "{message}");
+    assert!(message.contains("first at line 5"), "{message}");
+    assert!(message.contains("remove it and rerun init"), "{message}");
+    assert_eq!(fs::read_to_string(root.join(WORKFLOW)).unwrap(), edited);
+    for name in HOOK_FILES
+        .into_iter()
+        .chain(["blackhole.toml", ".blackhole/ledger"])
+    {
+        assert!(!root.join(name).exists(), "{name}");
+    }
 }
