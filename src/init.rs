@@ -262,14 +262,23 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                 r#"if root=$({root} 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; exec blackhole hook {cmd}"#
             )
         };
-        // `core.worktree` can point git elsewhere, so the local binary must sit beside the nearest `.git`.
+        let global = format!(
+            r#"command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; exec blackhole hook {cmd}"#
+        );
+        let nearest = r#"dir=$(pwd -P) && while [ "$dir" != / ] && [ ! -e "$dir/.git" ] && [ ! -L "$dir/.git" ]; do dir=${dir%/*}; dir=${dir:-/}; done && { [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; }"#;
+        let top =
+            format!(r#"root=$({ISOLATED_ROOT} 2>/dev/null) && top=$(cd -P -- "$root" && pwd -P)"#);
+        // `core.worktree` can point git elsewhere, so the local binary must sit beside the nearest `.git`; without git it still runs, to report no verdict.
         let command = format!(
-            r#"if root=$({ISOLATED_ROOT} 2>/dev/null) && top=$(cd -P -- "$root" && pwd -P) && dir=$(pwd -P) && while [ "$dir" != / ] && [ ! -e "$dir/.git" ] && [ ! -L "$dir/.git" ]; do dir=${{dir%/*}}; dir=${{dir:-/}}; done && {{ [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; }} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; exec blackhole hook {cmd}"#
+            r#"if {nearest} && local_bin="$dir/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ] && {{ ! command -v git >/dev/null 2>&1 || {{ {top} && [ "$dir" = "$top" ]; }}; }}; then exec "$local_bin" hook {cmd}; fi; {global}"#
         );
         let known = [
             format!("blackhole hook {cmd}"),
             launcher(PREVIOUS_ROOT),
             launcher(ISOLATED_ROOT),
+            format!(
+                r#"if {top} && {nearest} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; {global}"#
+            ),
         ];
         let mut found = false;
         for group in entries.iter_mut().filter_map(Json::as_object_mut) {

@@ -29,6 +29,12 @@ fn previous_launcher(event: &str) -> String {
     old_launcher("git --no-lazy-fetch rev-parse --show-toplevel", event)
 }
 
+fn checked_launcher(event: &str) -> String {
+    format!(
+        r#"if root=$({ISOLATED_ROOT} 2>/dev/null) && top=$(cd -P -- "$root" && pwd -P) && dir=$(pwd -P) && while [ "$dir" != / ] && [ ! -e "$dir/.git" ] && [ ! -L "$dir/.git" ]; do dir=${{dir%/*}}; dir=${{dir:-/}}; done && {{ [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; }} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {event}; fi; command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {event} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; exec blackhole hook {event}"#
+    )
+}
+
 fn init(root: &Path, success: bool) -> String {
     let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
     // A run that fails reports no file as written.
@@ -48,6 +54,7 @@ fn installs_and_merges_once() {
                     {"type":"command","command":"blackhole hook stop"},
                     {"type":"command","command":previous_launcher("stop")},
                     {"type":"command","command":old_launcher(ISOLATED_ROOT, "stop")},
+                    {"type":"command","command":checked_launcher("stop")},
                     {"type":"command","command":"second"}
                 ]}
             ],
@@ -80,8 +87,9 @@ fn installs_and_merges_once() {
         assert_ne!(stop, "blackhole hook stop");
         assert_ne!(stop, &Value::String(previous_launcher("stop")));
         assert_ne!(stop, &Value::String(old_launcher(ISOLATED_ROOT, "stop")));
+        assert_ne!(stop, &Value::String(checked_launcher("stop")));
         let mut upgraded = original.clone();
-        for index in [0, 1, 2] {
+        for index in [0, 1, 2, 3] {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
         }
         for event in ["PreToolUse", "PostToolUse"] {
@@ -795,4 +803,41 @@ fn narrower_guards_get_a_full_one_beside_them() {
         group["hooks"][0]["command"] = json!(previous_launcher(cmd));
         Some(group)
     });
+}
+
+#[test]
+fn the_local_launcher_releases_the_stop_guard_without_git() {
+    use std::os::unix::fs::symlink;
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "/node_modules/\n").unwrap();
+    init(root, true);
+    let local = root.join("node_modules/.bin/blackhole");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    symlink(env!("CARGO_BIN_EXE_blackhole"), &local).unwrap();
+    let empty = tempdir().unwrap();
+    for name in HOOK_FILES {
+        let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+        let command = doc["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        // Without git the checkout cannot be judged, and only that outage lets a continued turn stop.
+        for (active, status) in [(true, 0), (false, 2)] {
+            let output = agent::run_input(
+                common::command("/bin/sh")
+                    .args(["-c", command])
+                    .current_dir(root)
+                    .env("PATH", empty.path()),
+                json!({"stop_hook_active": active}).to_string().as_bytes(),
+                status,
+                false,
+            );
+            assert!(
+                output
+                    .stderr
+                    .starts_with(b"blackhole: no verdict: cannot run git: "),
+                "{name} {active}: {output:?}"
+            );
+        }
+    }
 }
