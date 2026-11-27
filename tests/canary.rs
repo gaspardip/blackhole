@@ -555,6 +555,40 @@ fn a_successful_job_with_no_judge_summary_has_no_verdict() {
 }
 
 #[test]
+fn an_actions_check_without_a_job_does_not_hide_the_judge() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    let checks = [98, 99].map(|id| {
+        serde_json::json!({
+            "id": id,
+            "status": "completed",
+            "conclusion": "failure",
+            "app": {"id": 15368},
+        })
+    });
+    let runs = serde_json::json!({"check_runs": checks});
+    adopter
+        .fake
+        .respond("GET", CHECKS, 200, &[], runs.to_string().as_bytes());
+    let stray_job = "repos/owner/repo/actions/jobs/98";
+    adopter.fake.respond("GET", stray_job, 404, &[], b"{}");
+    let (out, code) = canary(&adopter, &["--timeout", "0"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("ledger: raise a ledger allowance: stopped\n"),
+        "{out}"
+    );
+    let calls = adopter.fake.calls();
+    let stray = calls
+        .iter()
+        .position(|call| call.ends_with(stray_job))
+        .unwrap();
+    let judge_log = calls.iter().position(|call| call.ends_with(LOGS)).unwrap();
+    assert!(stray < judge_log, "{calls:#?}");
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
 fn a_check_from_another_workflow_has_no_verdict() {
     let adopter = adopted();
     finished(&adopter, "failure", RED);

@@ -83,11 +83,11 @@ fn call(
     method: &str,
     endpoint: &str,
     args: &[&str],
-    want: u16,
+    want: &[u16],
 ) -> io::Result<Response> {
     let response = github::api(&repo.host, method, endpoint, args)
         .map_err(|failure| io::Error::other(failure.to_string()))?;
-    if response.status == want {
+    if want.contains(&response.status) {
         Ok(response)
     } else {
         Err(io::Error::other(format!(
@@ -318,7 +318,7 @@ impl Run<'_> {
                 "-F",
                 "draft=true",
             ],
-            201,
+            &[201],
         )?;
         let number = json(&created)?["number"]
             .as_u64()
@@ -327,7 +327,7 @@ impl Run<'_> {
             format!("repos/{slug}/commits/{head}/check-runs?check_name={CHECK}&per_page=100");
         let deadline = Instant::now() + self.timeout;
         let (run, id, base_sha) = 'poll: loop {
-            let runs = json(&call(self.repo, "GET", &endpoint, &[], 200)?)?;
+            let runs = json(&call(self.repo, "GET", &endpoint, &[], &[200])?)?;
             for run in runs["check_runs"].as_array().into_iter().flatten() {
                 if run["app"]["id"].as_u64() != Some(ACTIONS_APP) || run["status"] != "completed" {
                     continue;
@@ -365,7 +365,7 @@ impl Run<'_> {
             "GET",
             &format!("repos/{slug}/actions/jobs/{id}/logs"),
             &[],
-            200,
+            &[200],
         )?;
         Ok(Outcome::Judged {
             conclusion: conclusion.to_owned(),
@@ -374,14 +374,17 @@ impl Run<'_> {
     }
     fn judge_base(&self, job_id: u64, number: u64) -> io::Result<Option<String>> {
         let slug = &self.repo.slug;
-        let job = json(&call(
+        let job = call(
             self.repo,
             "GET",
             &format!("repos/{slug}/actions/jobs/{job_id}"),
             &[],
-            200,
-        )?)?;
-        let Some(run_id) = job["run_id"].as_u64() else {
+            &[200, 404],
+        )?;
+        if job.status == 404 {
+            return Ok(None);
+        }
+        let Some(run_id) = json(&job)?["run_id"].as_u64() else {
             return Ok(None);
         };
         let run = json(&call(
@@ -389,7 +392,7 @@ impl Run<'_> {
             "GET",
             &format!("repos/{slug}/actions/runs/{run_id}"),
             &[],
-            200,
+            &[200],
         )?)?;
         if run["event"] != "pull_request_target" || run["path"] != WORKFLOW_PATH {
             return Ok(None);
@@ -410,13 +413,13 @@ impl Run<'_> {
             "repos/{}/contents/{WORKFLOW_PATH}?ref={base_sha}",
             self.repo.slug
         );
-        let response = github::api(
-            &self.repo.host,
+        let response = call(
+            self.repo,
             "GET",
             &endpoint,
             &["-H", "Accept: application/vnd.github.raw"],
-        )
-        .map_err(|failure| io::Error::other(failure.to_string()))?;
+            &[200, 404],
+        )?;
         Ok(response.status == 200 && response.body == workflow::content().as_bytes())
     }
 }
@@ -502,7 +505,7 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
         "GET",
         &format!("repos/{}", repo.slug),
         &[],
-        200,
+        &[200],
     )?)?;
     let base = info["default_branch"]
         .as_str()
