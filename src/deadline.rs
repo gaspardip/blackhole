@@ -7,7 +7,7 @@ use std::{
 };
 
 // Leave time to block before Claude Code and Codex cancel their command hooks at 600 seconds.
-const LIMIT: Duration = Duration::from_secs(30);
+const LIMIT: Duration = Duration::from_secs(300);
 
 struct Run {
     activity: String,
