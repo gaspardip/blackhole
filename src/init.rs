@@ -158,8 +158,8 @@ fn judge_workflow(root: &Path) -> io::Result<Settings<'static>> {
         Some(existing) if *existing == wanted => None,
         Some(existing) => {
             let line = 1 + existing
-                .split(|&b| b == b'\n')
-                .zip(wanted.split(|&b| b == b'\n'))
+                .split_inclusive(|&b| b == b'\n')
+                .zip(wanted.split_inclusive(|&b| b == b'\n'))
                 .take_while(|(a, b)| a == b)
                 .count();
             return Err(io::Error::other(format!(

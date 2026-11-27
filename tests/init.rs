@@ -905,6 +905,23 @@ fn keeps_an_identical_workflow_and_refuses_a_different_one() {
     }
 }
 
+#[test]
+fn a_truncated_workflow_reports_the_first_missing_line() {
+    let generated = generated_workflow();
+    let prefix: Vec<_> = generated
+        .split_inclusive(|&byte| byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    fs::write(root.join(WORKFLOW), prefix).unwrap();
+    let message = init(root, false);
+    assert!(message.contains("first at line 3;"), "{message}");
+}
+
 const SCOPES: (&str, &str) = ("X-Oauth-Scopes", "repo, read:org");
 const RULES: &str = "repos/owner/repo/rules/branches/main?per_page=100";
 const CLASSIC: &str = "repos/owner/repo/branches/main/protection";
