@@ -258,6 +258,9 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
                     tree = Path(replay)
                     git(tree, env, "init", "--template=", f"--object-format={object_format}")
                     (tree / ".git/objects/info/alternates").write_bytes(os.fsencode(objects) + b"\n")
+                    # ci reads committed blobs, so the checkout the local commands scan must hold the same bytes.
+                    (tree / ".git/info").mkdir()
+                    (tree / ".git/info/attributes").write_text("* -text !eol -working-tree-encoding -filter -ident\n")
                     git(tree, env, "switch", "--detach", change.base)
                     verdict = judge(tree, env, binary, change)
                 rows.write(json.dumps({**asdict(change), **asdict(verdict)}) + "\n")

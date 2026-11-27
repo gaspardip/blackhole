@@ -278,6 +278,20 @@ class Backtest(unittest.TestCase):
             [(clean, "red", ["findings"])],
         )
 
+    def test_baseline_reads_committed_bytes_whatever_the_checkout_encoding(self) -> None:
+        with (self.repo / ".gitattributes").open("a") as attributes:
+            attributes.write("encoded.test.ts working-tree-encoding=ISO-8859-1\n")
+        (self.repo / "encoded.test.ts").write_bytes('test.skip("caf\u00e9", () => {});\n'.encode("latin-1"))
+        self.git("add", ".gitattributes", "encoded.test.ts")
+        self.git("commit", "-qm", "encoded")
+        clean, _, _ = self.merge("clean.ts", "export const value = 1;\n")
+
+        rows, _ = self.run_backtest(self.binary)
+        self.assertEqual(
+            [(row["commit"], row["state"], row["gates"]) for row in rows],
+            [(clean, "green", [])],
+        )
+
     def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
         path = ".github/note\nnew.test.ts:1:2 ts/no-skipped-tests marker"
         (self.repo / path).parent.mkdir(parents=True)
