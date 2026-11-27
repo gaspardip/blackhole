@@ -70,13 +70,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// What a failed command leaves to its caller; an error without a fault is no verdict.
+/// What a failed command leaves to its caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
     /// The caller typed something invalid.
     Usage,
     /// The checkout's own content cannot be judged, which is the author's to fix.
     Red,
+    /// Something outside the checkout's control kept the tool from judging.
+    NoVerdict,
 }
 
 #[derive(Debug)]
@@ -101,6 +103,23 @@ pub(crate) fn red(message: impl fmt::Display) -> io::Error {
     classified(Fault::Red, message)
 }
 
+/// Marks a failure outside the checkout's control.
+#[must_use]
+pub fn no_verdict(message: impl fmt::Display) -> io::Error {
+    classified(Fault::NoVerdict, message)
+}
+
+// Classified by the cause, so a resource failure while reading stays no verdict.
+pub(crate) fn unreadable(name: &str, error: &io::Error) -> io::Error {
+    classified(
+        fault(error),
+        format!(
+            "cannot read {}: {error}; make it readable or remove it",
+            diagnostic_text(name)
+        ),
+    )
+}
+
 fn classified(fault: Fault, message: impl fmt::Display) -> io::Error {
     io::Error::other(Classified {
         fault,
@@ -108,11 +127,36 @@ fn classified(fault: Fault, message: impl fmt::Display) -> io::Error {
     })
 }
 
-/// The fault an error was created with, or `None` when the tool could not judge.
-#[must_use]
-pub fn fault(error: &io::Error) -> Option<Fault> {
+/// The fault an error was marked with where it was created.
+pub(crate) fn mark(error: &io::Error) -> Option<Fault> {
     let classified = error.get_ref()?.downcast_ref::<Classified>()?;
     Some(classified.fault)
+}
+
+/// Classifies an error from a command that judges the checkout.
+///
+/// The checkout's content can cause any unmarked failure, so it is red unless the system ran out of a resource.
+#[must_use]
+pub fn fault(error: &io::Error) -> Fault {
+    use io::ErrorKind::{
+        Interrupted, OutOfMemory, QuotaExceeded, ResourceBusy, StorageFull, TimedOut, WouldBlock,
+    };
+    mark(error).unwrap_or_else(|| {
+        if matches!(
+            error.kind(),
+            Interrupted
+                | OutOfMemory
+                | QuotaExceeded
+                | ResourceBusy
+                | StorageFull
+                | TimedOut
+                | WouldBlock
+        ) {
+            Fault::NoVerdict
+        } else {
+            Fault::Red
+        }
+    })
 }
 
 /// Checks the selected files and returns whether any rule was violated.
@@ -316,7 +360,7 @@ fn scan(
         names,
         (),
         |()| inventory(root, listing),
-        |(), name| files::read(&root.join(name)),
+        |(), name| files::read(&root.join(name)).map_err(|e| unreadable(name, &e)),
     )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;

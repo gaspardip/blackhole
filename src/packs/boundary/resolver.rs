@@ -36,7 +36,14 @@ impl<'a> Reader<'a> {
         self.read
             .lock()
             .map_err(|_| io::Error::other("repository reader lock poisoned"))?(name)
-        .map_err(|e| io::Error::new(e.kind(), format!("{name:?}: {e}")))
+        .map_err(|e| {
+            // A classified error already names the path and must keep its class.
+            if crate::mark(&e).is_some() {
+                e
+            } else {
+                io::Error::new(e.kind(), format!("{name:?}: {e}"))
+            }
+        })
     }
     fn read_config(&self, name: &str) -> io::Result<Vec<u8>> {
         if self.reads.fetch_add(1, Ordering::Relaxed) >= MAX_READS {

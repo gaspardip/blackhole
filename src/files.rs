@@ -52,17 +52,20 @@ pub(crate) fn resolve(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
 // Found once per run: a repository that appears under the tree later must not move the ledger.
 pub(crate) fn root() -> io::Result<PathBuf> {
     let cwd = env::current_dir()?;
+    let dir = nearest_checkout(&cwd)?.ok_or_else(|| crate::usage("not inside a git checkout"))?;
     let output = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let top = std::str::from_utf8(output.strip_suffix(b"\n").unwrap_or(&output))
         .map_err(io::Error::other)?;
     let top = fs::canonicalize(top)?;
     // `core.worktree` can send git anywhere, so its answer must be where the nearest `.git` sits.
-    if let Some(dir) = nearest_checkout(&cwd)?
-        && fs::canonicalize(dir)? == top
-    {
+    if fs::canonicalize(dir)? == top {
         return Ok(top);
     }
-    Err(io::Error::other("checkout root mismatch"))
+    Err(crate::red(format!(
+        "checkout root mismatch: git reports {}, but the nearest .git is in {}; make core.worktree name this checkout or remove the stray .git",
+        crate::diagnostic_text(&top.to_string_lossy()),
+        crate::diagnostic_text(&dir.to_string_lossy()),
+    )))
 }
 
 pub(crate) fn in_checkout() -> bool {
@@ -322,7 +325,7 @@ pub(crate) fn repository_paths<'a>(
         let virtual_path = Path::new("/").join(name);
         match fs::symlink_metadata(&real) {
             Ok(meta) if meta.is_symlink() => {
-                let target = fs::read_link(&real)?;
+                let target = fs::read_link(&real).map_err(|e| crate::unreadable(name, &e))?;
                 let target = match target.strip_prefix(root) {
                     Ok(local) => {
                         let up: PathBuf =
@@ -342,7 +345,7 @@ pub(crate) fn repository_paths<'a>(
                     e.kind(),
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) => {}
-            Err(e) => return Err(io::Error::new(e.kind(), format!("{name:?}: {e}"))),
+            Err(e) => return Err(crate::unreadable(name, &e)),
         }
     }
     Ok(paths)

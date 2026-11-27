@@ -32,8 +32,12 @@ fn failure(out: &Output) -> io::Error {
             .to_owned(),
     )
 }
+// Git missing or unable to start is the machine's problem, never the checkout's.
+fn start(error: &io::Error) -> io::Error {
+    crate::no_verdict(format!("cannot run git: {error}"))
+}
 pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
-    let out = command.output()?;
+    let out = command.output().map_err(|e| start(&e))?;
     if out.status.success() {
         Ok(out.stdout)
     } else {
@@ -64,7 +68,8 @@ pub(crate) fn commit(rev: &str) -> io::Result<String> {
 pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
     let out = command()
         .args(["merge-base", "--is-ancestor", base, head])
-        .output()?;
+        .output()
+        .map_err(|e| start(&e))?;
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -87,7 +92,15 @@ pub(crate) struct Tree(BTreeMap<String, Entry>);
 impl Tree {
     pub(crate) fn load(sha: &str) -> io::Result<Self> {
         let mut entries = BTreeMap::new();
-        let listing = run(&["ls-tree", "--full-tree", "-r", "-t", "-z", sha])?;
+        let listing = String::from_utf8(output(command().args([
+            "ls-tree",
+            "--full-tree",
+            "-r",
+            "-t",
+            "-z",
+            sha,
+        ]))?)
+        .map_err(|_| crate::red(format!("commit {sha} has a path that is not valid UTF-8")))?;
         for line in listing.split_terminator('\0') {
             let (header, path) = line
                 .split_once('\t')
@@ -109,7 +122,10 @@ impl Tree {
         match self.0.get(path) {
             None => Ok(None),
             Some(Entry::File(id)) => batch.read(id).map(Some),
-            Some(_) => Err(io::Error::other(format!("{path} must be a regular blob"))),
+            Some(_) => Err(crate::red(format!(
+                "{} must be a regular blob",
+                crate::diagnostic_text(path)
+            ))),
         }
     }
     pub(crate) fn paths(&self) -> impl Iterator<Item = &str> {
@@ -127,7 +143,12 @@ impl Tree {
                     paths.files.insert(path);
                 }
                 Entry::Link(id) => {
-                    let target = String::from_utf8(batch.read(id)?).map_err(io::Error::other)?;
+                    let target = String::from_utf8(batch.read(id)?).map_err(|_| {
+                        crate::red(format!(
+                            "{}: link target is not valid UTF-8",
+                            crate::diagnostic_text(name)
+                        ))
+                    })?;
                     paths.links.insert(path, target.into());
                 }
                 Entry::Other => (),
@@ -144,7 +165,10 @@ impl Tree {
         match self.resolve_blob(path, batch)? {
             Blob::File(id) => Ok(Some(id)),
             Blob::Absent => Ok(None),
-            Blob::UnresolvedLink => Err(io::Error::other("link target is not in the commit")),
+            Blob::UnresolvedLink => Err(crate::red(format!(
+                "{}: link target is not in the commit; point the link at a file in the commit or remove it",
+                crate::diagnostic_text(path)
+            ))),
         }
     }
 
@@ -255,7 +279,8 @@ impl Batch {
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(|e| start(&e))?;
         let reader = BufReader::new(
             child
                 .stdout

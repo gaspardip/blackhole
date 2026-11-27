@@ -280,27 +280,84 @@ fn blocking_hooks_block_when_git_reports_the_wrong_checkout_root() {
         &["config", "core.worktree", outside.path().to_str().unwrap()],
     )
     .unwrap();
+    // The checkout's own git configuration is the author's to fix, so the loop guard does not release it.
     for (event, payload) in [
         ("stop", json!({})),
-        ("stop", json!({"stop_hook_active":false})),
+        ("stop", json!({"stop_hook_active":true})),
         ("pre-edit", edit("Write", "a.py")),
         ("post-edit", edit("Write", "a.py")),
     ] {
         let error = String::from_utf8(hook(root, event, &payload, 2)).unwrap();
-        assert_eq!(
-            error, "blackhole: no verdict: checkout root mismatch\n",
-            "{event}"
+        assert!(
+            error.starts_with("blackhole: checkout root mismatch"),
+            "{event}: {error}"
         );
+        assert_eq!(error.lines().count(), 1);
         assert_ne!(hook(outside.path(), event, &payload, 1), b"");
     }
-    // Claude and Codex set this flag when a stop hook already continued the turn, so an outage cannot loop forever.
-    let released =
-        String::from_utf8(hook(root, "stop", &json!({"stop_hook_active":true}), 0)).unwrap();
+}
+
+fn stop_without_git(root: &Path, active: bool, status: i32) -> String {
+    let empty = tempdir().unwrap();
+    let mut cmd = common::command(env!("CARGO_BIN_EXE_blackhole"));
+    cmd.args(["hook", "stop"])
+        .current_dir(root)
+        .env("PATH", empty.path());
+    let payload = json!({"stop_hook_active":active}).to_string();
+    let out = agent::run_input(&mut cmd, payload.as_bytes(), status, false);
+    assert_eq!(out.stdout, b"");
+    String::from_utf8(out.stderr).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_loop_guard_releases_only_when_the_environment_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let active = json!({"stop_hook_active":true});
+    let dir = repo();
+    let root = dir.path();
+    std::os::unix::fs::symlink("loop.py", root.join("loop.py")).unwrap();
+    let error = String::from_utf8(hook(root, "stop", &active, 2)).unwrap();
     assert!(
-        released.starts_with("blackhole: no verdict: checkout root mismatch;"),
+        error.starts_with("blackhole: cannot read loop.py: ") && error.contains("remove it"),
+        "{error}"
+    );
+    fs::remove_file(root.join("loop.py")).unwrap();
+
+    let secret = root.join("secret.py");
+    fs::write(&secret, "pass").unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    // A privileged user reads the file anyway, and then there is nothing to refuse.
+    if fs::File::open(&secret).is_err() {
+        let error = String::from_utf8(hook(root, "stop", &active, 2)).unwrap();
+        assert!(
+            error.starts_with("blackhole: cannot read secret.py: "),
+            "{error}"
+        );
+    }
+    fs::remove_file(&secret).unwrap();
+
+    fs::write(root.join(".git/config"), "[broken").unwrap();
+    common::git(root, &["status"]).unwrap_err();
+    let error = String::from_utf8(hook(root, "stop", &active, 2)).unwrap();
+    assert!(
+        error.starts_with("blackhole: ") && !error.contains("no verdict"),
+        "{error}"
+    );
+    fs::write(root.join(".git/config"), "").unwrap();
+
+    // Claude and Codex set this flag when a stop hook already continued the turn, so an outage cannot loop forever.
+    let released = stop_without_git(root, true, 0);
+    assert!(
+        released.starts_with("blackhole: no verdict: ")
+            && released
+                .trim_end()
+                .ends_with("the judgment could not run, so the agent may stop"),
         "{released}"
     );
     assert_eq!(released.lines().count(), 1);
+    let blocked = stop_without_git(root, false, 2);
+    assert!(blocked.starts_with("blackhole: no verdict: "), "{blocked}");
 }
 
 #[cfg(unix)]

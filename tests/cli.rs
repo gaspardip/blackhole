@@ -163,8 +163,13 @@ fn path_filters_use_directory_components() {
 
 #[test]
 fn outside_repository() {
-    let out = check(tempdir().unwrap().path(), &[], 75);
-    assert!(out.stderr.starts_with(b"blackhole: no verdict: "));
+    // The default temporary directory can sit under a stray `.git`, which is red, not outside a checkout.
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let out = check(dir.path(), &[], 2);
+    assert!(
+        out.stderr
+            .starts_with(b"blackhole: not inside a git checkout")
+    );
 }
 
 #[cfg(unix)]
@@ -179,7 +184,7 @@ fn invalid_path_is_an_error() {
 
 const HEADER: &str = "blackhole-ledger 1\n";
 const RULE: &str = "core/no-suppression";
-const MISMATCH: &[u8] = b"blackhole: no verdict: checkout root mismatch\n";
+const MISMATCH: &[u8] = b"blackhole: checkout root mismatch: ";
 
 fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
     fs::create_dir_all(dir.join(".blackhole")).unwrap();
@@ -735,7 +740,12 @@ fn ci_reads_a_link_the_way_a_checkout_does() {
     ] {
         symlink(target, root.join("loop.py")).unwrap();
         commit(root);
-        run(root, &ci, 75);
+        let out = String::from_utf8(run(root, &ci, 1).stdout).unwrap();
+        assert!(
+            out.starts_with("loop.py: link target is not in the commit")
+                && out.ends_with("\nblackhole ci: red (unreadable)\n"),
+            "{target}: {out}"
+        );
         fs::remove_file(root.join("loop.py")).unwrap();
     }
 }
@@ -1126,9 +1136,9 @@ fn mismatched_root_is_rejected_before_locking() {
             .unwrap();
         wait_for_exit(&mut child);
         let out = child.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(75));
-        assert_eq!(out.stdout, b"");
-        assert_eq!(out.stderr, MISMATCH);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.starts_with(MISMATCH), "{out:?}");
+        assert_eq!(out.stderr, b"");
         assert_eq!(
             fs::read(main.path().join(".blackhole/ledger")).unwrap(),
             before
@@ -1150,13 +1160,13 @@ fn configured_worktree_must_resolve_to_the_checkout() {
     // Git walks past an entry named `.git` that is no repository; the root it then answers is not the nearest.
     let stray = root.join("stray");
     fs::create_dir_all(stray.join(".git")).unwrap();
-    assert_eq!(check(&stray, &[], 75).stderr, MISMATCH);
+    assert!(check(&stray, &[], 1).stdout.starts_with(MISMATCH));
     // A relative value is read from the git directory, so this one names the checkout itself.
     git(root, &["config", "core.worktree", ".."]);
     assert_eq!(check(&sub, &[], 1).stdout, expected);
     for value in [other.path().to_str().unwrap(), sub.to_str().unwrap(), "."] {
         git(root, &["config", "core.worktree", value]);
-        assert_eq!(check(root, &[], 75).stderr, MISMATCH);
+        assert!(check(root, &[], 1).stdout.starts_with(MISMATCH));
         assert_eq!(names(other.path()), [".git"]);
     }
 }
@@ -1264,6 +1274,18 @@ fn check_exit_codes_name_the_verdict_state() {
     assert!(usage.starts_with(b"blackhole: no files match "));
     fs::write(root.join("a.py"), "#noqa").unwrap();
     check(root, &[], 1);
+    let empty = tempdir().unwrap();
+    let out = command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("PATH", empty.path())
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    assert!(
+        out.stderr
+            .starts_with(b"blackhole: no verdict: cannot run git: ")
+    );
 }
 
 #[test]

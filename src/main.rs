@@ -50,8 +50,24 @@ const WAITING: u8 = 3;
 // Exit 75, EX_TEMPFAIL: the tool could not judge, so the caller retries or reports instead of reading a verdict.
 const NO_VERDICT: u8 = 75;
 
+// The tool's own output failing says nothing about the checkout.
+struct Output<'a>(io::StdoutLock<'a>);
+
+impl Write for Output<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes).map_err(|e| output(&e))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush().map_err(|e| output(&e))
+    }
+}
+
+fn output(error: &io::Error) -> io::Error {
+    blackhole_check::no_verdict(format!("cannot write output: {error}"))
+}
+
 fn main() -> ExitCode {
-    let mut out = io::stdout().lock();
+    let mut out = Output(io::stdout().lock());
     let command = Args::parse().command;
     let ci = matches!(command, Action::Ci { .. });
     let result = match command {
@@ -99,19 +115,19 @@ fn main() -> ExitCode {
     };
     // A closed pipe must not change the exit code, which is the verdict.
     let code = match blackhole_check::fault(&error) {
-        Some(Fault::Usage) => {
+        Fault::Usage => {
             let _ = writeln!(io::stderr().lock(), "blackhole: {error}");
             2
         }
-        Some(Fault::Red) => {
+        Fault::Red => {
             let _ = writeln!(out, "blackhole: {error}");
             1
         }
-        None if ci => {
+        Fault::NoVerdict if ci => {
             let _ = writeln!(out, "blackhole ci: no verdict: {error}");
             NO_VERDICT
         }
-        None => {
+        Fault::NoVerdict => {
             let _ = writeln!(io::stderr().lock(), "blackhole: no verdict: {error}");
             NO_VERDICT
         }

@@ -95,6 +95,14 @@ impl Verdict {
             lines: b"head does not contain base; update the branch\n".to_vec(),
         }
     }
+    pub(crate) fn unreadable(error: &io::Error) -> io::Result<Self> {
+        let mut lines = Vec::new();
+        writeln!(lines, "{error}")?;
+        Ok(Self {
+            gates: BTreeSet::from(["unreadable"]),
+            lines,
+        })
+    }
 }
 
 fn protected(i: &Inputs<'_>, moved: &Counts, guard: &GlobSet, v: &mut Verdict) -> io::Result<()> {

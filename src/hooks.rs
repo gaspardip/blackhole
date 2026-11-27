@@ -30,7 +30,11 @@ pub fn run(event: Event) -> ExitCode {
         Ok(bytes) => {
             let first = attempt(event, &bytes);
             // A failure that is no verdict can be transient, so it gets a second judgment.
-            if first.1.as_ref().is_err_and(|e| crate::fault(e).is_none()) {
+            if first
+                .1
+                .as_ref()
+                .is_err_and(|e| crate::fault(e) == crate::Fault::NoVerdict)
+            {
                 attempt(event, &bytes)
             } else {
                 first
@@ -46,7 +50,7 @@ pub fn run(event: Event) -> ExitCode {
     };
     let cause = crate::diagnostic_text(&error.to_string()).into_owned();
     let fault = crate::fault(&error);
-    if fault.is_some() {
+    if fault != crate::Fault::NoVerdict {
         let _ = writeln!(out, "blackhole: {cause}");
     } else if matches!(event, Event::Stop) && continued() {
         let _ = writeln!(
@@ -62,7 +66,7 @@ pub fn run(event: Event) -> ExitCode {
     }
     match (fault, event) {
         // The edit already happened, and a payload the hook cannot read leaves nothing to report on.
-        (Some(crate::Fault::Usage), Event::PostEdit) => ExitCode::FAILURE,
+        (crate::Fault::Usage, Event::PostEdit) => ExitCode::FAILURE,
         // A guard that cannot decide inside a checkout must block, since Codex ignores exit 1.
         _ => ExitCode::from(2),
     }

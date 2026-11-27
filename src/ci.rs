@@ -51,20 +51,21 @@ fn evaluate(
     if !git::ancestor(base, head)? {
         return Ok(Verdict::behind());
     }
-    let base_tree = Tree::load(base)?;
+    // The pull request cannot fix the base, so a base it cannot read is no verdict.
+    let base_tree = Tree::load(base).map_err(crate::no_verdict)?;
     let head_tree = Tree::load(head)?;
     let mut batch = Batch::start()?;
-    let base_config = configuration(&base_tree, &mut batch)?;
+    let base_config = configuration(&base_tree, &mut batch).map_err(crate::no_verdict)?;
     let head_config;
     let scan_config = if approved {
-        head_config = configuration(&head_tree, &mut batch)?;
+        head_config = configuration(&head_tree, &mut batch).map_err(crate::red)?;
         &head_config
     } else {
         &base_config
     };
     let excludes = &scan_config.exclude;
-    let base_ledger = ledger(&base_tree, &mut batch)?;
-    let base_rows = rows(&base_tree, &mut batch, today)?;
+    let base_ledger = ledger(&base_tree, &mut batch).map_err(crate::no_verdict)?;
+    let base_rows = rows(&base_tree, &mut batch, today).map_err(crate::no_verdict)?;
     let head_ledger = ledger(&head_tree, &mut batch);
     let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
@@ -159,6 +160,24 @@ pub fn run_with_coverage(
     artifacts: Option<&Path>,
     out: &mut impl Write,
 ) -> io::Result<State> {
+    // The judge reads fetched commits, so a failure nobody marked is the fetch or the machine, not the change.
+    judge(base, head, approvals, today, artifacts, out).map_err(|e| {
+        if crate::mark(&e).is_some() {
+            e
+        } else {
+            crate::no_verdict(e)
+        }
+    })
+}
+
+fn judge(
+    base: &str,
+    head: &str,
+    approvals: Option<&Path>,
+    today: Option<Date>,
+    artifacts: Option<&Path>,
+    out: &mut impl Write,
+) -> io::Result<State> {
     let base = git::commit(base)?;
     let head = git::commit(head)?;
     let approved = match approvals {
@@ -167,13 +186,16 @@ pub fn run_with_coverage(
             .approved(&head),
         None => false,
     };
-    let result = evaluate(
+    let result = match evaluate(
         &base,
         &head,
         approved,
         today.map_or_else(Date::today, Ok)?,
         artifacts,
-    )?;
+    ) {
+        Err(e) if crate::mark(&e) == Some(crate::Fault::Red) => Verdict::unreadable(&e)?,
+        result => result?,
+    };
     out.write_all(&result.lines)?;
     let (waiting, red): (Vec<_>, Vec<_>) = result
         .gates
