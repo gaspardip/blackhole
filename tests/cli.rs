@@ -1520,3 +1520,33 @@ fn ci_refuses_a_source_link_to_a_directory() {
         "{stdout}"
     );
 }
+
+#[test]
+fn ci_refuses_a_gitlink_at_a_source_path() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass\n").unwrap();
+    commit(root);
+    let base = rev(root);
+    for (path, status, verdict) in [
+        ("vendor", 0, "blackhole ci: green"),
+        ("x.py", 1, "blackhole ci: red (unreadable)"),
+    ] {
+        git(
+            root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{base},{path}"),
+            ],
+        );
+        common::git(root, &["commit", "-qm", "gitlink"]).unwrap();
+        let out = run(root, &["ci", "--base", &base, "--head", "HEAD"], status);
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(stdout.lines().last(), Some(verdict), "{stdout}");
+        if status == 1 {
+            assert!(stdout.starts_with("x.py: "), "{stdout}");
+        }
+    }
+}

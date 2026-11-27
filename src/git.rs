@@ -89,12 +89,14 @@ enum Entry {
     File(String),
     Link(String),
     Directory,
+    Gitlink,
     Other,
 }
 enum Blob<'a> {
     File(&'a str),
     Absent,
     UnresolvedLink,
+    Gitlink,
     // A link that ends at a directory or another kind of entry.
     NotFile,
 }
@@ -124,6 +126,7 @@ impl Tree {
                 ("blob", "100644" | "100755") => Entry::File(id.into()),
                 ("blob", "120000") => Entry::Link(id.into()),
                 ("tree", _) => Entry::Directory,
+                ("commit", "160000") => Entry::Gitlink,
                 _ => Entry::Other,
             };
             entries.insert(path.into(), entry);
@@ -174,7 +177,7 @@ impl Tree {
                     })?;
                     paths.links.insert(path, target.into());
                 }
-                Entry::Directory | Entry::Other => (),
+                Entry::Directory | Entry::Gitlink | Entry::Other => (),
             }
         }
         Ok(paths)
@@ -192,7 +195,11 @@ impl Tree {
                 "{}: link does not point at a file; point the link at a file in the commit or remove it",
                 crate::diagnostic_text(path)
             ))),
-            Blob::Absent | Blob::NotFile => Ok(None),
+            Blob::Gitlink if crate::coverage::source_name(path) => Err(crate::red(format!(
+                "{}: gitlink at a source path; replace it with a regular file or move the submodule",
+                crate::diagnostic_text(path)
+            ))),
+            Blob::Absent | Blob::Gitlink | Blob::NotFile => Ok(None),
             Blob::UnresolvedLink => Err(crate::red(format!(
                 "{}: link target is not in the commit; point the link at a file in the commit or remove it",
                 crate::diagnostic_text(path)
@@ -208,7 +215,7 @@ impl Tree {
     ) -> io::Result<Option<&str>> {
         match self.resolve_blob(path, batch)? {
             Blob::File(id) => Ok(Some(id)),
-            Blob::Absent | Blob::UnresolvedLink | Blob::NotFile => Ok(None),
+            Blob::Absent | Blob::UnresolvedLink | Blob::Gitlink | Blob::NotFile => Ok(None),
         }
     }
 
@@ -216,6 +223,7 @@ impl Tree {
         match self.0.get(path) {
             Some(Entry::File(id)) => Ok(Blob::File(id)),
             Some(Entry::Link(_)) => self.follow(path, batch),
+            Some(Entry::Gitlink) => Ok(Blob::Gitlink),
             _ => Ok(Blob::Absent),
         }
     }
@@ -249,8 +257,10 @@ impl Tree {
                     pending.extend(target.rsplit('/').map(str::to_owned));
                 }
                 (Some(Entry::File(id)), true) => return Ok(Blob::File(id)),
-                (Some(Entry::Directory | Entry::Other), true) => return Ok(Blob::NotFile),
-                (Some(Entry::Directory | Entry::Other), false) => {}
+                (Some(Entry::Directory | Entry::Gitlink | Entry::Other), true) => {
+                    return Ok(Blob::NotFile);
+                }
+                (Some(Entry::Directory | Entry::Gitlink | Entry::Other), false) => {}
                 _ => return Ok(Blob::UnresolvedLink),
             }
         }
