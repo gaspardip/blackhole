@@ -71,13 +71,16 @@ class Backtest(unittest.TestCase):
         self.git("branch", "-d", "change")
         return self.git("rev-parse", "HEAD"), base, proposed
 
-    def run_backtest(self, binary: Path, *args: str) -> tuple[list[dict], dict]:
-        before = self.git("status", "--porcelain"), self.git("worktree", "list", "--porcelain")
-        result = subprocess.run(
+    def invoke_backtest(self, binary: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [sys.executable, "-I", ROOT / "tools/backtest.py", "--binary", binary,
              "--repo", self.repo, "--limit", "20", "--out", self.out, *args],
             cwd=ROOT, env=self.env, capture_output=True, text=True,
         )
+
+    def run_backtest(self, binary: Path, *args: str) -> tuple[list[dict], dict]:
+        before = self.git("status", "--porcelain"), self.git("worktree", "list", "--porcelain")
+        result = self.invoke_backtest(binary, *args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             (self.git("status", "--porcelain"), self.git("worktree", "list", "--porcelain")),
@@ -86,6 +89,22 @@ class Backtest(unittest.TestCase):
         report = self.out / self.repo.name
         records = [json.loads(line) for line in (report / "results.jsonl").read_text().splitlines()]
         return records, json.loads((report / "summary.json").read_text())
+
+    def test_refuses_output_or_report_inside_the_source_clone(self) -> None:
+        original = "original tracked summary\n"
+        self.commit("summary.json", original)
+        self.merge("clean.ts", "export const value = 1;\n")
+        self.out.mkdir()
+        (self.out / self.repo.name).symlink_to(self.repo, target_is_directory=True)
+        for output in (self.root, self.repo / "reports", self.out):
+            with self.subTest(output=output):
+                result = self.invoke_backtest(self.binary, "--out", str(output))
+                self.assertEqual(
+                    (result.returncode, (self.repo / "summary.json").read_text(),
+                     self.git("status", "--porcelain")),
+                    (1, original, ""),
+                )
+                self.assertIn("inside the source clone", result.stderr)
 
     def test_merge_backtest_baselines_existing_findings_and_counts_new_ones(self) -> None:
         clean = self.merge("clean.ts", "export const value = 1;\n")
@@ -112,6 +131,35 @@ class Backtest(unittest.TestCase):
         self.assertEqual(summary["judged"], 2)
         self.assertEqual(summary["skipped"], 0)
         self.assertEqual(summary["rules"], {"ts/no-skipped-tests": {"changes": 1, "flag_rate": 0.5}})
+
+    def test_sparse_checkout_does_not_change_verdict(self) -> None:
+        self.merge("clean.ts", "export const value = 1;\n")
+        full = self.run_backtest(self.binary)
+        self.assertEqual(full[0][0]["state"], "green")
+        self.git(
+            "sparse-checkout", "set", "--no-cone", "/clean.ts", "/blackhole.toml", "/.blackhole/",
+        )
+        self.assertFalse((self.repo / "legacy.test.ts").exists())
+        self.assertEqual(self.run_backtest(self.binary), full)
+
+    def test_replay_leaves_source_git_directory_unchanged(self) -> None:
+        self.merge("clean.ts", "export const value = 1;\n")
+        source_git = self.repo / ".git"
+        marker = source_git / "filter-ran"
+        (source_git / "info/attributes").write_text("legacy.test.ts filter=fixture\n")
+        self.git("config", "filter.fixture.smudge", f"touch {shlex.quote(str(marker))} && cat")
+
+        def git_files() -> dict[Path, bytes]:
+            return {
+                path.relative_to(source_git): path.read_bytes()
+                for path in source_git.rglob("*") if path.is_file() and path.name != "index"
+            }
+
+        before = git_files()
+        rows, _ = self.run_backtest(self.binary)
+        self.assertEqual(rows[0]["state"], "green")
+        self.assertFalse(marker.exists())
+        self.assertEqual(git_files(), before)
 
     def test_squash_backtest_skips_conflicts_and_keeps_judging(self) -> None:
         clean = self.commit("clean.ts", "export const value = 1;\n")

@@ -132,8 +132,12 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
 
 
 def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None:
+    out = out.resolve()
+    report = (out / repo.name).resolve()
+    for directory in (out, report):
+        if directory.is_relative_to(repo):
+            raise RuntimeError(f"output or report directory is inside the source clone: {directory}")
     out.mkdir(parents=True, exist_ok=True)
-    report = out / repo.name
     states = Counter(dict.fromkeys((*STATES.values(), "error", "skipped"), 0))
     rules: Counter[str] = Counter()
     with tempfile.TemporaryDirectory(dir=out) as scratch:
@@ -141,16 +145,22 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
         home = temp / "home"
         home.mkdir()
         env = environment(home)
-        tree = temp / "worktree"
         changes = history(repo, env, mode, limit)
+        object_format, objects = git(
+            repo, env, "rev-parse", "--show-object-format", "--path-format=absolute",
+            "--git-path", "objects",
+        ).stdout.removesuffix("\n").split("\n", 1)
+        if "\n" in objects:
+            raise RuntimeError("source object directory contains a newline")
         results = temp / "results.jsonl"
         with results.open("w", encoding="utf-8") as rows:
             for change in changes:
-                git(repo, env, "worktree", "add", "--detach", tree, change.base)
-                try:
+                with tempfile.TemporaryDirectory(dir=temp) as replay:
+                    tree = Path(replay)
+                    git(tree, env, "init", "--template=", f"--object-format={object_format}")
+                    (tree / ".git/objects/info/alternates").write_bytes(os.fsencode(objects) + b"\n")
+                    git(tree, env, "switch", "--detach", change.base)
                     verdict = judge(tree, env, binary, change)
-                finally:
-                    git(repo, env, "worktree", "remove", "--force", tree)
                 rows.write(json.dumps({**asdict(change), **asdict(verdict)}) + "\n")
                 states[verdict.state] += 1
                 if verdict.state in {"green", "red"}:
@@ -183,7 +193,7 @@ def main() -> None:
     if args.limit < 1:
         parser.error("--limit must be positive")
     try:
-        backtest(args.repo.resolve(), args.binary.resolve(), args.out.resolve(), args.mode, args.limit)
+        backtest(args.repo.resolve(), args.binary.resolve(), args.out, args.mode, args.limit)
     except (OSError, RuntimeError) as error:
         parser.exit(1, f"backtest: {error}\n")
 
