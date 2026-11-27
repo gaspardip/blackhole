@@ -11,7 +11,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-POLICY = ("blackhole.toml", ".blackhole/ledger")
+LEDGER = ".blackhole/ledger"
+POLICY = ("blackhole.toml", LEDGER)
 OBJECTIONS = ".blackhole/objections"
 STATES = {0: "green", 1: "red", 3: "waiting", 75: "no_verdict"}
 RED_GATES = re.compile(r"blackhole ci: red \(([a-z]+(?:, [a-z]+)*)\)")
@@ -118,15 +119,13 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
     paths = git(tree, env, "ls-files", "-z", "--", OBJECTIONS).stdout.split("\0")
     has_objections = OBJECTIONS in paths
     if has_objections:
-        # Init uses the wall clock, so validate objections with dated CI before setting them aside.
+        # Local commands use the wall clock, so validate objections with dated CI before setting them aside.
         validation = dated_ci(tree, env, binary, base, base, today)
         if validation.returncode not in (0, 1):
             raise CommandError(tree, validation)
         (tree / OBJECTIONS).unlink()
-    output = run(tree, env, binary, "init").stdout
-    if has_objections:
-        git(tree, env, "restore", "--", OBJECTIONS)
-    for line in output.splitlines():
+    output = run(tree, env, binary, "init").stdout.splitlines()
+    for line in output:
         action, _, path = line.partition(" ")
         if action not in {"Wrote", "Created"} or path in POLICY:
             continue
@@ -138,6 +137,11 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
         else:
             target.unlink()
     git(tree, env, "add", "-f", "--", *POLICY)
+    if f"Created {LEDGER}" in output:
+        run(tree, env, binary, "ledger")
+        git(tree, env, "add", "-f", "--", LEDGER)
+    if has_objections:
+        git(tree, env, "restore", "--", OBJECTIONS)
     git(tree, env, "commit", "--allow-empty", "-m", "Initialize backtest policy")
     return git(tree, env, "rev-parse", "HEAD").stdout.strip()
 

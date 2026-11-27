@@ -238,6 +238,21 @@ class Backtest(unittest.TestCase):
         ])
         self.assertEqual(summary["rules"], {"ts/no-skipped-tests": {"changes": 1, "flag_rate": 1.0}})
 
+    def test_baseline_uses_only_the_files_committed_in_the_replay(self) -> None:
+        self.commit("blackhole.toml", "[boundaries]\nmax-lines = 12\n")
+        clean, _, _ = self.merge("clean.ts", "export const value = 1;\n")
+        large, _, _ = self.merge("large.ts", "\n" * 12 + "export {};\n")
+
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual(
+            [(row["commit"], row["state"], row["gates"]) for row in rows],
+            [(large, "red", ["findings"]), (clean, "green", [])],
+        )
+        self.assertEqual(rows[0]["findings"], [
+            {"path": "large.ts", "line": 13, "rule": "boundary/file-size", "label": None},
+        ])
+        self.assertEqual(summary["rules"], {"boundary/file-size": {"changes": 1, "flag_rate": 0.5}})
+
     def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
         path = ".github/note\nnew.test.ts:1:2 ts/no-skipped-tests marker"
         (self.repo / path).parent.mkdir(parents=True)
@@ -267,7 +282,7 @@ class Backtest(unittest.TestCase):
         ]
         binary.write_text(
             "#!/bin/sh\n"
-            f'if [ "$1" = init ]; then exec {shlex.quote(str(self.binary))} "$@"; fi\n'
+            f'case "$1" in init|ledger) exec {shlex.quote(str(self.binary))} "$@";; esac\n'
             + "printf '%s\\n' " + shlex.join(lines) + "\nexit 1\n"
         )
         binary.chmod(0o700)
@@ -350,7 +365,7 @@ class Backtest(unittest.TestCase):
         binary.write_text(
             "#!/bin/sh\n"
             f'printf "%s\\n" "$HOME" "$XDG_CONFIG_HOME" >> {shlex.quote(str(log))}\n'
-            f'if [ "$1" = init ]; then exec {shlex.quote(str(self.binary))} "$@"; fi\n'
+            f'case "$1" in init|ledger) exec {shlex.quote(str(self.binary))} "$@";; esac\n'
             """[ "$(cat .claude/settings.json)" = '{"permissions":{}}' ] || exit 91\n"""
             "[ ! -e .codex/hooks.json ] || exit 92\n"
             'paths=$(git diff --name-only "$3^" "$3") || exit 93\n'
@@ -375,6 +390,6 @@ class Backtest(unittest.TestCase):
         self.assertEqual(summary["states"]["waiting"], 1)
         self.assertEqual(summary["rules"], {})
         homes = log.read_text().splitlines()
-        self.assertEqual(len(homes), 12)
+        self.assertEqual(len(homes), 18)
         self.assertTrue(all(Path(home).is_relative_to(self.out) for home in homes), homes)
         self.assertEqual(list(original_home.iterdir()), [])
