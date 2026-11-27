@@ -111,6 +111,7 @@ the tested npm tarball, verified crate and `SHA256SUMS` for release.
    `X.Y.Z`. Once the promotion commit lands on `main`, tag it `vX.Y.Z` and
    push the tag. The workflow verifies the version-only diff from the
    prerelease and publishes to npm's `latest` dist-tag.
+   Promotion requires a successful first attempt. If the release run needed a rerun, bump both versions to `X.Y.Z-rc.N+1`, land the commit on `main`, then tag it `vX.Y.Z-rc.N+1`.
 
 To roll back, the maintainer runs
 `npm dist-tag add @gaspardip/blackhole@<previous> latest` while logged in
