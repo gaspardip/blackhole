@@ -60,15 +60,17 @@ def run_case(cli: Path, case: Path, repo: Path, artifacts: Path) -> None:
         file.write_text(json.dumps(data))
         cmd += ["--approvals", file]
 
+    result = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True, check=False)
     if verdict == "green":
-        code, summary = 0, ""
+        advisory = case / "advisory"
+        expected = (0, advisory.read_text() if advisory.exists() else "")
+        observed = (result.returncode, result.stdout)
     elif verdict.startswith("red "):
-        code, summary = 1, "blackhole ci: red (" + ", ".join(verdict.split()[1:]) + ")"
+        expected = (1, "blackhole ci: red (" + ", ".join(verdict.split()[1:]) + ")")
+        observed = (result.returncode, (result.stdout.splitlines() or [""])[-1])
     else:
         raise ValueError("invalid scenario verdict")
-    result = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True, check=False)
-    stdout = result.stdout.splitlines()
-    if (result.returncode, (stdout or [""])[-1], result.stderr) != (code, summary, ""):
+    if (*observed, result.stderr) != (*expected, ""):
         raise ValueError(f"expected {verdict}, got exit {result.returncode}\n{result.stdout}{result.stderr}")
 
 

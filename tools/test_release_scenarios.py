@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,3 +42,35 @@ class ReleaseScenarios(unittest.TestCase):
                     self.assertEqual(done.returncode, expected, done.stderr)
                     if expected:
                         self.assertIn("example: expected red behind coverage", done.stderr)
+
+    def test_green_stdout_must_equal_the_case_advisory_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain, noted = root / "cases/plain", root / "cases/noted"
+            for case in (plain, noted):
+                for side in ("base", "head"):
+                    (case / side).mkdir(parents=True)
+                    (case / side / "file").write_text(side)
+                (case / "expect").write_text("green\n")
+            (noted / "advisory").write_text("a.ts:1:1 boundary/rule [advisory] note\n")
+            cli = root / "blackhole"
+            cli.touch()
+            cli.chmod(0o755)
+            for case, output, expected in (
+                (noted, "a.ts:1:1 boundary/rule [advisory] note", 0),
+                (noted, "", 1),
+                (noted, "a.ts:2:1 boundary/rule [advisory] note", 1),
+                (plain, "", 0),
+                (plain, "a.ts:1:1 boundary/rule [advisory] note", 1),
+            ):
+                with self.subTest(case=case.name, output=output):
+                    printed = f"echo '{output}'" if output else ":"
+                    cli.write_text(f"#!/bin/sh\n{printed}\nexit 0\n")
+                    only = root / "only"
+                    shutil.rmtree(only, ignore_errors=True)
+                    shutil.copytree(case, only / case.name)
+                    done = subprocess.run(
+                        [sys.executable, "-I", RUNNER, cli, only],
+                        text=True, capture_output=True, check=False,
+                    )
+                    self.assertEqual(done.returncode, expected, done.stderr)
