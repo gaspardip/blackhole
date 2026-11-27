@@ -1296,6 +1296,60 @@ fn a_later_page_can_require_the_blackhole_check() {
 }
 
 #[test]
+fn a_malformed_rule_on_a_later_page_cannot_establish_a_guard() {
+    let fake = guarded_github(&generated_workflow());
+    let second = RULES.replace("&page=1", "&page=2");
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    let mut first: Vec<Value> = serde_json::from_slice(&rules(&checks)).unwrap();
+    first.resize(100, json!({"type":"non_fast_forward","ruleset_id":7}));
+    fake.respond("GET", RULES, 200, &[], json!(first).to_string().as_bytes());
+    fake.respond("GET", &second, 200, &[], b"[null]");
+    assert_eq!(
+        guarded_verdict(&fake, None),
+        (
+            format!(
+                "not guarded: cannot read GitHub ({second} returned a malformed rules list; rerun init once GitHub answers)"
+            ),
+            75
+        )
+    );
+}
+
+#[test]
+fn a_rule_missing_a_required_field_cannot_establish_a_guard() {
+    let fake = guarded_github(&generated_workflow());
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    let first: Vec<Value> = serde_json::from_slice(&rules(&checks)).unwrap();
+    for invalid in [
+        json!({"type":"non_fast_forward"}),
+        json!({"type":"non_fast_forward","ruleset_id":-1}),
+        json!({"ruleset_id":7}),
+        json!({"type":"required_status_checks","ruleset_id":7}),
+        json!({"type":"required_status_checks","ruleset_id":7,"parameters":{"required_status_checks":[null]}}),
+    ] {
+        let mut entries = first.clone();
+        entries.push(invalid.clone());
+        fake.respond(
+            "GET",
+            RULES,
+            200,
+            &[],
+            json!(entries).to_string().as_bytes(),
+        );
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: cannot read GitHub ({RULES} returned a malformed rules list; rerun init once GitHub answers)"
+                ),
+                75
+            ),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn each_missing_branch_rule_is_the_one_final_line() {
     let only = |kind: &str| {
         json!([{"type":kind,"ruleset_id":7,"parameters":{"required_status_checks":[{"context":"blackhole","integration_id":15368}]}}])

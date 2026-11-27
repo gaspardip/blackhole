@@ -107,6 +107,23 @@ fn on_branch(repo: &Repo, branch: &str, encoded: &str, workflow: &[u8]) -> Resul
     Ok(())
 }
 
+fn valid_rule(rule: &Value) -> bool {
+    let Some(kind) = rule["type"].as_str() else {
+        return false;
+    };
+    rule["ruleset_id"].is_u64()
+        && (kind != "required_status_checks"
+            || rule["parameters"]["required_status_checks"]
+                .as_array()
+                .is_some_and(|checks| {
+                    checks.iter().all(|check| {
+                        check["context"].is_string()
+                            && (check["integration_id"].is_null()
+                                || check["integration_id"].is_u64())
+                    })
+                }))
+}
+
 // The rulesets GitHub applies to the branch, once they require pull requests and the blackhole check from GitHub Actions.
 fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, Stop> {
     let slug = &repo.slug;
@@ -118,11 +135,14 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
         if response.status != 200 {
             return Err(unexpected(&endpoint, &response));
         }
-        let Some(Value::Array(mut entries)) = response.json() else {
-            return Err(Failure::Unreachable(format!(
-                "{endpoint} returned a malformed rules list"
-            ))
-            .into());
+        let mut entries = match response.json() {
+            Some(Value::Array(entries)) if entries.iter().all(valid_rule) => entries,
+            _ => {
+                return Err(Failure::Unreachable(format!(
+                    "{endpoint} returned a malformed rules list"
+                ))
+                .into());
+            }
         };
         let last = entries.len() < 100;
         rules.append(&mut entries);
