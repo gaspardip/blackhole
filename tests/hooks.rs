@@ -1255,3 +1255,41 @@ fn a_retry_judges_from_the_starting_directory() {
     assert!(shims.path().join("killed").exists());
     assert_eq!(out.stderr, expected);
 }
+
+#[cfg(unix)]
+#[test]
+fn coverage_keeps_an_outage_apart_from_missing_evidence() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "base"]).unwrap();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "head"]).unwrap();
+    let head = common::git(root, &["rev-parse", "HEAD"]).unwrap();
+    let reports = tempdir().unwrap();
+    let report = reports.path().join(&head).join("reports");
+    fs::create_dir_all(&report).unwrap();
+    fs::write(report.join("lcov.info"), "SF:a.py\nDA:1,1\nend_of_record\n").unwrap();
+    let shims = tempdir().unwrap();
+    // The checkout lookup runs only for the report, so a stopped git there is an outage, not missing coverage.
+    git_killed_on(shims.path(), "--is-bare-repository", "KILL", false);
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("PATH", shims.path())
+        .args(["ci", "--base", "HEAD~", "--head", "HEAD", "--coverage-dir"])
+        .arg(reports.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .starts_with("blackhole ci: no verdict: ")
+    );
+}

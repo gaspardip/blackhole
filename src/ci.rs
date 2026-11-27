@@ -25,6 +25,14 @@ fn red_or<T>(result: io::Result<T>) -> io::Result<io::Result<T>> {
     }
 }
 
+// Only missing, invalid or short evidence is the author's; an outage is no verdict.
+fn evidence(result: io::Result<()>) -> io::Result<io::Result<()>> {
+    match result {
+        Err(e) if crate::fault(&e) == crate::Fault::NoVerdict => Err(e),
+        result => Ok(result),
+    }
+}
+
 // Removals found before a failure stay, so an unreadable file cannot hide a deleted test.
 fn diff_rules(ctx: &mut DiffCtx<'_>) -> (DiffFindings, io::Result<()>) {
     let mut findings = DiffFindings::default();
@@ -131,7 +139,7 @@ fn evaluate(
         match delta {
             Ok(delta) => {
                 if !delta.is_empty()
-                    && let Err(e) = crate::coverage::check(&delta, artifacts, head, lcov)
+                    && let Err(e) = evidence(crate::coverage::check(&delta, artifacts, head, lcov))?
                 {
                     verdict.gates.insert("coverage");
                     writeln!(verdict.lines, "coverage: {e}")?;
