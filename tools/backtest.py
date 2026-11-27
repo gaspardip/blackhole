@@ -125,6 +125,7 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
             raise CommandError(tree, validation)
         (tree / OBJECTIONS).unlink()
     output = run(tree, env, binary, "init").stdout.splitlines()
+    removed, restored = set(), False
     for line in output:
         action, _, path = line.partition(" ")
         if action not in {"Wrote", "Created"} or path in POLICY:
@@ -134,11 +135,22 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
             raise RuntimeError(f"init reported an invalid path: {path!r}")
         if git(tree, env, "ls-files", "--", path).stdout:
             git(tree, env, "restore", "--", path)
+            restored = True
         else:
             target.unlink()
+            removed.add(path)
     git(tree, env, "add", "-f", "--", *POLICY)
     if f"Created {LEDGER}" in output:
-        run(tree, env, binary, "ledger")
+        shrink = run(tree, env, binary, "ledger", check=False)
+        if shrink.returncode == 1 and not restored:
+            # The ledger command writes nothing while a finding is over its allowance, so drop the rows of the files init wrote.
+            ledger = tree / LEDGER
+            rows = ledger.read_text().splitlines(keepends=True)
+            ledger.write_text("".join(
+                row for row in rows if row.rstrip("\n").split("\t", 2)[-1] not in removed
+            ))
+        elif shrink.returncode:
+            raise CommandError(tree, shrink)
         git(tree, env, "add", "-f", "--", LEDGER)
     if has_objections:
         git(tree, env, "restore", "--", OBJECTIONS)
