@@ -220,16 +220,19 @@ fn forgeries(tip: &str) -> io::Result<(Vec<Forgery>, Forgery)> {
         },
     ];
     let judge = appended(read(WORKFLOW_PATH)?, workflow::content().as_bytes());
-    batch.finish()?;
-    if let Some(test) = tree.paths().find(|path| {
+    for test in tree.paths().filter(|path| {
         crate::packs::ts::test_context::test_file_path(path) && !config.exclude.is_match(path)
     }) {
-        list.push(Forgery {
-            gate: "tests",
-            what: format!("delete {test}"),
-            change: Change::Delete(test.to_owned()),
-        });
+        if tree.historical_blob(test, &mut batch)?.is_some() {
+            list.push(Forgery {
+                gate: "tests",
+                what: format!("delete {test}"),
+                change: Change::Delete(test.to_owned()),
+            });
+            break;
+        }
     }
+    batch.finish()?;
     list.push(Forgery {
         gate: "findings",
         what: format!("add a finding in {FINDING}"),

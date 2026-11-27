@@ -35,6 +35,10 @@ struct Adopter {
 
 // An adopted checkout whose origin names owner/repo on GitHub and leads to a local bare repository instead.
 fn adopted() -> Adopter {
+    adopted_with(|_| {})
+}
+
+fn adopted_with(prepare: impl FnOnce(&Path)) -> Adopter {
     let dir = tempdir().unwrap();
     let remote = dir.path().join("remote.git");
     let root = dir.path().join("checkout");
@@ -48,6 +52,7 @@ fn adopted() -> Adopter {
         "test(\"adds\", () => {\n  expect(1 + 1).toBe(2);\n});\n",
     )
     .unwrap();
+    prepare(&root);
     let fake = gh::FakeGh::new();
     let init = run(&root, &fake, &["init"]);
     assert_eq!(init.status.code(), Some(1), "{init:?}");
@@ -404,4 +409,23 @@ fn a_job_that_fails_before_the_judge_has_no_verdict() {
         "failure",
         "2026-11-26T10:00:00.0000000Z setup-node failed\n",
     );
+}
+
+#[test]
+fn a_test_shaped_directory_is_skipped_when_choosing_a_test_to_delete() {
+    let adopter = adopted_with(|root| {
+        let directory = root.join("src/aaa.test.ts");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join(".keep"), "").unwrap();
+    });
+    finished(&adopter, "failure", RED);
+    let (out, _) = canary(&adopter, &[]);
+    let branch = assert_cleaned(&adopter.fake);
+    assert!(
+        out.contains("tests: delete src/app.test.ts: stopped\n"),
+        "{out}"
+    );
+    let head = git(&adopter.remote, &["rev-parse", &branch]).unwrap();
+    let verdict = ci(&adopter, &head);
+    assert!(verdict.contains("src/app.test.ts"), "{verdict}");
 }
