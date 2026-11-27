@@ -1246,6 +1246,60 @@ fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
 }
 
 #[test]
+fn committing_and_reverting_the_adoption_restores_every_byte() {
+    let dir = repo();
+    let root = dir.path();
+    let numbers = "[1E2, -0.0, 1.50, 12345678901234567890123]";
+    for (name, doc) in HOOK_FILES.into_iter().zip([
+        format!("{{\n\t\"n\": {numbers},\"s\":\"\\u00e9\"\r\n}}"),
+        format!("{{\"description\":\"\\u00e9\",\r\n\t\"hooks\": {{\"Later\": {numbers}}}}}"),
+    ]) {
+        let path = root.join(name);
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::write(path, doc).unwrap();
+    }
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("app.py"), "print(1)\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "before"]).unwrap();
+    let before = snapshot(root);
+    let config = fs::read(root.join(".git/config")).unwrap();
+    init(root, true);
+    let written = common::git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        written,
+        "M .claude/settings.json\n M .codex/hooks.json\n?? .blackhole/ledger\n?? .github/workflows/blackhole.yml\n?? blackhole.toml"
+    );
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "adopt blackhole"]).unwrap();
+    common::git(root, &["revert", "--no-edit", "HEAD"]).unwrap();
+    assert_eq!(snapshot(root), before);
+    assert_eq!(
+        common::git(
+            root,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all"
+            ]
+        )
+        .unwrap(),
+        ""
+    );
+    assert_eq!(fs::read(root.join(".git/config")).unwrap(), config);
+}
+
+#[test]
 fn a_path_git_ignores_stops_init_before_any_write() {
     for (rule, path) in [
         ("blackhole.toml", "blackhole.toml"),
