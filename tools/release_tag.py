@@ -87,7 +87,8 @@ def github_candidate_succeeded(tag: str, sha: str) -> bool:
         except HTTPError as error:
             raise ValueError(f"GitHub workflow run lookup failed (HTTP {error.code})") from error
         if any(run["head_branch"] == tag and run["head_sha"] == sha
-               and run["event"] == "push" and run["conclusion"] == "success" for run in runs):
+               and run["event"] == "push" and run["conclusion"] == "success"
+               and run["run_attempt"] == 1 for run in runs):
             return True
         if len(runs) < 100:
             return False

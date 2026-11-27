@@ -79,7 +79,9 @@ class ReleaseTag(unittest.TestCase):
         sha = git(self.repo, "rev-parse", "HEAD").strip()
         self.version("1.2.3")
         self.final()
-        run = {"head_branch": rc, "head_sha": sha, "event": "push", "conclusion": "success"}
+        run = {
+            "head_branch": rc, "head_sha": sha, "event": "push", "conclusion": "success", "run_attempt": 1,
+        }
 
         with patch.dict("os.environ", {
             "GITHUB_API_URL": "https://api.github.test",
@@ -96,7 +98,10 @@ class ReleaseTag(unittest.TestCase):
             self.assertEqual(query["head_sha"], [sha])
             self.assertEqual(query["status"], ["success"])
 
-            for runs in ([], [run | {"head_branch": "main"}], [run | {"head_sha": "0" * 40}]):
+            for runs in (
+                [], [run | {"head_branch": "main"}], [run | {"head_sha": "0" * 40}],
+                [run | {"run_attempt": 2}],
+            ):
                 with self.subTest(runs=runs), self.assertRaisesRegex(ValueError, "version-only"):
                     response.return_value = io.BytesIO(json.dumps({"workflow_runs": runs}).encode())
                     verify_tag(self.repo, "v1.2.3", github_candidate_succeeded)
