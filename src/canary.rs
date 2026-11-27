@@ -276,7 +276,7 @@ struct Run<'a> {
 
 enum Outcome {
     Judged { conclusion: String, log: String },
-    TimedOut(String),
+    Unavailable(String),
 }
 
 impl Run<'_> {
@@ -321,13 +321,20 @@ impl Run<'_> {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Ok(Outcome::TimedOut(format!(
+                return Ok(Outcome::Unavailable(format!(
                     "canary: no finished blackhole check on {head} after {} seconds (check that the blackhole workflow runs on pull request #{number}, or rerun with a longer --timeout)",
                     self.timeout.as_secs()
                 )));
             }
             thread::sleep(POLL.min(deadline - now));
         };
+        let conclusion = run["conclusion"].as_str().unwrap_or("unknown");
+        if !matches!(conclusion, "success" | "failure") {
+            return Ok(Outcome::Unavailable(format!(
+                "canary: the blackhole check concluded {}",
+                crate::diagnostic_text(conclusion)
+            )));
+        }
         let id = run["id"]
             .as_u64()
             .ok_or_else(|| io::Error::other("GitHub returned a check run without an id"))?;
@@ -339,7 +346,7 @@ impl Run<'_> {
             200,
         )?;
         Ok(Outcome::Judged {
-            conclusion: run["conclusion"].as_str().unwrap_or_default().to_owned(),
+            conclusion: conclusion.to_owned(),
             log: String::from_utf8_lossy(&log.body).into_owned(),
         })
     }
@@ -348,10 +355,18 @@ impl Run<'_> {
 // The last summary line wins: diagnostics before it can quote any text a forged path holds.
 fn gates(log: &str) -> Vec<&str> {
     log.lines()
-        .filter_map(|line| line.split_once(ci::RED).map(|(_, rest)| rest))
+        .filter_map(|line| {
+            let text = line
+                .split_once(' ')
+                .filter(|(stamp, _)| {
+                    stamp.as_bytes().get(10) == Some(&b'T') && stamp.ends_with('Z')
+                })
+                .map_or(line, |(_, rest)| rest);
+            text.strip_prefix(ci::RED)?.strip_suffix(')')
+        })
         .next_back()
-        .and_then(|rest| rest.split_once(')'))
-        .map(|(gates, _)| gates.split(", ").collect())
+        .filter(|gates| !gates.is_empty())
+        .map(|gates| gates.split(", ").collect())
         .unwrap_or_default()
 }
 
@@ -376,7 +391,7 @@ fn cleanup_process(repo: &Repo, branch: &str) -> io::Result<Child> {
 
 /// Pushes scripted forgeries to a new branch, opens a draft pull request and reports which ones the blackhole check stopped.
 ///
-/// Returns 0 when every forgery was stopped, 1 when one got through and 75 when no verdict came in time.
+/// Returns 0 when every forgery was stopped, 1 when one got through and 75 when there is no verdict.
 ///
 /// # Errors
 /// Reports repository, git, GitHub and output failures, after the pull request and branch are cleaned up.
@@ -467,20 +482,27 @@ fn report(
 ) -> io::Result<u8> {
     let (failed, log) = match outcome {
         Outcome::Judged { conclusion, log } => (conclusion == "failure", log.as_str()),
-        Outcome::TimedOut(message) => {
+        Outcome::Unavailable(message) => {
             writeln!(out, "{message}")?;
             (false, "")
         }
     };
-    let timed_out = matches!(outcome, Outcome::TimedOut(_));
     let named = gates(log);
-    let mut code = if timed_out { 75 } else { 0 };
+    let missing_summary = failed && named.is_empty();
+    if missing_summary {
+        writeln!(
+            out,
+            "canary: the failed blackhole check did not emit a judge verdict"
+        )?;
+    }
+    let no_verdict = missing_summary || matches!(outcome, Outcome::Unavailable(_));
+    let mut code = if no_verdict { 75 } else { 0 };
     let all = forgeries.iter().map(|f| (f, false));
     for (forgery, is_workflow) in all.chain([(workflow, true)]) {
-        let verdict = if refused && is_workflow {
-            "stopped by GitHub, which refused the push because gh's credential cannot change workflows"
-        } else if timed_out {
+        let verdict = if no_verdict {
             "no verdict"
+        } else if refused && is_workflow {
+            "stopped by GitHub, which refused the push because gh's credential cannot change workflows"
         } else if failed && forgery.stopped(&named, log) {
             "stopped"
         } else {

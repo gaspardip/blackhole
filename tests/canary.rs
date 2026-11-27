@@ -378,3 +378,30 @@ fn a_push_and_cleanup_failure_emits_one_escaped_line() {
     );
     assert!(stderr.contains("by hand"), "{stderr}");
 }
+
+fn assert_no_verdict(conclusion: &str, log: &str) {
+    let adopter = adopted();
+    finished(&adopter, conclusion, log);
+    let (out, code) = canary(&adopter, &[]);
+    assert_eq!(code, 75, "{out}");
+    for line in LINES {
+        assert!(
+            out.lines().any(|row| row == format!("{line}: no verdict")),
+            "{out}"
+        );
+    }
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
+fn a_cancelled_check_has_no_verdict() {
+    assert_no_verdict("cancelled", RED);
+}
+
+#[test]
+fn a_job_that_fails_before_the_judge_has_no_verdict() {
+    assert_no_verdict(
+        "failure",
+        "2026-11-26T10:00:00.0000000Z setup-node failed\n",
+    );
+}
