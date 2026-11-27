@@ -87,7 +87,11 @@ fn installs_and_merges_once() {
         assert_ne!(stop, "blackhole hook stop");
         assert_ne!(stop, &Value::String(previous_launcher("stop")));
         assert_ne!(stop, &Value::String(old_launcher(ISOLATED_ROOT, "stop")));
-        assert_ne!(stop, &Value::String(checked_launcher("stop")));
+        // Codex names no project root, so its launcher has nothing to add for a missing git.
+        assert_eq!(
+            stop == &Value::String(checked_launcher("stop")),
+            name == ".codex/hooks.json"
+        );
         let mut upgraded = original.clone();
         for index in [0, 1, 2, 3] {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
@@ -807,7 +811,7 @@ fn narrower_guards_get_a_full_one_beside_them() {
 
 #[test]
 fn the_local_launcher_releases_the_stop_guard_without_git() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = repo();
     let root = dir.path();
     fs::write(root.join(".gitignore"), "/node_modules/\n").unwrap();
@@ -815,29 +819,48 @@ fn the_local_launcher_releases_the_stop_guard_without_git() {
     let local = root.join("node_modules/.bin/blackhole");
     fs::create_dir_all(local.parent().unwrap()).unwrap();
     symlink(env!("CARGO_BIN_EXE_blackhole"), &local).unwrap();
+    // Without git a stray marker must not pick the binary beside it.
+    let stray = root.join("stray");
+    let fake = stray.join("node_modules/.bin/blackhole");
+    fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    fs::write(stray.join(".git"), "").unwrap();
+    fs::write(&fake, "#!/bin/sh\n: >\"$0.ran\"\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let empty = tempdir().unwrap();
     for name in HOOK_FILES {
         let doc: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
         let command = doc["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        // Without git the checkout cannot be judged, and only that outage lets a continued turn stop.
-        for (active, status) in [(true, 0), (false, 2)] {
-            let output = agent::run_input(
-                common::command("/bin/sh")
-                    .args(["-c", command])
-                    .current_dir(root)
-                    .env("PATH", empty.path()),
-                json!({"stop_hook_active": active}).to_string().as_bytes(),
-                status,
-                false,
-            );
-            assert!(
-                output
-                    .stderr
-                    .starts_with(b"blackhole: no verdict: cannot run git: "),
-                "{name} {active}: {output:?}"
-            );
+        for (cwd, project) in [(root, Some(root)), (&stray, Some(root)), (&stray, None)] {
+            let mut sh = common::command("/bin/sh");
+            sh.args(["-c", command])
+                .current_dir(cwd)
+                .env("PATH", empty.path())
+                .env_remove("CLAUDE_PROJECT_DIR");
+            if let Some(project) = project {
+                sh.env("CLAUDE_PROJECT_DIR", project);
+            }
+            // Only Claude Code names the project root, and only that root's install can report the outage.
+            let trusted = project.is_some() && name == ".claude/settings.json";
+            for (active, status) in [(true, 0), (false, 2)] {
+                let output = agent::run_input(
+                    &mut sh,
+                    json!({"stop_hook_active": active}).to_string().as_bytes(),
+                    if trusted { status } else { 2 },
+                    false,
+                );
+                let expected: &[u8] = if trusted {
+                    b"blackhole: no verdict: cannot run git: "
+                } else {
+                    b"blackhole: hook stop needs blackhole on PATH"
+                };
+                assert!(
+                    output.stderr.starts_with(expected),
+                    "{name} {cwd:?} {active}: {output:?}"
+                );
+            }
         }
     }
+    assert!(!stray.join("node_modules/.bin/blackhole.ran").exists());
 }
