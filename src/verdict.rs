@@ -190,25 +190,27 @@ fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
 /// # Errors
 /// Propagates diagnostic formatting errors.
 pub fn judge(i: &Inputs<'_>) -> io::Result<Verdict> {
-    judge_with_guard(i, &GlobSet::empty(), &renames(i.changes))
+    judge_with_guard(i, &GlobSet::empty(), &renames(i.changes), None)
 }
 
 pub(crate) fn judge_with_guard(
     i: &Inputs<'_>,
     guard: &GlobSet,
     renames: &BTreeMap<&str, &str>,
+    records: Option<&mut Vec<u8>>,
 ) -> io::Result<Verdict> {
     let mut v = Verdict::default();
     let empty = Counts::new();
     let head = i.head_ledger.unwrap_or(&empty);
     let mut allowed = head.clone();
     let mut removal_lines = Vec::new();
+    let removals = if i.approved { &[] } else { i.test_removals };
     if !i.approved {
         let moved = ledger::moved_by(i.base_ledger, renames);
         protected(i, &moved, guard, &mut v)?;
-        if !i.test_removals.is_empty() {
+        if !removals.is_empty() {
             v.gates.insert("tests");
-            crate::print_findings(i.test_removals, &mut removal_lines)?;
+            crate::print_findings(removals, &mut removal_lines)?;
         }
         // A count that grew without an approval would otherwise excuse its own findings.
         for (key, n) in &mut allowed {
@@ -230,7 +232,21 @@ pub(crate) fn judge_with_guard(
     if !over.is_empty() {
         v.gates.insert("findings");
     }
-    crate::report(i.findings, &over, &mut v.lines)?;
+    let findings = crate::reported_findings(i.findings, &over);
+    crate::print_findings(findings.clone(), &mut v.lines)?;
+    if let Some(records) = records {
+        let mut reported: Vec<_> = findings.chain(removals).collect();
+        reported.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        for finding in reported {
+            writeln!(
+                records,
+                "{}\t{}\t{}",
+                finding.rule,
+                crate::diagnostic_text(&finding.path),
+                finding.line
+            )?;
+        }
+    }
     v.lines.append(&mut removal_lines);
     Ok(v)
 }

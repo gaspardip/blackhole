@@ -658,6 +658,45 @@ fn ci_gate_lines_escape_paths_that_spell_other_lines() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ci_writes_only_findings_to_the_requested_file() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    fs::write(root.join("protected: tab\tbreak.py"), "# noqa").unwrap();
+    fs::write(root.join("z.py"), "# noqa").unwrap();
+    fs::create_dir(root.join(".github")).unwrap();
+    fs::write(root.join(".github/change"), "").unwrap();
+    commit(root);
+
+    let output = tempdir().unwrap();
+    let file = output.path().join("findings.tsv");
+    for (base, code, records) in [
+        (
+            "HEAD~",
+            1,
+            concat!(
+                "core/no-suppression\tprotected: tab\\tbreak.py\t1\n",
+                "core/no-suppression\tz.py\t1\n",
+            ),
+        ),
+        ("HEAD~", 0, ""),
+    ] {
+        let head = if code == 0 { base } else { "HEAD" };
+        let args = ["ci", "--base", base, "--head", head];
+        let plain = run(root, &args, code);
+        let flagged = run(
+            root,
+            &[&args[..], &["--findings", file.to_str().unwrap()]].concat(),
+            code,
+        );
+        assert_eq!(flagged.stdout, plain.stdout);
+        assert_eq!(fs::read_to_string(&file).unwrap(), records);
+    }
+}
+
 #[test]
 fn ci_is_behind_when_head_lacks_base() {
     let dir = repo();

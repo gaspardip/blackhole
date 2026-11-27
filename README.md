@@ -194,6 +194,9 @@ by a PR job can claim arbitrary hits or omit executable lines. Until that
 integration exists, enabling coverage leaves changed source red on GitHub
 when the judge runs without evidence.
 
+Pass `--findings <file>` to write the reported findings as tab-separated rule,
+escaped path and line records. The file is empty when there are no findings.
+
 ## GitHub judge
 
 Release one publishes the `blackhole judge` check from the `blackhole-judge` App
