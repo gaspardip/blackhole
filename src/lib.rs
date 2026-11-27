@@ -4,6 +4,8 @@ mod coverage;
 pub mod engine;
 mod files;
 mod git;
+pub mod hooks;
+pub mod init;
 mod judge_files;
 pub mod ledger;
 pub mod objections;
@@ -68,8 +70,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MISPLACED: &str = ".blackhole must be a directory";
-
 /// Checks the selected files and returns whether any rule was violated.
 ///
 /// Leaves the process inside the repository's `.blackhole` directory when there is one.
@@ -77,7 +77,26 @@ const MISPLACED: &str = ".blackhole must be a directory";
 /// # Errors
 /// Returns an error if discovery, ledger access, file reading, or output fails.
 pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
-    let scan = scan(&files::root()?, paths, output)?;
+    let cwd = env::current_dir()?;
+    let root = files::root()?;
+    let policy = Policy::load(&root)?;
+    let listing = files::list(&root, &cwd, paths, policy.paths())?;
+    if let Some(path) = listing.unmatched {
+        return Err(io::Error::other(format!(
+            "no files match {}",
+            diagnostic_text(&path.to_string_lossy())
+        )));
+    }
+    check_paths(&root, &policy, &listing, output)
+}
+
+fn check_paths(
+    root: &Path,
+    policy: &Policy,
+    listing: &files::Listing<'_>,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    let scan = scan(root, policy, listing, output)?;
     report_stale(&scan.stale, &scan.actual, output)?;
     Ok(scan.over || !scan.stale.is_empty())
 }
@@ -89,6 +108,7 @@ fn report_stale(
 ) -> io::Result<()> {
     for (key, allowed) in stale {
         let (rule, path) = key;
+        let path = diagnostic_text(path);
         let found = actual.get(key).copied().unwrap_or(0);
         writeln!(
             output,
@@ -107,11 +127,12 @@ fn report_stale(
 pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
     let root = files::root()?;
     let _lock = files::lock(&root)?;
-    let scan = scan(&root, &[], output)?;
+    let policy = Policy::load(&root)?;
+    let scan = scan_all(&root, &policy, output)?;
     if !scan.over
-        && let Some(bytes) = scan.ledger_bytes
+        && let Some(bytes) = policy.ledger_bytes
     {
-        let mut shrunk = scan.base;
+        let mut shrunk = policy.base;
         shrunk.retain(|key, n| {
             *n = (*n).min(scan.actual.get(key).copied().unwrap_or(0));
             *n > 0
@@ -126,18 +147,25 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
 
 // The process moves into the directory and reads its files by name, so a link swapped in at its path later cannot move the ledger or the objections outside the repository.
 // A link swapped in before the move shows as a working directory that is somewhere else.
-fn enter(root: &Path) -> io::Result<bool> {
-    let home = root.join(".blackhole");
+fn enter(root: &Path, directory: &str, create: bool) -> io::Result<bool> {
+    let home = root.join(directory);
+    let misplaced = || io::Error::other(format!("{directory} must be a directory"));
+    if create
+        && let Err(e) = fs::create_dir(&home)
+        && e.kind() != io::ErrorKind::AlreadyExists
+    {
+        return Err(e);
+    }
     match fs::symlink_metadata(&home) {
         Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(io::Error::other(MISPLACED)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Ok(_) => return Err(misplaced()),
+        Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),
     }
     match env::set_current_dir(&home) {
         Ok(()) if fs::canonicalize(".")? == home => Ok(true),
-        Ok(()) => Err(io::Error::other(MISPLACED)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Ok(()) => Err(misplaced()),
+        Err(e) if !create && e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -153,68 +181,126 @@ fn policy(entered: bool, name: &str) -> io::Result<Option<Vec<u8>>> {
 
 // The rename is the only write to the file, so a crash leaves the old one whole.
 // Both names are relative: the caller has entered the directory.
-fn replace(name: &str, contents: &str) -> io::Result<()> {
+fn replace(name: &str, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let temp = format!("{name}.{}.tmp", std::process::id());
-    fs::File::create_new(&temp)?.write_all(contents.as_bytes())?;
-    fs::rename(temp, name)
+    let permissions = files::regular(Path::new(name))?.map(|m| m.permissions());
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // Restrict the temporary file from its first open; after writing, restore bits masked by umask or cleared by the write.
+    #[cfg(unix)]
+    if let Some(mode) = &permissions {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(mode.mode());
+    }
+    let file = options.open(&temp)?;
+    fill(file, contents.as_ref(), permissions)
+        .and_then(|()| fs::rename(&temp, name))
+        .map_err(|error| match fs::remove_file(&temp) {
+            Ok(()) => error,
+            Err(cleanup) => {
+                io::Error::new(error.kind(), format!("{error}; removing {temp}: {cleanup}"))
+            }
+        })
+}
+
+// Takes the file so it is closed before the rename or the removal.
+fn fill(
+    mut file: fs::File,
+    contents: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> io::Result<()> {
+    file.write_all(contents)?;
+    permissions.map_or(Ok(()), |mode| file.set_permissions(mode))
+}
+
+struct Policy {
+    config: config::Config,
+    entered: bool,
+    ledger_bytes: Option<Vec<u8>>,
+    base: ledger::Counts,
+}
+
+impl Policy {
+    fn load(root: &Path) -> io::Result<Self> {
+        let config =
+            config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
+        let entered = enter(root, ".blackhole", false)?;
+        let ledger_bytes = policy(entered, "ledger")?;
+        let base = ledger::load(ledger_bytes.as_deref())?;
+        Ok(Self {
+            config,
+            entered,
+            ledger_bytes,
+            base,
+        })
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.base.keys().map(|(_, path)| path.as_str())
+    }
 }
 
 struct Scan {
-    ledger_bytes: Option<Vec<u8>>,
-    base: ledger::Counts,
     actual: ledger::Counts,
     over: bool,
     stale: ledger::Counts,
 }
 
-fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<Scan> {
-    // The selection is resolved before the working directory moves.
-    let (names, selection) = files::list(root, paths)?;
-    let config = config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
-    let entered = enter(root)?;
-    let ledger_bytes = policy(entered, "ledger")?;
-    let base = ledger::load(ledger_bytes.as_deref())?;
-    let under = |path: &str, chosen: &Path| root.join(path).starts_with(chosen);
-    // A path with no file left is still a selection while the ledger has a row under it. A path that holds the repository would match every file, so it is not one.
-    for chosen in &selection {
-        let rows = base.keys().map(|(_, path)| path);
-        if !(chosen.starts_with(root) && names.iter().chain(rows).any(|path| under(path, chosen))) {
-            return Err(io::Error::other(format!(
-                "no files match {}",
-                chosen.display().to_string().escape_default()
-            )));
-        }
-    }
-    // Both policy files are read before any file is judged, so a link at either is refused before a scan could follow it.
-    let filed = policy(entered, "objections")?.unwrap_or_default();
-    let all = || names.iter().map(String::as_str);
-    let selected = all()
-        .filter(|name| selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)));
+fn scan_all(root: &Path, policy: &Policy, output: &mut impl Write) -> io::Result<Scan> {
+    scan(
+        root,
+        policy,
+        &files::list(root, root, &[], policy.paths())?,
+        output,
+    )
+}
+
+fn scan(
+    root: &Path,
+    rules: &Policy,
+    listing: &files::Listing<'_>,
+    output: &mut impl Write,
+) -> io::Result<Scan> {
+    // Both policy files are read before any file is judged.
+    let filed = policy(rules.entered, "objections")?.unwrap_or_default();
+    let names = listing.names.iter().map(String::as_str);
     let findings = scan_files(
-        &config,
+        &rules.config,
         Vec::new(),
-        selected,
+        names,
         (),
-        |()| files::repository_paths(root, all()),
+        |()| inventory(root, listing),
         |(), name| files::read(&root.join(name)),
     )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
     let objections = objections::parse(&filed, today)?;
-    let over = ledger::excess(&actual, &objections::allowances(&base, &objections, today));
-    let mut stale = ledger::excess(&base, &actual);
-    if !selection.is_empty() {
-        // A line for a file outside the selection says nothing about this run. A file that is gone is still inside it.
-        stale.retain(|(_, path), _| selection.iter().any(|chosen| under(path, chosen)));
+    let over = ledger::excess(
+        &actual,
+        &objections::allowances(&rules.base, &objections, today),
+    );
+    let mut stale = ledger::excess(&rules.base, &actual);
+    if let Some(rows) = &listing.rows {
+        stale.retain(|(_, path), _| rows.contains(path.as_str()));
     }
     report(&findings, &over, output)?;
     Ok(Scan {
-        ledger_bytes,
-        base,
         actual,
         over: !over.is_empty(),
         stale,
     })
+}
+
+// A listing narrowed to selected paths still resolves imports against every file in the repository.
+fn inventory(
+    root: &Path,
+    listing: &files::Listing<'_>,
+) -> io::Result<packs::boundary::RepositoryPaths> {
+    if listing.rows.is_none() {
+        return files::repository_paths(root, listing.names.iter().map(String::as_str));
+    }
+    let all = files::list(root, root, &[], std::iter::empty())?;
+    files::repository_paths(root, all.names.iter().map(String::as_str))
 }
 
 fn scan_files<'a, S: Send>(
@@ -266,12 +352,19 @@ fn print_findings<'a>(
     let mut matched = std::collections::BTreeSet::new();
     for f in findings {
         matched.insert(f.rule);
-        write!(output, "{}:{}:{} {}", f.path, f.line, f.col, f.rule)?;
+        write!(
+            output,
+            "{}:{}:{} {}",
+            diagnostic_text(&f.path),
+            f.line,
+            f.col,
+            f.rule
+        )?;
         if f.gate == engine::Gate::Advisory {
             write!(output, " [advisory]")?;
         }
         if let Some(note) = &f.note {
-            write!(output, " {note}")?;
+            write!(output, " {}", diagnostic_text(note))?;
         }
         writeln!(output)?;
     }
@@ -292,7 +385,7 @@ fn print_findings<'a>(
 pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> io::Result<()> {
     let root = files::root()?;
     let _lock = files::lock(&root)?;
-    let entered = enter(&root)?;
+    let entered = enter(&root, ".blackhole", false)?;
     let bytes = policy(entered, "objections")?.unwrap_or_default();
     let today = objections::Date::today()?;
     let rows = objections::parse(&bytes, today)?;
@@ -338,13 +431,14 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         let reason = reason
             .filter(|s| !s.trim().is_empty() && !s.contains(['\r', '\n', '\t']))
             .ok_or_else(|| io::Error::other("invalid reason"))?;
-        let scan = scan(&root, &[], &mut io::sink())?;
+        let policy = Policy::load(&root)?;
+        let scan = scan_all(&root, &policy, &mut io::sink())?;
         let extra = scan
             .actual
             .get(&key)
             .copied()
             .unwrap_or(0)
-            .saturating_sub(scan.base.get(&key).copied().unwrap_or(0));
+            .saturating_sub(policy.base.get(&key).copied().unwrap_or(0));
         if extra == 0 || ledger::invalid_path(&key.1) {
             return Err(io::Error::other("no representable overage"));
         }
@@ -357,11 +451,30 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
         contents.push_str(&filed.line(&key));
     }
     if !entered {
-        // Creating the directory never follows a link at its path, and entering it checks where the process landed.
-        fs::create_dir(root.join(".blackhole"))?;
-        if !enter(&root)? {
-            return Err(io::Error::other(MISPLACED));
-        }
+        enter(&root, ".blackhole", true)?;
     }
     replace("objections", &contents)
+}
+
+/// Escapes characters that could disrupt a line of CLI output.
+fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
+    let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+    // A literal escape must remain distinguishable from the control character it spells.
+    if !text.chars().any(control)
+        && !text.match_indices('\\').any(|(index, _)| {
+            let rest = &text[index + 1..];
+            rest.starts_with(['0', 'n', 'r', 't']) || rest.starts_with("u{")
+        })
+    {
+        return text.into();
+    }
+    let mut result = String::new();
+    for c in text.chars() {
+        if control(c) || c == '\\' {
+            result.extend(c.escape_debug());
+        } else {
+            result.push(c);
+        }
+    }
+    result.into()
 }

@@ -1191,6 +1191,27 @@ fn scoped_check_resolves_aliases_outside_the_selection() {
 }
 
 #[test]
+fn package_metadata_keys_are_plain_keys() {
+    let package = r##"{"meta":[{"$serde_json::private::Number":"x"},{"$serde_json::private::RawValue":"x"}],"imports":{"#entry":"restricted"}}"##;
+    let out = judge(
+        &[
+            (
+                "blackhole.toml",
+                "[boundaries]\nbanned-imports=['restricted']",
+            ),
+            ("package.json", package),
+            ("app.mts", "import '#entry';"),
+        ],
+        &[],
+        0,
+    );
+    assert_eq!(
+        lines_for(&out, "app.mts"),
+        ["app.mts:1:8 boundary/banned-imports [advisory] restricted"]
+    );
+}
+
+#[test]
 fn unreadable_resolver_configuration_is_advisory_across_commands() {
     let dir = cli::repo();
     let root = dir.path();
