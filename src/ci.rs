@@ -193,7 +193,7 @@ fn judge(
         today.map_or_else(Date::today, Ok)?,
         artifacts,
     ) {
-        Err(e) if crate::mark(&e) == Some(crate::Fault::Red) => Verdict::unreadable(&e)?,
+        Err(e) if crate::mark(&e) == Some(crate::Fault::Red) => Verdict::unreadable(&e),
         result => result?,
     };
     out.write_all(&result.lines)?;
@@ -202,26 +202,23 @@ fn judge(
         .into_iter()
         .partition(|gate| WAITING.contains(gate));
     let (waiting, red) = (waiting.join(", "), red.join(", "));
-    let state = match (red.is_empty(), waiting.is_empty()) {
-        (true, true) => {
-            writeln!(out, "blackhole ci: green")?;
-            State::Green
-        }
-        (false, true) => {
-            writeln!(out, "blackhole ci: red ({red})")?;
-            State::Red
-        }
-        (false, false) => {
-            writeln!(out, "blackhole ci: red ({red}); waiting ({waiting})")?;
-            State::Red
-        }
-        (true, false) => {
-            writeln!(
-                out,
-                "blackhole ci: waiting ({waiting}): a person with write access who wrote none of the change approves the head"
-            )?;
-            State::Waiting
-        }
+    let state = if !red.is_empty() {
+        let pending = if waiting.is_empty() {
+            String::new()
+        } else {
+            format!("; waiting ({waiting})")
+        };
+        writeln!(out, "blackhole ci: red ({red}){pending}")?;
+        State::Red
+    } else if !waiting.is_empty() {
+        writeln!(
+            out,
+            "blackhole ci: waiting ({waiting}): a person with write access who wrote none of the change approves the head"
+        )?;
+        State::Waiting
+    } else {
+        writeln!(out, "blackhole ci: green")?;
+        State::Green
     };
     Ok(state)
 }

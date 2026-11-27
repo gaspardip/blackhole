@@ -222,10 +222,7 @@ fn edit_destination(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Op
                 return Ok(Some(path));
             }
             Err(e) => {
-                return Err(crate::usage(format!(
-                    "Cannot resolve edit target {}: {e}",
-                    path.display()
-                )));
+                return Err(unresolved(&path, &e));
             }
         }
     }
@@ -234,14 +231,18 @@ fn edit_destination(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Op
     ))
 }
 
+fn unresolved(path: &Path, e: &io::Error) -> io::Error {
+    crate::usage(format!(
+        "Cannot resolve edit target {}: {e}",
+        path.display()
+    ))
+}
+
 fn validate_target(path: &Path) -> io::Result<()> {
     if let Err(e) = fs::metadata(path)
         && e.kind() != io::ErrorKind::NotFound
     {
-        return Err(crate::usage(format!(
-            "Cannot resolve edit target {}: {e}",
-            path.display()
-        )));
+        return Err(unresolved(path, &e));
     }
     Ok(())
 }
@@ -382,10 +383,7 @@ fn resolve(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<Path
     match crate::files::resolve(path, seen) {
         Ok(p) => Ok(Some(p)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(crate::usage(format!(
-            "Cannot resolve edit target {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(unresolved(path, &e)),
     }
 }
 
