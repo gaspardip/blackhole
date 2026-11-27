@@ -48,36 +48,31 @@ fn diff_rules(ctx: &mut DiffCtx<'_>) -> (DiffFindings, io::Result<()>) {
 }
 
 fn coverage_gate(
-    ctx: &mut DiffCtx<'_>,
+    delta: &Delta<'_>,
+    status: io::Result<()>,
     lcov: &str,
     artifacts: Option<&Path>,
     head: &str,
     verdict: &mut Verdict,
 ) -> io::Result<()> {
-    let delta = red_or(coverage::changed(
-        ctx.changes,
-        ctx.base_excludes,
-        ctx.base,
-        ctx.head,
-        ctx.batch,
-    ))?;
-    match delta {
-        Ok(Delta::Lines(delta)) => {
-            if !delta.is_empty()
-                && let Err(e) = evidence(coverage::check(&delta, artifacts, head, lcov))?
-            {
-                verdict.gates.insert("coverage");
-                writeln!(verdict.lines, "coverage: {e}")?;
-            }
-        }
-        Ok(Delta::TooLarge(path)) => {
-            verdict.gates.insert("coverage");
+    if !delta.oversized.is_empty() {
+        verdict.gates.insert("coverage");
+        for path in &delta.oversized {
             writeln!(
                 verdict.lines,
                 "coverage: {} exceeds Git's text diff size limit; split it into smaller files",
                 crate::diagnostic_text(path)
             )?;
         }
+    }
+    match status {
+        Ok(()) if delta.oversized.is_empty() => {
+            if let Err(e) = evidence(coverage::check(delta, artifacts, head, lcov))? {
+                verdict.gates.insert("coverage");
+                writeln!(verdict.lines, "coverage: {e}")?;
+            }
+        }
+        Ok(()) => (),
         Err(e) => {
             verdict.gates.insert("unreadable");
             writeln!(verdict.lines, "{e}")?;
@@ -134,6 +129,12 @@ fn evaluate(
         batch: &mut batch,
     };
     let (diff, result) = diff_rules(&mut ctx);
+    let mut delta = Delta::default();
+    let coverage_result = base_config
+        .lcov
+        .as_ref()
+        .map(|lcov| red_or(coverage::changed(&mut ctx, &mut delta)).map(|status| (lcov, status)))
+        .transpose()?;
     let findings = match red_or(result)? {
         Ok(()) => red_or(crate::scan_files(
             scan_config,
@@ -141,7 +142,13 @@ fn evaluate(
             head_tree.paths(),
             &mut *ctx.batch,
             |batch| head_tree.repository_paths(batch),
-            |batch, path| head_tree.read(path, batch),
+            |batch, path| {
+                head_tree
+                    .blob(path, batch)?
+                    .filter(|id| !delta.skipped_blobs.contains(id))
+                    .map(|id| batch.read(id))
+                    .transpose()
+            },
         ))?,
         Err(e) => Err(e),
     };
@@ -168,8 +175,8 @@ fn evaluate(
             .insert(verdict::unreadable_or(e, "configuration"));
         writeln!(verdict.lines, "{e}")?;
     }
-    if let Some(lcov) = &base_config.lcov {
-        coverage_gate(&mut ctx, lcov, artifacts, head, &mut verdict)?;
+    if let Some((lcov, status)) = coverage_result {
+        coverage_gate(&delta, status, lcov, artifacts, head, &mut verdict)?;
     }
     batch.finish()?;
     Ok(verdict)

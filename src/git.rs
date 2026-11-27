@@ -183,10 +183,6 @@ impl Tree {
         Ok(paths)
     }
 
-    // A link to a file is read under the link's name, as a checkout reads it. A directory has nothing to read.
-    pub(crate) fn read(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
-        self.blob(path, batch)?.map(|id| batch.read(id)).transpose()
-    }
     pub(crate) fn blob(&self, path: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
         match self.resolve_blob(path, batch)? {
             Blob::File(id) => Ok(Some(id)),
@@ -315,7 +311,7 @@ pub(crate) struct Batch {
 impl Batch {
     pub(crate) fn start() -> io::Result<Self> {
         let mut child = command()
-            .args(["cat-file", "--batch"])
+            .args(["cat-file", "--batch-command"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -333,10 +329,35 @@ impl Batch {
         })
     }
     pub(crate) fn read(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        self.query("contents", id, |reader, size| {
+            let mut bytes = vec![0; size];
+            reader.read_exact(&mut bytes)?;
+            let mut nl = [0];
+            reader.read_exact(&mut nl)?;
+            if nl != *b"\n" {
+                return Err(io::Error::other("invalid git blob terminator"));
+            }
+            Ok(bytes)
+        })
+    }
+
+    pub(crate) fn size(&mut self, id: &str) -> io::Result<usize> {
+        self.query("info", id, |_, size| Ok(size))
+    }
+
+    fn query<T>(
+        &mut self,
+        action: &str,
+        id: &str,
+        receive: impl FnOnce(&mut BufReader<ChildStdout>, usize) -> io::Result<T>,
+    ) -> io::Result<T> {
         if let Some(error) = &self.terminal {
             return Err(repeat(error));
         }
-        match self.read_blob(id) {
+        let result = self
+            .header(action, id)
+            .and_then(|size| receive(&mut self.reader, size));
+        match result {
             Err(e)
                 if matches!(
                     e.kind(),
@@ -356,13 +377,13 @@ impl Batch {
         }
     }
 
-    fn read_blob(&mut self, id: &str) -> io::Result<Vec<u8>> {
+    fn header(&mut self, action: &str, id: &str) -> io::Result<usize> {
         let input = self
             .child
             .stdin
             .as_mut()
             .ok_or_else(|| io::Error::other("missing git stdin"))?;
-        writeln!(input, "{id}")?;
+        writeln!(input, "{action} {id}")?;
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
         if !line.ends_with('\n') {
@@ -378,14 +399,7 @@ impl Batch {
         if oid != id {
             return Err(io::Error::other("unexpected git blob"));
         }
-        let mut bytes = vec![0; size.parse().map_err(io::Error::other)?];
-        self.reader.read_exact(&mut bytes)?;
-        let mut nl = [0];
-        self.reader.read_exact(&mut nl)?;
-        if nl != *b"\n" {
-            return Err(io::Error::other("invalid git blob terminator"));
-        }
-        Ok(bytes)
+        size.parse().map_err(io::Error::other)
     }
     pub(crate) fn finish(mut self) -> io::Result<()> {
         // A read already reported this failure, so waiting again would discard the gates found.
@@ -400,6 +414,28 @@ impl Batch {
         }
     }
 }
+// A large extensionless blob only needs its first two bytes to decide if coverage applies.
+pub(crate) fn shebang(id: &str) -> io::Result<bool> {
+    let mut child = command()
+        .args(["cat-file", "blob", id])
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| start(&e))?;
+    let mut prefix = [0; 2];
+    let read = child.stdout.take().unwrap().read_exact(&mut prefix);
+    if read.is_ok() {
+        let _ = child.kill();
+        child.wait()?;
+        return Ok(prefix == *b"#!");
+    }
+    let status = child.wait()?;
+    if status.success() {
+        read.map(|()| false)
+    } else {
+        Err(failure(status, b"git cat-file failed"))
+    }
+}
+
 fn repeat(error: &io::Error) -> io::Error {
     match crate::mark(error) {
         Some(fault) => crate::classified(fault, error),

@@ -1549,3 +1549,62 @@ fn a_hook_deadline_also_covers_a_blocked_read() {
         b"blackhole: deadline exceeded while reading the hook payload\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn coverage_checks_both_blob_sizes_before_requesting_their_bodies() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "base"]).unwrap();
+    fs::write(root.join("a.py"), "x = 2\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "head"]).unwrap();
+    let shims = tempdir().unwrap();
+    git_shim(
+        shims.path(),
+        r#"case " $* " in *" cat-file "*)
+            while IFS= read -r request; do
+                case "$request" in
+                    "info $BLOB") printf '%s blob %s\n' "$BLOB" "$SIZE"; continue;;
+                    "$BLOB"|"contents $BLOB")
+                        if [ "$SIZE" -gt 1072693248 ]; then
+                            : > "$BODY"
+                            exit 42
+                        fi;;
+                esac
+                printf '%s\n' "$request" | "$real" "$@" || exit $?
+            done
+            exit 0;;
+        esac"#,
+    );
+    for rev in ["HEAD~:a.py", "HEAD:a.py"] {
+        let blob = common::git(root, &["rev-parse", rev]).unwrap();
+        for (size, expected) in [
+            ("1072693248", "trusted report missing"),
+            ("1072693249", "a.py exceeds Git's text diff size limit"),
+        ] {
+            let body = shims.path().join("body-requested");
+            let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+                .current_dir(root)
+                .env("PATH", shims.path())
+                .env("BLOB", &blob)
+                .env("SIZE", size)
+                .env("BODY", &body)
+                .args(["ci", "--base", "HEAD~", "--head", "HEAD"])
+                .output()
+                .unwrap();
+            assert!(!body.exists(), "{rev} at {size}: {out:?}");
+            assert_eq!(out.status.code(), Some(1), "{rev} at {size}: {out:?}");
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert!(stdout.contains(expected), "{rev} at {size}: {stdout}");
+            assert_eq!(stdout.lines().last(), Some("blackhole ci: red (coverage)"));
+        }
+    }
+}

@@ -1,12 +1,12 @@
 mod lcov;
 
 use crate::{
+    engine::DiffCtx,
     files,
-    git::{self, Batch, Tree},
-    verdict::{Change, Kind},
+    git::{self, Batch},
+    verdict::Kind,
 };
-use globset::GlobSet;
-use std::{fs, io, ops::Range, path::Path};
+use std::{collections::HashSet, fs, io, ops::Range, path::Path};
 
 pub(crate) fn relative_path(value: &str) -> Option<&str> {
     let path = value.strip_prefix("./").unwrap_or(value);
@@ -14,15 +14,17 @@ pub(crate) fn relative_path(value: &str) -> Option<&str> {
     (!drive && !crate::ledger::invalid_path(path)).then_some(path)
 }
 
-pub(crate) struct Changed<'a> {
+struct Changed<'a> {
     path: &'a str,
     lines: usize,
     hunks: Vec<Range<usize>>,
 }
 
-pub(crate) enum Delta<'a> {
-    Lines(Vec<Changed<'a>>),
-    TooLarge(&'a str),
+#[derive(Default)]
+pub(crate) struct Delta<'a> {
+    lines: Vec<Changed<'a>>,
+    pub(crate) oversized: Vec<&'a str>,
+    pub(crate) skipped_blobs: HashSet<&'a str>,
 }
 
 const EXTENSIONS: &[&str] = &[
@@ -102,28 +104,35 @@ fn source_blob<'a>(
     id: Option<&'a str>,
     path: &str,
     batch: &mut Batch,
-) -> io::Result<Option<(&'a str, Vec<u8>)>> {
-    let Some(id) = id else {
+) -> io::Result<Option<(&'a str, usize)>> {
+    let Some(id) = id.filter(|_| source(path, b"#!")) else {
         return Ok(None);
     };
-    let bytes = batch.read(id)?;
-    Ok(source(path, &bytes).then_some((id, bytes)))
+    let size = batch.size(id)?;
+    let covered = source(path, &[])
+        || if fits_text_diff(size, 0) {
+            batch.read(id)?.starts_with(b"#!")
+        } else {
+            git::shebang(id)?
+        };
+    Ok(covered.then_some((id, size)))
 }
 
-pub(crate) fn changed<'a>(
-    changes: &'a [Change],
-    excludes: &GlobSet,
-    base: &Tree,
-    head: &Tree,
-    batch: &mut Batch,
-) -> io::Result<Delta<'a>> {
-    let mut delta = Vec::new();
-    for change in changes {
+pub(crate) fn changed<'a>(ctx: &mut DiffCtx<'a>, delta: &mut Delta<'a>) -> io::Result<()> {
+    let DiffCtx {
+        changes,
+        base_excludes: excludes,
+        base,
+        head,
+        batch,
+        ..
+    } = ctx;
+    for change in *changes {
         let path = change.path.as_str();
         if matches!(change.kind, Kind::Deleted) || excludes.is_match(path) {
             continue;
         }
-        let Some((new, bytes)) = source_blob(head.blob(path, batch)?, path, batch)? else {
+        let Some((new, new_size)) = source_blob(head.blob(path, batch)?, path, batch)? else {
             if source(path, &[]) {
                 return Err(crate::red(format!(
                     "coverage: {} has no source blob; make it a regular file",
@@ -132,10 +141,7 @@ pub(crate) fn changed<'a>(
             }
             continue;
         };
-        let new_size = bytes.len();
-        let lines = bytes.split_inclusive(|&b| b == b'\n').count();
-        drop(bytes);
-        if lines == 0 {
+        if new_size == 0 {
             continue;
         }
         let old_path = match &change.kind {
@@ -146,29 +152,36 @@ pub(crate) fn changed<'a>(
             None
         } else {
             source_blob(base.historical_blob(old_path, batch)?, old_path, batch)?
-                .map(|(id, bytes)| (id, bytes.len()))
         };
+        if !fits_text_diff(old.map_or(0, |(_, size)| size), new_size) {
+            delta.oversized.push(path);
+            if !fits_text_diff(0, new_size) {
+                delta.skipped_blobs.insert(new);
+            }
+            continue;
+        }
+        let lines = batch.read(new)?.split_inclusive(|&b| b == b'\n').count();
         let hunks = match old {
             Some((id, _)) if id == new => continue,
-            Some((_, old_size)) if !fits_text_diff(old_size, new_size) => {
-                return Ok(Delta::TooLarge(path));
-            }
             Some((id, _)) => hunks(id, new)?,
             None => std::iter::once(1..lines + 1).collect(),
         };
         if !hunks.is_empty() {
-            delta.push(Changed { path, lines, hunks });
+            delta.lines.push(Changed { path, lines, hunks });
         }
     }
-    Ok(Delta::Lines(delta))
+    Ok(())
 }
 
 pub(crate) fn check(
-    delta: &[Changed<'_>],
+    delta: &Delta<'_>,
     artifacts: Option<&Path>,
     head: &str,
     lcov: &str,
 ) -> io::Result<()> {
+    if delta.lines.is_empty() {
+        return Ok(());
+    }
     let root = fs::canonicalize(artifacts.ok_or_else(|| {
         io::Error::other("trusted report missing; supply --coverage-dir for this head")
     })?)?;
@@ -187,7 +200,7 @@ pub(crate) fn check(
     }
     let bytes = files::policy(&path)?.ok_or_else(|| io::Error::other("missing LCOV file"))?;
     let report = lcov::parse(std::str::from_utf8(&bytes).map_err(io::Error::other)?)?;
-    for file in delta {
+    for file in &delta.lines {
         let records = report
             .get(file.path)
             .ok_or_else(|| io::Error::other(format!("missing LCOV record for {:?}", file.path)))?;
