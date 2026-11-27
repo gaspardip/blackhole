@@ -1,9 +1,6 @@
-use serde::{
-    de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor},
-    ser::{Serialize, SerializeMap, Serializer},
-};
-use serde_json::{Number, Value};
-use std::{collections::HashSet, fmt, iter};
+use serde::de::{Deserialize, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde_json::Value;
+use std::{collections::HashSet, fmt, iter, ops::Range};
 
 pub(super) enum Json {
     Object(Object),
@@ -43,10 +40,57 @@ impl Object {
 
 impl Json {
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        let mut doc: Self = serde_json::from_slice(bytes)?;
-        let mut tokens = number_tokens(bytes);
-        doc.restore_numbers(&mut tokens);
+        // Skipping values checks number syntax without evaluating it, so 1e400 stays valid.
+        serde_json::from_slice::<IgnoredAny>(bytes)?;
+        let ranges: Vec<_> = number_tokens(bytes).collect();
+        // Same-length placeholders keep error positions; the original tokens are restored below.
+        let mut masked = bytes.to_vec();
+        for range in &ranges {
+            masked[range.clone()].fill(b' ');
+            masked[range.start] = b'0';
+        }
+        let mut doc: Self = serde_json::from_slice(&masked)?;
+        doc.restore_numbers(&mut ranges.into_iter().map(|range| &bytes[range]));
         Ok(doc)
+    }
+
+    // serde_json writes number tokens verbatim only with arbitrary_precision, which changes every Value parse.
+    pub(super) fn to_vec_pretty(&self) -> serde_json::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.write_pretty(&mut out, 0)?;
+        Ok(out)
+    }
+
+    fn write_pretty(&self, out: &mut Vec<u8>, depth: usize) -> serde_json::Result<()> {
+        let (open, close, items): (u8, u8, Vec<_>) = match self {
+            Self::Scalar(value) => return serde_json::to_writer(out, value),
+            Self::Number(token) => {
+                out.extend_from_slice(token.as_bytes());
+                return Ok(());
+            }
+            Self::Array(items) => (b'[', b']', items.iter().map(|v| (None, v)).collect()),
+            Self::Object(Object(entries)) => (
+                b'{',
+                b'}',
+                entries.iter().map(|(k, v)| (Some(k), v)).collect(),
+            ),
+        };
+        out.push(open);
+        for (i, (key, value)) in items.iter().enumerate() {
+            out.extend_from_slice(if i == 0 { b"\n" } else { b",\n" });
+            out.resize(out.len() + 2 * (depth + 1), b' ');
+            if let Some(key) = key {
+                serde_json::to_writer(&mut *out, key)?;
+                out.extend_from_slice(b": ");
+            }
+            value.write_pretty(out, depth + 1)?;
+        }
+        if !items.is_empty() {
+            out.push(b'\n');
+            out.resize(out.len() + 2 * depth, b' ');
+        }
+        out.push(close);
+        Ok(())
     }
 
     fn restore_numbers<'a>(&mut self, tokens: &mut impl Iterator<Item = &'a [u8]>) {
@@ -141,26 +185,6 @@ impl Json {
     }
 }
 
-impl Serialize for Json {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Scalar(value) => value.serialize(serializer),
-            // The JSON parser validated these tokens before their original spellings were restored.
-            Self::Number(token) => {
-                Number::from_string_unchecked(token.clone()).serialize(serializer)
-            }
-            Self::Array(items) => items.serialize(serializer),
-            Self::Object(object) => {
-                let mut map = serializer.serialize_map(Some(object.0.len()))?;
-                for (key, value) in &object.0 {
-                    map.serialize_entry(key, value)?;
-                }
-                map.end()
-            }
-        }
-    }
-}
-
 impl<'de> Deserialize<'de> for Json {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_any(JsonVisitor)
@@ -179,11 +203,8 @@ impl<'de> Visitor<'de> for JsonVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
         let mut keys = HashSet::new();
         let mut entries = Vec::new();
-        while let Some(key) = map.next_key::<Key>()? {
-            let Key::Object(key) = key else {
-                return map.next_value().map(Json::Number);
-            };
-            if !keys.insert(key.clone()) {
+        while let Some(key) = map.next_key::<String>()? {
+            if key.starts_with("$serde_json::private::") || !keys.insert(key.clone()) {
                 return Err(A::Error::custom(super::INVALID_HOOKS));
             }
             entries.push((key, map.next_value()?));
@@ -211,47 +232,12 @@ impl<'de> Visitor<'de> for JsonVisitor {
         Ok(Json::string(value))
     }
 
-    fn visit_i64<E>(self, value: i64) -> Result<Json, E> {
-        Ok(Json::Number(value.to_string()))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Json, E> {
-        Ok(Json::Number(value.to_string()))
+    fn visit_u64<E>(self, _: u64) -> Result<Json, E> {
+        Ok(Json::Number(String::new()))
     }
 }
 
-enum Key {
-    Object(String),
-    Number,
-}
-
-impl<'de> Deserialize<'de> for Key {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // JSON object keys dispatch to visit_some; an arbitrary-precision number supplies a synthetic string key.
-        deserializer.deserialize_option(KeyVisitor)
-    }
-}
-
-struct KeyVisitor;
-impl<'de> Visitor<'de> for KeyVisitor {
-    type Value = Key;
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON object key")
-    }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Key, D::Error> {
-        let key = String::deserialize(d)?;
-        if key.starts_with("$serde_json::private::") {
-            return Err(serde::de::Error::custom(super::INVALID_HOOKS));
-        }
-        Ok(Key::Object(key))
-    }
-    fn visit_borrowed_str<E: serde::de::Error>(self, _: &'de str) -> Result<Key, E> {
-        Ok(Key::Number)
-    }
-}
-
-// The parser normalizes exponent spellings, so recover number tokens from the already validated input.
-fn number_tokens(input: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn number_tokens(input: &[u8]) -> impl Iterator<Item = Range<usize>> {
     let mut i = 0;
     iter::from_fn(move || {
         while let Some(&byte) = input.get(i) {
@@ -271,7 +257,7 @@ fn number_tokens(input: &[u8]) -> impl Iterator<Item = &[u8]> {
                     ) {
                         i += 1;
                     }
-                    return Some(&input[start..i]);
+                    return Some(start..i);
                 }
                 _ => {}
             }

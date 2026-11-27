@@ -415,6 +415,22 @@ fn settings_keep_original_number_tokens() {
 }
 
 #[test]
+fn settings_keep_numbers_outside_the_float_range() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".claude")).unwrap();
+    let file = root.join(".claude/settings.json");
+    let prefix = "{\n  \"values\": [\n    1e400,\n    -1E+400,\n    1e-400\n  ]";
+    fs::write(&file, format!("{prefix}\n}}\n")).unwrap();
+    init(root, true);
+    let text = fs::read_to_string(file).unwrap();
+    assert!(
+        text.starts_with(&format!("{prefix},\n  \"hooks\":")),
+        "{text}"
+    );
+}
+
+#[test]
 fn codex_accepts_null_matcher() {
     let dir = repo();
     let root = dir.path();

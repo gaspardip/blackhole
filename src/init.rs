@@ -321,7 +321,7 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
     if !changed {
         return Ok(None);
     }
-    let mut output = serde_json::to_vec_pretty(&doc)?;
+    let mut output = doc.to_vec_pretty()?;
     output.push(b'\n');
     Ok(Some(output))
 }
