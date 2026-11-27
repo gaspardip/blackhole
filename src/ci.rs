@@ -1,5 +1,6 @@
 use crate::{
     config,
+    coverage::{self, Delta},
     engine::{self, DiffCtx, DiffFindings, Run},
     files::{LEDGER_PATH, OBJECTIONS_PATH},
     git::{self, Batch, Tree},
@@ -44,6 +45,45 @@ fn diff_rules(ctx: &mut DiffCtx<'_>) -> (DiffFindings, io::Result<()>) {
         });
     engine::sort_findings(&mut findings.removals);
     (findings, result)
+}
+
+fn coverage_gate(
+    ctx: &mut DiffCtx<'_>,
+    lcov: &str,
+    artifacts: Option<&Path>,
+    head: &str,
+    verdict: &mut Verdict,
+) -> io::Result<()> {
+    let delta = red_or(coverage::changed(
+        ctx.changes,
+        ctx.base_excludes,
+        ctx.base,
+        ctx.head,
+        ctx.batch,
+    ))?;
+    match delta {
+        Ok(Delta::Lines(delta)) => {
+            if !delta.is_empty()
+                && let Err(e) = evidence(coverage::check(&delta, artifacts, head, lcov))?
+            {
+                verdict.gates.insert("coverage");
+                writeln!(verdict.lines, "coverage: {e}")?;
+            }
+        }
+        Ok(Delta::TooLarge(path)) => {
+            verdict.gates.insert("coverage");
+            writeln!(
+                verdict.lines,
+                "coverage: {} exceeds Git's text diff size limit; split it into smaller files",
+                crate::diagnostic_text(path)
+            )?;
+        }
+        Err(e) => {
+            verdict.gates.insert("unreadable");
+            writeln!(verdict.lines, "{e}")?;
+        }
+    }
+    Ok(())
 }
 
 fn evaluate(
@@ -129,27 +169,7 @@ fn evaluate(
         writeln!(verdict.lines, "{e}")?;
     }
     if let Some(lcov) = &base_config.lcov {
-        let delta = red_or(crate::coverage::changed(
-            &changes,
-            &base_config.exclude,
-            &base_tree,
-            &head_tree,
-            &mut batch,
-        ))?;
-        match delta {
-            Ok(delta) => {
-                if !delta.is_empty()
-                    && let Err(e) = evidence(crate::coverage::check(&delta, artifacts, head, lcov))?
-                {
-                    verdict.gates.insert("coverage");
-                    writeln!(verdict.lines, "coverage: {e}")?;
-                }
-            }
-            Err(e) => {
-                verdict.gates.insert("unreadable");
-                writeln!(verdict.lines, "{e}")?;
-            }
-        }
+        coverage_gate(&mut ctx, lcov, artifacts, head, &mut verdict)?;
     }
     batch.finish()?;
     Ok(verdict)

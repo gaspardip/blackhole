@@ -20,6 +20,11 @@ pub(crate) struct Changed<'a> {
     hunks: Vec<Range<usize>>,
 }
 
+pub(crate) enum Delta<'a> {
+    Lines(Vec<Changed<'a>>),
+    TooLarge(&'a str),
+}
+
 const EXTENSIONS: &[&str] = &[
     "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "vue", "svelte", "astro", "rs", "py",
     "go", "rb", "java", "kt", "kts", "cs", "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "m",
@@ -46,6 +51,11 @@ fn source(path: &str, bytes: &[u8]) -> bool {
         || (ext == "rb" && (stem.ends_with("_spec") || stem.ends_with("_test")));
     let declaration = matches!(ext, "ts" | "cts" | "mts") && suffix == Some("d");
     !test && !declaration && (source_name(&path) || bytes.starts_with(b"#!"))
+}
+
+fn fits_text_diff(old_size: usize, new_size: usize) -> bool {
+    // Git's xdi_diff checks MAX_XDIFF_SIZE from xdiff-interface.h for each input.
+    old_size.max(new_size) <= 1023 * 1024 * 1024
 }
 
 fn hunks(old: &str, new: &str) -> io::Result<Vec<Range<usize>>> {
@@ -106,7 +116,7 @@ pub(crate) fn changed<'a>(
     base: &Tree,
     head: &Tree,
     batch: &mut Batch,
-) -> io::Result<Vec<Changed<'a>>> {
+) -> io::Result<Delta<'a>> {
     let mut delta = Vec::new();
     for change in changes {
         let path = change.path.as_str();
@@ -122,7 +132,9 @@ pub(crate) fn changed<'a>(
             }
             continue;
         };
+        let new_size = bytes.len();
         let lines = bytes.split_inclusive(|&b| b == b'\n').count();
+        drop(bytes);
         if lines == 0 {
             continue;
         }
@@ -133,18 +145,22 @@ pub(crate) fn changed<'a>(
         let old = if excludes.is_match(old_path) {
             None
         } else {
-            source_blob(base.historical_blob(old_path, batch)?, old_path, batch)?.map(|(id, _)| id)
+            source_blob(base.historical_blob(old_path, batch)?, old_path, batch)?
+                .map(|(id, bytes)| (id, bytes.len()))
         };
         let hunks = match old {
-            Some(id) if id == new => continue,
-            Some(id) => hunks(id, new)?,
+            Some((id, _)) if id == new => continue,
+            Some((_, old_size)) if !fits_text_diff(old_size, new_size) => {
+                return Ok(Delta::TooLarge(path));
+            }
+            Some((id, _)) => hunks(id, new)?,
             None => std::iter::once(1..lines + 1).collect(),
         };
         if !hunks.is_empty() {
             delta.push(Changed { path, lines, hunks });
         }
     }
-    Ok(delta)
+    Ok(Delta::Lines(delta))
 }
 
 pub(crate) fn check(
@@ -194,4 +210,12 @@ pub(crate) fn check(
         }
     }
     Ok(())
+}
+
+#[test]
+fn both_blobs_must_fit_gits_text_diff_limit() {
+    let limit = 1_072_693_248;
+    assert!(fits_text_diff(limit, limit));
+    assert!(!fits_text_diff(limit + 1, 0), "oversize base blob");
+    assert!(!fits_text_diff(0, limit + 1), "oversize head blob");
 }
