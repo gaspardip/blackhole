@@ -145,9 +145,10 @@ def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: st
         if shrink.returncode == 1 and not restored:
             # The ledger command writes nothing while a finding is over its allowance, so drop the rows of the files init wrote.
             ledger = tree / LEDGER
-            rows = ledger.read_text().splitlines(keepends=True)
-            ledger.write_text("".join(
-                row for row in rows if row.rstrip("\n").split("\t", 2)[-1] not in removed
+            # Only LF ends a ledger row; a path may hold other line separators.
+            rows = ledger.read_text().split("\n")
+            ledger.write_text("\n".join(
+                row for row in rows if row.count("\t") < 2 or row.split("\t", 2)[2] not in removed
             ))
         elif shrink.returncode:
             raise CommandError(tree, shrink)

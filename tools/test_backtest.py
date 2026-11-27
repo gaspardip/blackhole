@@ -265,6 +265,19 @@ class Backtest(unittest.TestCase):
         )
         self.assertEqual([finding["path"] for finding in rows[0]["findings"]], ["broken.ts"])
 
+    def test_baseline_row_filter_keeps_a_path_that_ends_like_a_generated_file(self) -> None:
+        self.commit("blackhole.toml", "[boundaries]\nmax-lines = 12\n")
+        self.commit("broken.ts", "export const = ;\n")
+        (self.repo / "a\u2028.claude").mkdir()
+        self.commit("a\u2028.claude/settings.json", "{}\n" + "\n" * 12)
+        clean, _, _ = self.merge("clean.ts", "export const value = 1;\n")
+
+        rows, _ = self.run_backtest(self.binary)
+        self.assertEqual(
+            [(row["commit"], row["state"], row["gates"]) for row in rows],
+            [(clean, "red", ["findings"])],
+        )
+
     def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
         path = ".github/note\nnew.test.ts:1:2 ts/no-skipped-tests marker"
         (self.repo / path).parent.mkdir(parents=True)
