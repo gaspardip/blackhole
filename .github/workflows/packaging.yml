@@ -2,6 +2,10 @@ name: packaging
 
 on:
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      artifact-id:
+        value: ${{ jobs.package.outputs.artifact-id }}
   pull_request:
     paths:
       - '.github/workflows/packaging.yml'
@@ -43,7 +47,7 @@ jobs:
         run: |
           rustc -vV | grep -Fx "host: $TARGET"
           cargo build --release --locked --target "$TARGET"
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.triple }}
           path: target/${{ matrix.triple }}/release/blackhole
@@ -56,20 +60,21 @@ jobs:
     timeout-minutes: 40
     outputs:
       version: ${{ steps.metadata.outputs.version }}
+      artifact-id: ${{ steps.distribution.outputs.artifact-id }}
     steps:
       - *fetch
       - &node
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           token: ''
       - &pnpm
-        uses: pnpm/action-setup@v6.1.1
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 12.16.1
       - name: Verify crate
         run: cargo package --locked
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: target/native
           pattern: '*-*-*'
@@ -86,8 +91,9 @@ jobs:
           pnpm --dir target/npm-package pack --pack-destination "$PWD/target/dist"
           cp target/package/*.crate target/dist/
           cd target/dist
-          sha256sum *.crate *.tgz > SHA256SUMS
-      - uses: actions/upload-artifact@v7.0.2
+          sha256sum -- *.crate *.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: distribution
         with:
           name: distribution-${{ github.sha }}
           path: target/dist/
@@ -103,9 +109,9 @@ jobs:
       - *fetch
       - *node
       - *pnpm
-      - uses: actions/download-artifact@v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: distribution-${{ github.sha }}
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
           path: dist
       - name: Verify and install the tested archive
         env:

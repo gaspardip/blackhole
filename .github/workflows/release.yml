@@ -1,0 +1,135 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      npm-tag: ${{ steps.tag.outputs.npm-tag }}
+      notes: ${{ steps.tag.outputs.notes }}
+    steps:
+      - name: Fetch tag and main history
+        run: |
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q origin refs/heads/main:refs/remotes/origin/main 'refs/tags/v*:refs/tags/v*'
+          git checkout -q --detach "$GITHUB_SHA"
+      - name: Validate release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm_tag=$(python3 -I tools/release_tag.py "$GITHUB_REF_NAME")
+          printf 'npm-tag=%s\nnotes=blackhole %s\n' "$npm_tag" "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+  packaging:
+    needs: validate
+    uses: ./.github/workflows/packaging.yml
+
+  proof:
+    needs: packaging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - &fetch
+        name: Fetch release source
+        run: |
+          git init -q .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+      - &download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.packaging.outputs.artifact-id }}
+          path: dist
+      - &verify
+        name: Verify distribution digests
+        working-directory: dist
+        run: sha256sum --strict --check SHA256SUMS
+      - &node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          token: ''
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
+      - name: Run scenario suite against the installed Linux x64 binary
+        run: |
+          mkdir "${RUNNER_TEMP}/blackhole-proof"
+          printf '{"private":true}\n' > "${RUNNER_TEMP}/blackhole-proof/package.json"
+          pnpm --dir "${RUNNER_TEMP}/blackhole-proof" add --offline --ignore-scripts "$PWD"/dist/*.tgz
+          python3 -I tools/release_scenarios.py "${RUNNER_TEMP}/blackhole-proof/node_modules/.bin/blackhole" evasion
+      # Step 19 adds adoption recordings, fork backtests and the replay benchmark.
+
+  name-guard:
+    needs: [validate, packaging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - *fetch
+      - *download
+      - *verify
+      - name: Extract release archives
+        run: |
+          mkdir -p extracted/crate extracted/npm
+          tar -xzf dist/*.crate -C extracted/crate
+          tar -xzf dist/*.tgz -C extracted/npm
+      - name: Scan archives, checksums and release notes
+        env:
+          BLACKHOLE_BANNED: ${{ secrets.BANNED_NAMES }}
+          RELEASE_NOTES: ${{ needs.validate.outputs.notes }}
+        run: |
+          printf '%s\n' "$RELEASE_NOTES" > release-notes.md
+          python3 -I tools/name_guard.py artifacts extracted dist/SHA256SUMS release-notes.md
+
+  publish:
+    needs: [validate, packaging, proof, name-guard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - *fetch
+      - *download
+      - *verify
+      - *node
+      - name: Compare published registry digests
+        id: registries
+        run: python3 -I tools/release_uploads.py registries dist/*.tgz dist/*.crate dist/SHA256SUMS >> "$GITHUB_OUTPUT"
+      - name: Publish npm tarball
+        if: steps.registries.outputs.npm == 'true'
+        env:
+          NPM_DIST_TAG: ${{ needs.validate.outputs.npm-tag }}
+        # npm provides the trusted-publishing OIDC exchange.
+        run: npm publish dist/*.tgz --tag "$NPM_DIST_TAG" --access public --provenance
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: crates-auth
+        if: steps.registries.outputs.crate == 'true'
+      - name: Publish verified crate
+        if: steps.registries.outputs.crate == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: python3 -I tools/publish_crate.py dist/*.crate
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NPM_DIST_TAG: ${{ needs.validate.outputs.npm-tag }}
+          RELEASE_NOTES: ${{ needs.validate.outputs.notes }}
+        run: python3 -I tools/release_uploads.py github dist/*.tgz dist/*.crate dist/SHA256SUMS
