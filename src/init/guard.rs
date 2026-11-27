@@ -110,9 +110,27 @@ fn on_branch(repo: &Repo, branch: &str, encoded: &str, workflow: &[u8]) -> Resul
 // The rulesets GitHub applies to the branch, once they require pull requests and the blackhole check from GitHub Actions.
 fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, Stop> {
     let slug = &repo.slug;
-    let endpoint = format!("repos/{slug}/rules/branches/{encoded}?per_page=100");
-    let rules = json(&endpoint, &get(repo, &endpoint, &[])?)?;
-    let rules = rules.as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut page = 1;
+    let mut rules = Vec::new();
+    loop {
+        let endpoint = format!("repos/{slug}/rules/branches/{encoded}?per_page=100&page={page}");
+        let response = get(repo, &endpoint, &[])?;
+        if response.status != 200 {
+            return Err(unexpected(&endpoint, &response));
+        }
+        let Some(Value::Array(mut entries)) = response.json() else {
+            return Err(Failure::Unreachable(format!(
+                "{endpoint} returned a malformed rules list"
+            ))
+            .into());
+        };
+        let last = entries.len() < 100;
+        rules.append(&mut entries);
+        if last {
+            break;
+        }
+        page += 1;
+    }
     let mut pull_requests = rules.iter().any(|rule| rule["type"] == "pull_request");
     let mut sources: Vec<Option<u64>> = rules
         .iter()

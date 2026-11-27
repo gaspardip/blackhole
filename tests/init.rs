@@ -923,7 +923,7 @@ fn a_truncated_workflow_reports_the_first_missing_line() {
 }
 
 const SCOPES: (&str, &str) = ("X-Oauth-Scopes", "repo, read:org");
-const RULES: &str = "repos/owner/repo/rules/branches/main?per_page=100";
+const RULES: &str = "repos/owner/repo/rules/branches/main?per_page=100&page=1";
 const CLASSIC: &str = "repos/owner/repo/branches/main/protection";
 const CONTENTS: &str = "repos/owner/repo/contents/.github/workflows/blackhole.yml?ref=main";
 
@@ -1096,7 +1096,7 @@ fn unreadable_github_is_not_guarded() {
             )],
         ),
         (
-            "not guarded: cannot read GitHub (repos/owner/repo/rules/branches/main?per_page=100 answered HTTP 502; rerun init once GitHub answers)",
+            "not guarded: cannot read GitHub (repos/owner/repo/rules/branches/main?per_page=100&page=1 answered HTTP 502; rerun init once GitHub answers)",
             75,
             vec![Respond(RULES, 502, vec![], vec![])],
         ),
@@ -1121,6 +1121,36 @@ fn unreadable_github_is_not_guarded() {
         )
     );
     assert_eq!(fake.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_malformed_rules_list_cannot_establish_a_guard() {
+    let workflow = generated_workflow();
+    for answer in [b"{}".as_slice(), b"invalid JSON"] {
+        let fake = guarded_github(&workflow);
+        fake.respond("GET", RULES, 200, &[], answer);
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: cannot read GitHub ({RULES} returned a malformed rules list; rerun init once GitHub answers)"
+                ),
+                75,
+            )
+        );
+    }
+}
+
+#[test]
+fn a_later_page_can_require_the_blackhole_check() {
+    let fake = guarded_github(&generated_workflow());
+    let second = RULES.replace("&page=1", "&page=2");
+    let first = json!(vec![json!({"type":"non_fast_forward","ruleset_id":7}); 100]);
+    fake.respond("GET", RULES, 200, &[], first.to_string().as_bytes());
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    fake.respond("GET", &second, 200, &[], &rules(&checks));
+    assert_eq!(guarded_verdict(&fake, None), ("guarded".to_owned(), 0));
+    assert!(fake.calls().iter().any(|call| call.ends_with(&second)));
 }
 
 #[test]
