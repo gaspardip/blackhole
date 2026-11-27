@@ -96,13 +96,23 @@ pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
 // A file can go away or turn into a directory between the listing and the read, and then it has nothing to check.
 // A link to a file is read under the link's name, or a link could hide what kind of file it is.
 pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let found = fs::metadata(path).and_then(|meta| {
-        if meta.is_file() {
-            fs::read(path).map(Some)
-        } else {
-            Ok(None)
-        }
-    });
+    let found = fs::symlink_metadata(path)
+        .and_then(|meta| {
+            if meta.is_symlink() {
+                fs::metadata(path)
+            } else {
+                Ok(meta)
+            }
+        })
+        .and_then(|meta| {
+            if meta.is_file() {
+                fs::read(path).map(Some)
+            } else if meta.is_dir() {
+                Ok(None)
+            } else {
+                Err(io::Error::other("expected a regular file"))
+            }
+        });
     match found {
         Err(e)
             if matches!(

@@ -1349,3 +1349,42 @@ fn coverage_keeps_an_outage_apart_from_missing_evidence() {
             .starts_with("blackhole ci: no verdict: ")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn check_and_stop_report_a_tracked_fifo() {
+    let dir = repo();
+    let root = dir.path();
+    let path = root.join("a.py");
+    fs::write(&path, "pass\n").unwrap();
+    common::git(root, &["add", "a.py"]).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert!(
+        common::command("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let [checked, stopped] = [&["check"][..], &["hook", "stop"]].map(|args| {
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap()
+    });
+    assert_eq!(
+        [checked.status.code(), stopped.status.code()],
+        [Some(1), Some(2)],
+        "{checked:?} {stopped:?}"
+    );
+    assert!(
+        checked.stdout.starts_with(b"blackhole: cannot read a.py: "),
+        "{checked:?}"
+    );
+    assert_eq!(stopped.stderr, checked.stdout);
+    assert_eq!(
+        hook(root, "stop", &json!({"stop_hook_active":true}), 2),
+        checked.stdout
+    );
+}
