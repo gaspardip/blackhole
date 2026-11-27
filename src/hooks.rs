@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -21,9 +21,13 @@ const LIMIT: u64 = 64 * 1024 * 1024;
 #[must_use]
 pub fn run(event: Event) -> ExitCode {
     // The agent writes the payload before it waits, so it is drained first; Stop needs it only for the loop guard.
-    let payload = match payload() {
-        Err(_) if matches!(event, Event::Stop) => Ok(Vec::new()),
-        read => read,
+    let payload = match event {
+        // Run by hand from a terminal, Stop has no host payload to wait for.
+        Event::Stop if io::stdin().is_terminal() => Ok(Vec::new()),
+        _ => match payload() {
+            Err(_) if matches!(event, Event::Stop) => Ok(Vec::new()),
+            read => read,
+        },
     };
     crate::deadline::activity(|| "judging the hook".into());
     // Reading the policy moves the process into `.blackhole`, and a retry must resolve the payload from where the agent started.
