@@ -171,6 +171,22 @@ class Backtest(unittest.TestCase):
         self.assertEqual(rows[0]["findings"], [])
         self.assertEqual(rows[0]["gates"], ["protected"])
 
+    def test_objection_is_judged_on_the_original_commit_utc_date(self) -> None:
+        self.env.update(
+            GIT_AUTHOR_DATE="2001-01-11T23:30:00-02:00",
+            GIT_COMMITTER_DATE="2001-02-10T23:30:00-02:00",
+        )
+        (self.repo / ".blackhole").mkdir()
+        self.commit(
+            ".blackhole/objections", "core/no-suppression\ta.py\t1\t2001-02-01\t-\treason\n",
+        )
+        example = ROOT / "evasion/expired/head/a.py"
+        self.merge("a.py", example.read_text())
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual(rows[0]["state"], "green")
+        self.assertEqual(rows[0]["today"], "2001-02-11")
+        self.assertEqual(summary["rules"], {})
+
     def test_squash_backtest_skips_conflicts_and_keeps_judging(self) -> None:
         clean = self.commit("clean.ts", "export const value = 1;\n")
         conflict = self.commit("blackhole.toml", 'exclude = ["legacy.test.ts"]\n')

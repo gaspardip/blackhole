@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 POLICY = ("blackhole.toml", ".blackhole/ledger")
@@ -37,6 +38,7 @@ class Finding:
 @dataclass
 class Verdict:
     state: str
+    today: str
     exit_code: int | None = None
     last_line: str | None = None
     findings: list[Finding] = field(default_factory=list)
@@ -113,6 +115,8 @@ def baseline(tree: Path, env: dict[str, str], binary: Path) -> str:
 
 
 def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verdict:
+    timestamp = git(tree, env, "show", "-s", "--format=%ct", change.commit).stdout.strip()
+    today = datetime.fromtimestamp(int(timestamp), UTC).date().isoformat()
     base = baseline(tree, env, binary)
     mainline = ("-m", "1") if change.proposed else ()
     replay = git(tree, env, "cherry-pick", "--no-commit", *mainline, change.commit, check=False)
@@ -121,11 +125,11 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
         if not conflicts:
             raise RuntimeError(f"replaying {change.commit} failed: {replay.stdout.strip()}")
         paths = ", ".join(conflicts.rstrip("\0").split("\0"))
-        return Verdict("skipped", reason=f"cherry-pick conflict: {paths}")
+        return Verdict("skipped", today, reason=f"cherry-pick conflict: {paths}")
 
     git(tree, env, "commit", "--allow-empty", "-m", f"Replay {change.commit}")
     head = git(tree, env, "rev-parse", "HEAD").stdout.strip()
-    result = run(tree, env, binary, "ci", "--base", base, "--head", head, check=False)
+    result = run(tree, env, binary, "ci", "--base", base, "--head", head, "--today", today, check=False)
     lines = result.stdout.splitlines()
     state = STATES.get(result.returncode, "error")
     last_line = lines[-1] if lines else None
@@ -140,7 +144,7 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
             if match := FINDING.match(line):
                 path, number, rule = match.groups()
                 findings.append(Finding(path, int(number), rule))
-    return Verdict(state, result.returncode, last_line, findings, gates=gates)
+    return Verdict(state, today, result.returncode, last_line, findings, gates=gates)
 
 
 def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None:
