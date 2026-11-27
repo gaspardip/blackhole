@@ -27,6 +27,12 @@ const EXTENSIONS: &[&str] = &[
     "erl", "clj", "groovy", "pl", "pm",
 ];
 
+pub(crate) fn source_name(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
 fn source(path: &str, bytes: &[u8]) -> bool {
     let path = path.to_ascii_lowercase();
     let mut parts = path.rsplit('/');
@@ -39,7 +45,7 @@ fn source(path: &str, bytes: &[u8]) -> bool {
         || (ext == "py" && (stem.starts_with("test_") || stem.ends_with("_test")))
         || (ext == "rb" && (stem.ends_with("_spec") || stem.ends_with("_test")));
     let declaration = matches!(ext, "ts" | "cts" | "mts") && suffix == Some("d");
-    !test && !declaration && (EXTENSIONS.contains(&ext) || bytes.starts_with(b"#!"))
+    !test && !declaration && (source_name(&path) || bytes.starts_with(b"#!"))
 }
 
 fn hunks(old: &str, new: &str) -> io::Result<Vec<Range<usize>>> {

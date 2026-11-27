@@ -1476,3 +1476,27 @@ fn ci_inputs_keep_usage_and_outages_apart() {
     );
     assert_eq!(out.stdout, b"");
 }
+
+#[cfg(unix)]
+#[test]
+fn ci_refuses_a_source_link_to_a_directory() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let base = rev(root);
+    fs::create_dir(root.join("real")).unwrap();
+    fs::write(root.join("real/x.txt"), "").unwrap();
+    // A link without a source name still points at a directory the way a checkout does.
+    std::os::unix::fs::symlink("real", root.join("dir")).unwrap();
+    commit(root);
+    assert_eq!(ci_line(root, &base, 0), "blackhole ci: green");
+    std::os::unix::fs::symlink("real", root.join("b.py")).unwrap();
+    commit(root);
+    let out = run(root, &["ci", "--base", &base, "--head", "HEAD"], 1);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("b.py: ") && stdout.ends_with("\nblackhole ci: red (unreadable)\n"),
+        "{stdout}"
+    );
+}

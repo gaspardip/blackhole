@@ -96,6 +96,8 @@ enum Blob<'a> {
     File(&'a str),
     Absent,
     UnresolvedLink,
+    // A link that ends at a directory or another kind of entry.
+    NotFile,
 }
 
 pub(crate) struct Tree(BTreeMap<String, Entry>);
@@ -186,7 +188,12 @@ impl Tree {
     pub(crate) fn blob(&self, path: &str, batch: &mut Batch) -> io::Result<Option<&str>> {
         match self.resolve_blob(path, batch)? {
             Blob::File(id) => Ok(Some(id)),
-            Blob::Absent => Ok(None),
+            // A source name must hold source, or a link to a directory would leave it unjudged.
+            Blob::NotFile if crate::coverage::source_name(path) => Err(crate::red(format!(
+                "{}: link does not point at a file; point the link at a file in the commit or remove it",
+                crate::diagnostic_text(path)
+            ))),
+            Blob::Absent | Blob::NotFile => Ok(None),
             Blob::UnresolvedLink => Err(crate::red(format!(
                 "{}: link target is not in the commit; point the link at a file in the commit or remove it",
                 crate::diagnostic_text(path)
@@ -202,7 +209,7 @@ impl Tree {
     ) -> io::Result<Option<&str>> {
         match self.resolve_blob(path, batch)? {
             Blob::File(id) => Ok(Some(id)),
-            Blob::Absent | Blob::UnresolvedLink => Ok(None),
+            Blob::Absent | Blob::UnresolvedLink | Blob::NotFile => Ok(None),
         }
     }
 
@@ -243,12 +250,12 @@ impl Tree {
                     pending.extend(target.rsplit('/').map(str::to_owned));
                 }
                 (Some(Entry::File(id)), true) => return Ok(Blob::File(id)),
-                (Some(Entry::Directory | Entry::Other), true) => return Ok(Blob::Absent),
+                (Some(Entry::Directory | Entry::Other), true) => return Ok(Blob::NotFile),
                 (Some(Entry::Directory | Entry::Other), false) => {}
                 _ => return Ok(Blob::UnresolvedLink),
             }
         }
-        Ok(Blob::Absent)
+        Ok(Blob::NotFile)
     }
 }
 
