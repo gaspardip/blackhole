@@ -277,12 +277,15 @@ fn scan(
         .filter(|name| !rules.config.exclude.is_match(name) && engine::source_type(name).is_some())
         .flat_map(|name| Path::new(name).ancestors().skip(1))
         .collect();
-    // A narrowed listing leaves out the manifests above it, so git lists only the candidates.
-    let candidates: Vec<_> = script_dirs
+    // A narrowed listing leaves out the manifests above it, so git lists only the candidates, and a candidate that is a directory lists its descendants, which are not manifests.
+    let candidates: BTreeSet<_> = script_dirs
         .iter()
         .map(|dir| dir.join("package.json"))
         .collect();
-    let manifests = files::listed(root, candidates.iter().map(PathBuf::as_path))?;
+    let manifests =
+        files::listed_matching(root, candidates.iter().map(PathBuf::as_path), |path| {
+            candidates.contains(path)
+        })?;
     let packages = package_dirs(
         &rules.config,
         manifests.iter().map(String::as_str),

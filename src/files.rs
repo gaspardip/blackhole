@@ -266,10 +266,7 @@ pub(crate) fn list<'a>(
     })
 }
 
-pub(crate) fn listed<'a>(
-    root: &Path,
-    paths: impl IntoIterator<Item = &'a Path>,
-) -> io::Result<Vec<String>> {
+fn listed<'a>(root: &Path, paths: impl IntoIterator<Item = &'a Path>) -> io::Result<Vec<String>> {
     listed_matching(root, paths, |_| true)
 }
 
