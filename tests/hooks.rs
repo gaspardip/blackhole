@@ -1424,3 +1424,78 @@ fn ci_finishes_with_a_verdict_when_git_stops_resolving_a_revision() {
         }
     }
 }
+
+#[cfg(unix)]
+fn with_deadline(root: &Path, args: &[&str], block_input: bool) -> std::process::Output {
+    common::command("python3")
+        .args([
+            "-I",
+            "-c",
+            r"
+import os
+import signal
+import subprocess
+import sys
+
+stdin = subprocess.PIPE if sys.argv[1] == 'block' else subprocess.DEVNULL
+with subprocess.Popen(sys.argv[2:], stdin=stdin, stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE, start_new_session=True) as proc:
+    try:
+        proc.wait(timeout=10)
+        stdout, stderr = proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        sys.exit('blackhole missed its deadline or left a child running')
+sys.stdout.buffer.write(stdout)
+sys.stderr.buffer.write(stderr)
+sys.exit(proc.returncode)
+",
+            if block_input { "block" } else { "eof" },
+            env!("CARGO_BIN_EXE_blackhole"),
+        ])
+        .args(args)
+        .env("BLACKHOLE_TEST_DEADLINE_MS", "1000")
+        .current_dir(root)
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn check_and_stop_hit_the_deadline_when_git_cannot_finish_listing() {
+    let dir = repo();
+    let root = dir.path();
+    assert!(
+        common::command("mkfifo")
+            .arg(root.join(".gitignore"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(root.join("a.py"), "pass\n").unwrap();
+    let checked = with_deadline(root, &["check"], false);
+    assert_eq!(checked.status.code(), Some(1), "{checked:?}");
+    assert_eq!(
+        checked.stderr,
+        b"blackhole: deadline exceeded while running git ls-files\n"
+    );
+
+    let stopped = with_deadline(root, &["hook", "stop"], false);
+    assert_eq!(stopped.status.code(), Some(2), "{stopped:?}");
+    assert_eq!(
+        stopped.stderr,
+        b"blackhole: deadline exceeded while running git ls-files\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_deadline_also_covers_a_blocked_read() {
+    let dir = repo();
+    let out = with_deadline(dir.path(), &["hook", "stop"], true);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert_eq!(
+        out.stderr,
+        b"blackhole: deadline exceeded while reading the hook payload\n"
+    );
+}

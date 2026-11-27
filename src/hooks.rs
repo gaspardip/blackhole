@@ -20,12 +20,12 @@ const LIMIT: u64 = 64 * 1024 * 1024;
 
 #[must_use]
 pub fn run(event: Event) -> ExitCode {
-    let mut out = HookOutput(io::stderr().lock());
     // The agent writes the payload before it waits, so it is drained first; Stop needs it only for the loop guard.
     let payload = match payload() {
         Err(_) if matches!(event, Event::Stop) => Ok(Vec::new()),
         read => read,
     };
+    crate::deadline::activity(|| "judging the hook".into());
     // Reading the policy moves the process into `.blackhole`, and a retry must resolve the payload from where the agent started.
     let start = std::env::current_dir();
     let (bytes, (text, result)) = match payload {
@@ -48,6 +48,7 @@ pub fn run(event: Event) -> ExitCode {
         }
         Err(error) => (Vec::new(), (Vec::new(), Err(error))),
     };
+    let mut out = HookOutput(io::stderr().lock());
     let _ = out.write_all(&text);
     let error = match result {
         Ok(false) => return ExitCode::SUCCESS,

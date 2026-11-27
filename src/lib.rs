@@ -1,6 +1,8 @@
 pub mod ci;
 pub mod config;
 mod coverage;
+#[doc(hidden)]
+pub mod deadline;
 pub mod engine;
 mod files;
 mod git;

@@ -45,7 +45,7 @@ fn start(error: &io::Error) -> io::Error {
     crate::no_verdict(format!("cannot run git: {error}"))
 }
 pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
-    let out = command.output().map_err(|e| start(&e))?;
+    let out = crate::deadline::output(command).map_err(|e| start(&e))?;
     if out.status.success() {
         Ok(out.stdout)
     } else {

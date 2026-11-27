@@ -1,4 +1,4 @@
-use blackhole_check::{Fault, ci::State, hooks, init};
+use blackhole_check::{Fault, ci::State, deadline, hooks, init};
 use clap::{Parser, Subcommand};
 use std::{
     io::{self, Write},
@@ -69,6 +69,28 @@ fn output(error: &io::Error) -> io::Error {
 fn main() -> ExitCode {
     let mut out = Output(io::stdout().lock());
     let command = Args::parse().command;
+    let deadline = match &command {
+        Action::Check { .. } => Some((1, "checking the repository")),
+        Action::Hook { .. } => Some((2, "reading the hook payload")),
+        _ => None,
+    };
+    let _deadline = match deadline
+        .map(|(code, activity)| deadline::start(code, activity))
+        .transpose()
+    {
+        Ok(deadline) => deadline,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "blackhole: no verdict: cannot start the deadline: {e}"
+            );
+            return ExitCode::from(if matches!(command, Action::Hook { .. }) {
+                2
+            } else {
+                NO_VERDICT
+            });
+        }
+    };
     let ci = matches!(command, Action::Ci { .. });
     let result = match command {
         Action::Init => {
