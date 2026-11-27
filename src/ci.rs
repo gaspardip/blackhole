@@ -47,6 +47,7 @@ fn evaluate(
     approved: bool,
     today: Date,
     artifacts: Option<&Path>,
+    records: Option<&mut Vec<u8>>,
 ) -> io::Result<Verdict> {
     if !git::ancestor(base, head)? {
         return Ok(Verdict::behind());
@@ -102,6 +103,7 @@ fn evaluate(
         },
         &base_config.guard,
         ctx.renames,
+        records,
     )?;
     if let Some(lcov) = &base_config.lcov {
         let delta = crate::coverage::changed(
@@ -146,6 +148,21 @@ pub fn run_with_coverage(
     artifacts: Option<&Path>,
     out: &mut impl Write,
 ) -> io::Result<bool> {
+    run_with_findings(base, head, approvals, today, artifacts, None, out)
+}
+
+/// Judges commits and optionally writes the reported findings as tab-separated records.
+/// # Errors
+/// Returns an error when git, base policy, approval data or output is unavailable.
+pub fn run_with_findings(
+    base: &str,
+    head: &str,
+    approvals: Option<&Path>,
+    today: Option<Date>,
+    artifacts: Option<&Path>,
+    findings: Option<&Path>,
+    out: &mut impl Write,
+) -> io::Result<bool> {
     let base = git::commit(base)?;
     let head = git::commit(head)?;
     let approved = match approvals {
@@ -154,13 +171,18 @@ pub fn run_with_coverage(
             .approved(&head),
         None => false,
     };
+    let mut records = Vec::new();
     let result = evaluate(
         &base,
         &head,
         approved,
         today.map_or_else(Date::today, Ok)?,
         artifacts,
+        findings.map(|_| &mut records),
     )?;
+    if let Some(path) = findings {
+        fs::write(path, records)?;
+    }
     out.write_all(&result.lines)?;
     if result.gates.is_empty() {
         return Ok(false);

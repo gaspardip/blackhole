@@ -30,6 +30,9 @@ enum Action {
         /// Trusted external directory containing <head SHA>/<base-configured LCOV path>.
         #[arg(long)]
         coverage_dir: Option<PathBuf>,
+        /// Write reported findings as tab-separated rule, path and line records.
+        #[arg(long)]
+        findings: Option<PathBuf>,
         #[arg(long)]
         today: Option<blackhole_check::objections::Date>,
     },
@@ -63,12 +66,14 @@ fn main() -> ExitCode {
             approvals,
             today,
             coverage_dir,
-        } => blackhole_check::ci::run_with_coverage(
+            findings,
+        } => blackhole_check::ci::run_with_findings(
             &base,
             &head,
             approvals.as_deref(),
             today,
             coverage_dir.as_deref(),
+            findings.as_deref(),
             &mut out,
         ),
         Action::Ledger => blackhole_check::regenerate(&mut out),

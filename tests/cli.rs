@@ -639,6 +639,107 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
     assert_eq!(fs::read(root.join("a.py")).unwrap(), b"# noqa unstaged");
 }
 
+#[cfg(unix)]
+#[test]
+fn ci_gate_lines_escape_paths_that_spell_other_lines() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let forged = root.join(".github/x\nb.py:1:1 core/no-suppression forged");
+    fs::create_dir_all(forged.parent().unwrap()).unwrap();
+    fs::write(forged, "").unwrap();
+    commit(root);
+    let out = run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 1);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "protected: .github/x\\nb.py:1:1 core/no-suppression forged: a person has to approve this change\nblackhole ci: red (protected)\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_writes_only_findings_to_the_requested_file() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    fs::write(root.join("protected: tab\tbreak.py"), "# noqa").unwrap();
+    fs::write(root.join("z.py"), "# noqa").unwrap();
+    fs::create_dir(root.join(".github")).unwrap();
+    fs::write(root.join(".github/change"), "").unwrap();
+    commit(root);
+
+    let output = tempdir().unwrap();
+    let file = output.path().join("findings.tsv");
+    for (base, code, records) in [
+        (
+            "HEAD~",
+            1,
+            concat!(
+                "core/no-suppression\tprotected: tab\\tbreak.py\t1\n",
+                "core/no-suppression\tz.py\t1\n",
+            ),
+        ),
+        ("HEAD~", 0, ""),
+    ] {
+        let head = if code == 0 { base } else { "HEAD" };
+        let args = ["ci", "--base", base, "--head", head];
+        let plain = run(root, &args, code);
+        let flagged = run(
+            root,
+            &[&args[..], &["--findings", file.to_str().unwrap()]].concat(),
+            code,
+        );
+        assert_eq!(flagged.stdout, plain.stdout);
+        assert_eq!(fs::read_to_string(&file).unwrap(), records);
+    }
+}
+
+#[test]
+fn ci_coverage_gate_escapes_changed_paths() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    commit(root);
+    let path = "a\u{2028}b.ts";
+    fs::write(root.join(path), "export const value = 1;\n").unwrap();
+    commit(root);
+
+    let coverage = tempdir().unwrap();
+    let head = git_output(root, &["rev-parse", "HEAD"]);
+    let sha = String::from_utf8(head.stdout).unwrap();
+    let reports = coverage.path().join(sha.trim()).join("reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(
+        reports.join("lcov.info"),
+        format!("SF:{path}\nDA:1,0\nLF:1\nLH:0\nend_of_record\n"),
+    )
+    .unwrap();
+    let out = run(
+        root,
+        &[
+            "ci",
+            "--base",
+            "HEAD~",
+            "--head",
+            "HEAD",
+            "--coverage-dir",
+            coverage.path().to_str().unwrap(),
+        ],
+        1,
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "coverage: a\\u{2028}b.ts:1: changed line has zero hits\nblackhole ci: red (coverage)\n"
+    );
+}
+
 #[test]
 fn ci_is_behind_when_head_lacks_base() {
     let dir = repo();

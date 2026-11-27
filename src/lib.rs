@@ -283,7 +283,7 @@ fn scan(
     if let Some(rows) = &listing.rows {
         stale.retain(|(_, path), _| rows.contains(path.as_str()));
     }
-    report(&findings, &over, output)?;
+    print_findings(reported_findings(&findings, &over), output)?;
     Ok(Scan {
         actual,
         over: !over.is_empty(),
@@ -333,16 +333,14 @@ fn scan_files<'a, S: Send>(
     Ok(findings)
 }
 
-fn report(
-    findings: &[engine::Finding],
-    over: &ledger::Counts,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    let findings = findings.iter().filter(|f| {
+fn reported_findings<'a>(
+    findings: &'a [engine::Finding],
+    over: &'a ledger::Counts,
+) -> impl Iterator<Item = &'a engine::Finding> + Clone {
+    findings.iter().filter(|f| {
         // Advisory findings need output even when there is no overage.
         f.gate == engine::Gate::Advisory || over.contains_key(&(f.rule.to_owned(), f.path.clone()))
-    });
-    print_findings(findings, output)
+    })
 }
 
 fn print_findings<'a>(

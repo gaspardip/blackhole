@@ -194,6 +194,9 @@ by a PR job can claim arbitrary hits or omit executable lines. Until that
 integration exists, enabling coverage leaves changed source red on GitHub
 when the judge runs without evidence.
 
+Pass `--findings <file>` to write the reported findings as tab-separated rule,
+escaped path and line records. The file is empty when there are no findings.
+
 ## GitHub judge
 
 Release one publishes the `blackhole judge` check from the `blackhole-judge` App
@@ -247,6 +250,16 @@ so PRs with the same head share it. A passing check stays valid while the head
 and `main` stay the same, even after an objection it relied on expires, so the
 PR can still merge days later. Once that objection is on `main` and expired,
 later PRs are red under `findings` while the underlying violation remains.
+
+## Proofs
+
+Run `python3 -I tools/backtest.py --binary /path/to/blackhole --repo /path/to/clone --limit 20 --out /path/to/reports`
+to judge recent first-parent merges from the clone's default branch. Add
+`--mode squash` for a history of squash merges. The backtest writes
+`results.jsonl` and `summary.json` under the clone's name in the output
+directory. The binary must support `ci --findings`. The summary counts the
+share of judged changes flagged by each rule and by the coverage gate.
+Findings have a null label for later false-positive analysis.
 
 ## License
 

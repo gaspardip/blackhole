@@ -166,6 +166,12 @@ pub struct Finding {
     pub note: Option<String>,
 }
 
+impl Finding {
+    pub(crate) fn sort_key(&self) -> (&str, usize, usize, &str) {
+        (&self.path, self.line, self.col, self.rule)
+    }
+}
+
 const UNPARSEABLE: Rule = Rule {
     id: "core/unparseable",
     family: Family::Judge,
@@ -515,7 +521,7 @@ fn parsed_hits<'r>(
 }
 
 pub(crate) fn sort_findings(result: &mut [Finding]) {
-    result.sort_by(|a, b| (&a.path, a.line, a.col, a.rule).cmp(&(&b.path, b.line, b.col, b.rule)));
+    result.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
 }
 
 pub(crate) struct Scanner<'a, 'source> {
