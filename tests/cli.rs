@@ -163,7 +163,8 @@ fn path_filters_use_directory_components() {
 
 #[test]
 fn outside_repository() {
-    check(tempdir().unwrap().path(), &[], 2);
+    let out = check(tempdir().unwrap().path(), &[], 75);
+    assert!(out.stderr.starts_with(b"blackhole: no verdict: "));
 }
 
 #[cfg(unix)]
@@ -172,13 +173,13 @@ fn invalid_path_is_an_error() {
     use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
     let dir = repo();
     fs::write(dir.path().join(OsStr::from_bytes(b"bad\xff")), "").unwrap();
-    let message = check(dir.path(), &[], 2).stderr;
+    let message = check(dir.path(), &[], 1).stdout;
     assert_eq!(message, b"blackhole: path is not valid UTF-8: bad\\xff\n");
 }
 
 const HEADER: &str = "blackhole-ledger 1\n";
 const RULE: &str = "core/no-suppression";
-const MISMATCH: &[u8] = b"blackhole: checkout root mismatch\n";
+const MISMATCH: &[u8] = b"blackhole: no verdict: checkout root mismatch\n";
 
 fn baseline(dir: &Path, rows: &[(&str, usize)]) -> Vec<u8> {
     fs::create_dir_all(dir.join(".blackhole")).unwrap();
@@ -506,10 +507,10 @@ fn invalid_baseline() {
     baseline(root, &[]);
     let path = root.join(".blackhole/ledger");
     fs::write(&path, b"invalid").unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
 }
 
 #[cfg(unix)]
@@ -520,7 +521,7 @@ fn symlink_baseline() {
     fs::create_dir(root.join(".blackhole")).unwrap();
     fs::write(root.join("target"), HEADER).unwrap();
     std::os::unix::fs::symlink("../target", root.join(".blackhole/ledger")).unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
 }
 
 #[cfg(unix)]
@@ -532,8 +533,8 @@ fn symlinked_ledger_directory() {
     let outside = baseline(other.path(), &[("a.py", 2)]);
     std::os::unix::fs::symlink(other.path().join(".blackhole"), root.join(".blackhole")).unwrap();
     fs::write(root.join("a.py"), "#noqa").unwrap();
-    check(root, &[], 2);
-    run(root, &["ledger"], 2);
+    check(root, &[], 1);
+    run(root, &["ledger"], 1);
     assert_eq!(
         fs::read(other.path().join(".blackhole/ledger")).unwrap(),
         outside
@@ -559,7 +560,8 @@ fn root_config_controls_check_and_ledger() {
 fn unknown_config_key_is_an_error() {
     let dir = repo();
     fs::write(dir.path().join("blackhole.toml"), "excludes = []").unwrap();
-    check(dir.path(), &[], 2);
+    let out = check(dir.path(), &[], 1);
+    assert!(out.stdout.starts_with(b"blackhole: blackhole.toml: "));
 }
 
 #[test]
@@ -568,7 +570,7 @@ fn lcov_requires_a_repository_relative_path() {
     let config = dir.path().join("blackhole.toml");
     for path in ["", "../report", "/tmp/report", "C:/tmp/report", "D:report"] {
         fs::write(&config, format!("[coverage]\nlcov = {path:?}")).unwrap();
-        check(dir.path(), &[], 2);
+        check(dir.path(), &[], 1);
     }
     fs::write(config, "[coverage]\nlcov = './reports/lcov.info'").unwrap();
     check(dir.path(), &[], 0);
@@ -609,14 +611,14 @@ fn objection_commands_and_shrink() {
     fs::write(&path, format!("{RULE}\tbad.py\t1\t2000-01-01\t-\treason\n")).unwrap();
     check(root, &[], 1);
     fs::write(path, "invalid").unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
 }
 
 #[test]
 fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
     let dir = repo();
     let root = dir.path();
-    run(root, &["ci", "--base", "1234", "--head", "abcd"], 2);
+    run(root, &["ci", "--base", "1234", "--head", "abcd"], 75);
     fs::write(root.join("a.py"), "pass").unwrap();
     commit(root);
     fs::write(root.join("a.py"), "# noqa staged").unwrap();
@@ -625,7 +627,7 @@ fn ci_uses_commits_and_preserves_dirty_index_and_tree() {
     let index = fs::read(root.join(".git/index")).unwrap();
     assert_eq!(
         run(root, &["ci", "--base", "HEAD", "--head", "HEAD"], 0).stdout,
-        b""
+        b"blackhole ci: green\n"
     );
     assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
     let other = repo();
@@ -684,7 +686,7 @@ fn malformed_head_objection_identifies_key_and_discards_all_allowances() {
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains(&format!("objection: {RULE} b.py:")));
-    assert!(stdout.ends_with("blackhole ci: red (findings, objections, protected)\n"));
+    assert!(stdout.ends_with("blackhole ci: red (findings, objections); waiting (protected)\n"));
 }
 
 #[test]
@@ -733,7 +735,7 @@ fn ci_reads_a_link_the_way_a_checkout_does() {
     ] {
         symlink(target, root.join("loop.py")).unwrap();
         commit(root);
-        run(root, &ci, 2);
+        run(root, &ci, 75);
         fs::remove_file(root.join("loop.py")).unwrap();
     }
 }
@@ -748,7 +750,7 @@ fn objections_refuse_a_linked_directory() {
     let row = format!("{RULE}\tbad.py\t1\t2026-01-01\t-\treason\n");
     fs::write(&outside, &row).unwrap();
     std::os::unix::fs::symlink(other.path(), root.join(".blackhole")).unwrap();
-    run(root, &["object", "--renew", RULE, "bad.py"], 2);
+    run(root, &["object", "--renew", RULE, "bad.py"], 1);
     assert_eq!(fs::read_to_string(&outside).unwrap(), row);
 }
 
@@ -788,14 +790,14 @@ fn parse_errors_cannot_be_banked_or_objected_to() {
         "blackhole-ledger 1\ncore/unparseable\t1\tbad.ts\n",
     )
     .unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
     fs::remove_file(policy.join("ledger")).unwrap();
     fs::write(
         policy.join("objections"),
         "core/unparseable\tbad.ts\t1\t2026-01-01\t-\tbroken\n",
     )
     .unwrap();
-    check(root, &[], 2);
+    check(root, &[], 1);
 }
 
 const RUNNER_CASES: &[(&str, &str, &str)] = &[
@@ -1124,7 +1126,7 @@ fn mismatched_root_is_rejected_before_locking() {
             .unwrap();
         wait_for_exit(&mut child);
         let out = child.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(out.status.code(), Some(75));
         assert_eq!(out.stdout, b"");
         assert_eq!(out.stderr, MISMATCH);
         assert_eq!(
@@ -1148,13 +1150,13 @@ fn configured_worktree_must_resolve_to_the_checkout() {
     // Git walks past an entry named `.git` that is no repository; the root it then answers is not the nearest.
     let stray = root.join("stray");
     fs::create_dir_all(stray.join(".git")).unwrap();
-    assert_eq!(check(&stray, &[], 2).stderr, MISMATCH);
+    assert_eq!(check(&stray, &[], 75).stderr, MISMATCH);
     // A relative value is read from the git directory, so this one names the checkout itself.
     git(root, &["config", "core.worktree", ".."]);
     assert_eq!(check(&sub, &[], 1).stdout, expected);
     for value in [other.path().to_str().unwrap(), sub.to_str().unwrap(), "."] {
         git(root, &["config", "core.worktree", value]);
-        assert_eq!(check(root, &[], 2).stderr, MISMATCH);
+        assert_eq!(check(root, &[], 75).stderr, MISMATCH);
         assert_eq!(names(other.path()), [".git"]);
     }
 }
@@ -1216,7 +1218,8 @@ fn a_missing_object_is_not_fetched() {
     );
     assert!(!fetched.status.success());
     fs::remove_file(&marker).unwrap();
-    run(root, &["ci", "--base", &missing, "--head", "HEAD"], 2);
+    let out = run(root, &["ci", "--base", &missing, "--head", "HEAD"], 75);
+    assert!(out.stdout.starts_with(b"blackhole ci: no verdict: "));
     assert!(!marker.exists());
 }
 
@@ -1248,5 +1251,56 @@ fn ci_accepts_a_repaired_test_symlink() {
     .unwrap();
     commit(root);
     let out = run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 0);
-    assert_eq!(out.stdout, b"");
+    assert_eq!(out.stdout, b"blackhole ci: green\n");
+}
+
+#[test]
+fn check_exit_codes_name_the_verdict_state() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    check(root, &[], 0);
+    let usage = check(root, &["missing.py"], 2).stderr;
+    assert!(usage.starts_with(b"blackhole: no files match "));
+    fs::write(root.join("a.py"), "#noqa").unwrap();
+    check(root, &[], 1);
+}
+
+#[test]
+fn ci_last_line_names_the_verdict_state() {
+    const WAITING: &str =
+        "a person with write access who wrote none of the change approves the head";
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    fs::write(root.join("blackhole.toml"), "exclude = []\n").unwrap();
+    commit(root);
+    fs::write(root.join("bad.py"), "#noqa").unwrap();
+    commit(root);
+    let ci = |base: &str, head: &str, code| {
+        let out = run(root, &["ci", "--base", base, "--head", head], code);
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(ci("HEAD~2", "HEAD~2", 0), "blackhole ci: green\n");
+    assert!(
+        ci("HEAD~2", "HEAD~", 3)
+            .ends_with(&format!("blackhole ci: waiting (protected): {WAITING}\n"))
+    );
+    assert!(ci("HEAD~", "HEAD", 1).ends_with("blackhole ci: red (findings)\n"));
+    assert!(
+        ci("HEAD~2", "HEAD", 1).ends_with("blackhole ci: red (findings); waiting (protected)\n")
+    );
+    let missing = "1".repeat(40);
+    let cause = ci(&missing, "HEAD", 75);
+    assert!(cause.starts_with("blackhole ci: no verdict: "), "{cause}");
+    assert_eq!(cause.lines().count(), 1);
+    let approvals = root.join("approvals.json");
+    fs::write(&approvals, "{").unwrap();
+    let args = ["ci", "--base", "HEAD", "--head", "HEAD", "--approvals"];
+    run(
+        root,
+        &[&args[..], &[approvals.to_str().unwrap()]].concat(),
+        2,
+    );
 }

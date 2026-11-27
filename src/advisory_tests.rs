@@ -93,10 +93,13 @@ fn ci_reports_advice_without_failing() {
         git(&["commit", "-qm", "legacy ledger"]);
         for (base, head) in [("HEAD^", "HEAD^"), ("HEAD", "HEAD"), ("HEAD^", "HEAD")] {
             let mut out = Vec::new();
-            let red = ci::run(base, head, None, None, &mut out).unwrap();
+            let state = ci::run(base, head, None, None, &mut out).unwrap();
             assert_eq!(
-                (red, from_utf8(&out).unwrap()),
-                (false, FINDING),
+                (state, from_utf8(&out).unwrap()),
+                (
+                    ci::State::Green,
+                    format!("{FINDING}blackhole ci: green\n").as_str()
+                ),
                 "{base} to {head}"
             );
         }
@@ -141,15 +144,20 @@ fn advisory_rules_take_no_new_objections_and_ignore_old_ones() {
         let mut checked = Vec::new();
         let check_red = check(&[], &mut checked).unwrap();
         let mut judged = Vec::new();
-        let ci_red = ci::run("HEAD", "HEAD", None, None, &mut judged).unwrap();
+        let ci_state = ci::run("HEAD", "HEAD", None, None, &mut judged).unwrap();
         assert_eq!(
             (
                 check_red,
                 from_utf8(&checked).unwrap(),
-                ci_red,
+                ci_state,
                 from_utf8(&judged).unwrap()
             ),
-            (false, FINDING, false, FINDING)
+            (
+                false,
+                FINDING,
+                ci::State::Green,
+                format!("{FINDING}blackhole ci: green\n").as_str()
+            )
         );
     });
 }

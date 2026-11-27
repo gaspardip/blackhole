@@ -19,7 +19,8 @@ pub fn run(dir: &Path, args: &[&str], code: i32) -> Output {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(code), "{out:?}");
-    if code == 2 {
+    // Usage and no verdict explain themselves on stderr, except `ci`, whose verdict line is on stdout.
+    if code == 2 || (code == 75 && args.first() != Some(&"ci")) {
         assert_eq!(String::from_utf8_lossy(&out.stderr).lines().count(), 1);
     } else {
         assert_eq!(out.stderr, b"");

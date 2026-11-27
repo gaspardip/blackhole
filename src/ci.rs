@@ -122,6 +122,19 @@ fn evaluate(
     Ok(verdict)
 }
 
+/// Which move clears a judgment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Green,
+    /// The author fixes it.
+    Red,
+    /// Only a person's approval clears it.
+    Waiting,
+}
+
+// An approval of the head clears these gates, and nothing the author does can.
+const WAITING: [&str; 2] = ["protected", "tests"];
+
 /// Judges two commits against the repository policy.
 /// # Errors
 /// Returns an error when git, base policy, approval data or output is unavailable.
@@ -131,7 +144,7 @@ pub fn run(
     approvals: Option<&Path>,
     today: Option<Date>,
     out: &mut impl Write,
-) -> io::Result<bool> {
+) -> io::Result<State> {
     run_with_coverage(base, head, approvals, today, None, out)
 }
 
@@ -145,12 +158,12 @@ pub fn run_with_coverage(
     today: Option<Date>,
     artifacts: Option<&Path>,
     out: &mut impl Write,
-) -> io::Result<bool> {
+) -> io::Result<State> {
     let base = git::commit(base)?;
     let head = git::commit(head)?;
     let approved = match approvals {
         Some(path) => serde_json::from_slice::<Approvals>(&fs::read(path)?)
-            .map_err(io::Error::other)?
+            .map_err(|e| crate::usage(format!("{}: {e}", path.display())))?
             .approved(&head),
         None => false,
     };
@@ -162,13 +175,31 @@ pub fn run_with_coverage(
         artifacts,
     )?;
     out.write_all(&result.lines)?;
-    if result.gates.is_empty() {
-        return Ok(false);
-    }
-    writeln!(
-        out,
-        "blackhole ci: red ({})",
-        result.gates.into_iter().collect::<Vec<_>>().join(", ")
-    )?;
-    Ok(true)
+    let (waiting, red): (Vec<_>, Vec<_>) = result
+        .gates
+        .into_iter()
+        .partition(|gate| WAITING.contains(gate));
+    let (waiting, red) = (waiting.join(", "), red.join(", "));
+    let state = match (red.is_empty(), waiting.is_empty()) {
+        (true, true) => {
+            writeln!(out, "blackhole ci: green")?;
+            State::Green
+        }
+        (false, true) => {
+            writeln!(out, "blackhole ci: red ({red})")?;
+            State::Red
+        }
+        (false, false) => {
+            writeln!(out, "blackhole ci: red ({red}); waiting ({waiting})")?;
+            State::Red
+        }
+        (true, false) => {
+            writeln!(
+                out,
+                "blackhole ci: waiting ({waiting}): a person with write access who wrote none of the change approves the head"
+            )?;
+            State::Waiting
+        }
+    };
+    Ok(state)
 }

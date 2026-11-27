@@ -100,7 +100,7 @@ fn invalid_limits_are_configuration_errors() -> Result<()> {
     let root = dir.path();
     for value in ["0", "-1", "'3'"] {
         write_max_lines(root, value)?;
-        let error = String::from_utf8(check(root, &[], 2).stderr)?;
+        let error = String::from_utf8(check(root, &[], 1).stdout)?;
         assert!(error.contains("nonzero usize"), "{error}");
     }
     Ok(())

@@ -1,4 +1,4 @@
-use blackhole_check::{hooks, init};
+use blackhole_check::{Fault, ci::State, hooks, init};
 use clap::{Parser, Subcommand};
 use std::{
     io::{self, Write},
@@ -45,18 +45,33 @@ enum Action {
     },
 }
 
+// Exit 3: only a person's decision clears the verdict.
+const WAITING: u8 = 3;
+// Exit 75, EX_TEMPFAIL: the tool could not judge, so the caller retries or reports instead of reading a verdict.
+const NO_VERDICT: u8 = 75;
+
 fn main() -> ExitCode {
     let mut out = io::stdout().lock();
-    let result = match Args::parse().command {
-        Action::Init => init::run(&mut out).map(|()| false),
+    let command = Args::parse().command;
+    let ci = matches!(command, Action::Ci { .. });
+    let result = match command {
+        Action::Init => {
+            return init::run(&mut out).map_or_else(
+                |e| {
+                    let _ = writeln!(io::stderr().lock(), "blackhole: {e}");
+                    ExitCode::from(2)
+                },
+                |()| ExitCode::SUCCESS,
+            );
+        }
         Action::Hook { event } => return hooks::run(event),
-        Action::Check { paths } => blackhole_check::check(&paths, &mut out),
+        Action::Check { paths } => blackhole_check::check(&paths, &mut out).map(u8::from),
         Action::Object {
             rule,
             path,
             reason,
             renew,
-        } => blackhole_check::object(rule, path, reason.as_deref(), renew).map(|()| false),
+        } => blackhole_check::object(rule, path, reason.as_deref(), renew).map(|()| 0),
         Action::Ci {
             base,
             head,
@@ -70,14 +85,36 @@ fn main() -> ExitCode {
             today,
             coverage_dir.as_deref(),
             &mut out,
-        ),
-        Action::Ledger => blackhole_check::regenerate(&mut out),
+        )
+        .map(|state| match state {
+            State::Green => 0,
+            State::Red => 1,
+            State::Waiting => WAITING,
+        }),
+        Action::Ledger => blackhole_check::regenerate(&mut out).map(u8::from),
     };
-    match result {
-        Ok(found) => ExitCode::from(u8::from(found)),
-        Err(e) => {
-            let _ = writeln!(io::stderr().lock(), "blackhole: {e}");
-            ExitCode::from(2)
+    let error = match result {
+        Ok(code) => return ExitCode::from(code),
+        Err(error) => error,
+    };
+    // A closed pipe must not change the exit code, which is the verdict.
+    let code = match blackhole_check::fault(&error) {
+        Some(Fault::Usage) => {
+            let _ = writeln!(io::stderr().lock(), "blackhole: {error}");
+            2
         }
-    }
+        Some(Fault::Red) => {
+            let _ = writeln!(out, "blackhole: {error}");
+            1
+        }
+        None if ci => {
+            let _ = writeln!(out, "blackhole ci: no verdict: {error}");
+            NO_VERDICT
+        }
+        None => {
+            let _ = writeln!(io::stderr().lock(), "blackhole: no verdict: {error}");
+            NO_VERDICT
+        }
+    };
+    ExitCode::from(code)
 }

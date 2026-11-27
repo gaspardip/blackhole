@@ -44,22 +44,7 @@ fn run(case: &Path) -> Result<()> {
         fs::write(&p, serde_json::to_vec(&data)?)?;
         cmd.arg("--approvals").arg(p);
     }
-    let (code, summary) = if gates == "green" {
-        (0, String::new())
-    } else {
-        (
-            1,
-            format!(
-                "blackhole ci: red ({})",
-                gates
-                    .strip_prefix("red ")
-                    .ok_or("invalid verdict")?
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
-    };
+    let (code, summary) = summary(gates)?;
     let out = cmd.output()?;
     let stdout = String::from_utf8(out.stdout)?;
     let matches_verdict = if gates == "green" {
@@ -69,7 +54,7 @@ fn run(case: &Path) -> Result<()> {
         } else {
             String::new()
         };
-        stdout == expected_stdout
+        stdout == expected_stdout + &summary + "\n"
     } else {
         stdout.lines().last().unwrap_or("") == summary
     };
@@ -82,6 +67,31 @@ fn run(case: &Path) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+// Only a person can clear these gates; every other gate is the author's to fix.
+const WAITING: [&str; 2] = ["protected", "tests"];
+
+fn summary(gates: &str) -> Result<(i32, String)> {
+    if gates == "green" {
+        return Ok((0, "blackhole ci: green".into()));
+    }
+    let (waiting, red): (Vec<_>, Vec<_>) = gates
+        .strip_prefix("red ")
+        .ok_or("invalid verdict")?
+        .split_whitespace()
+        .partition(|gate| WAITING.contains(gate));
+    let (waiting, red) = (waiting.join(", "), red.join(", "));
+    Ok(match (red.is_empty(), waiting.is_empty()) {
+        (false, true) => (1, format!("blackhole ci: red ({red})")),
+        (false, false) => (1, format!("blackhole ci: red ({red}); waiting ({waiting})")),
+        (true, _) => (
+            3,
+            format!(
+                "blackhole ci: waiting ({waiting}): a person with write access who wrote none of the change approves the head"
+            ),
+        ),
+    })
 }
 
 #[test]
@@ -121,7 +131,7 @@ fn coverage_verdict(
             "{stdout}"
         );
     } else {
-        assert_eq!(out.stdout, b"");
+        assert_eq!(out.stdout, b"blackhole ci: green\n");
     }
     assert_eq!(out.stderr, b"");
     Ok(())

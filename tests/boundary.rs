@@ -32,6 +32,7 @@ fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
         })
         .unwrap();
         text.trim_end_matches("blackhole ci: red (findings)\n")
+            .trim_end_matches("blackhole ci: green\n")
             .to_owned()
     });
     assert_eq!(outputs[0], outputs[1]);

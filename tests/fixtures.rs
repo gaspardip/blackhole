@@ -150,15 +150,24 @@ fn diff_case(path: &Path, side: &str, rule: &Rule) -> common::Result<()> {
             "2026-11-18",
         ])
         .output()?;
-    assert_eq!(
-        out.status.code(),
-        Some(i32::from(expected.is_some())),
-        "{}: {out:?}",
-        path.display()
-    );
     assert!(out.stderr.is_empty(), "{}: {out:?}", path.display());
-
     let stdout = String::from_utf8(out.stdout)?;
+    let last = stdout.lines().last().unwrap_or_default();
+    // A removed test waits for a person, and other findings in the case make the verdict red as well.
+    let judged = if expected.is_some() {
+        let waiting =
+            last.ends_with("waiting (tests)") || last.starts_with("blackhole ci: waiting (tests):");
+        let code = if last.starts_with("blackhole ci: red (") {
+            1
+        } else {
+            3
+        };
+        waiting && out.status.code() == Some(code)
+    } else {
+        last == "blackhole ci: green" && out.status.code() == Some(0)
+    };
+    assert!(judged, "{}: {stdout}{:?}", path.display(), out.status);
+
     let marker = format!(" {} ", rule.id);
     let mut actual = String::new();
     for (location, note) in stdout.lines().filter_map(|line| line.split_once(&marker)) {

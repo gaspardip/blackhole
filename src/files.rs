@@ -171,7 +171,7 @@ pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
 }
 
 fn not_regular(path: &Path) -> io::Error {
-    io::Error::other(format!("{} must be a regular file", path.display()))
+    crate::red(format!("{} must be a regular file", path.display()))
 }
 
 pub(crate) fn regular(path: &Path) -> io::Result<Option<fs::Metadata>> {
@@ -210,7 +210,7 @@ pub(crate) fn list<'a>(
         let named = cwd.join(path);
         let real = resolve(&named, &mut seen).map_err(|e| {
             let path = named.to_string_lossy();
-            io::Error::new(e.kind(), format!("{}: {e}", crate::diagnostic_text(&path)))
+            crate::usage(format!("{}: {e}", crate::diagnostic_text(&path)))
         })?;
         let literal = named.strip_prefix(root).ok().filter(|p| {
             !p.components()
@@ -298,7 +298,7 @@ pub(crate) fn listed_matching<'a>(
                 }
             }
             let name = std::str::from_utf8(name).map_err(|_| {
-                io::Error::other(format!("path is not valid UTF-8: {}", name.escape_ascii()))
+                crate::red(format!("path is not valid UTF-8: {}", name.escape_ascii()))
             })?;
             #[cfg(not(unix))]
             if !matches(Path::new(name)) {

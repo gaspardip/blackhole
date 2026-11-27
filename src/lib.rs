@@ -65,10 +65,55 @@ pub mod verdict;
 mod advisory_tests;
 
 use std::{
-    env, fs,
+    env, fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
+
+/// What a failed command leaves to its caller; an error without a fault is no verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    /// The caller typed something invalid.
+    Usage,
+    /// The checkout's own content cannot be judged, which is the author's to fix.
+    Red,
+}
+
+#[derive(Debug)]
+struct Classified {
+    fault: Fault,
+    message: String,
+}
+
+impl fmt::Display for Classified {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Classified {}
+
+pub(crate) fn usage(message: impl fmt::Display) -> io::Error {
+    classified(Fault::Usage, message)
+}
+
+pub(crate) fn red(message: impl fmt::Display) -> io::Error {
+    classified(Fault::Red, message)
+}
+
+fn classified(fault: Fault, message: impl fmt::Display) -> io::Error {
+    io::Error::other(Classified {
+        fault,
+        message: message.to_string(),
+    })
+}
+
+/// The fault an error was created with, or `None` when the tool could not judge.
+#[must_use]
+pub fn fault(error: &io::Error) -> Option<Fault> {
+    let classified = error.get_ref()?.downcast_ref::<Classified>()?;
+    Some(classified.fault)
+}
 
 /// Checks the selected files and returns whether any rule was violated.
 ///
@@ -82,7 +127,7 @@ pub fn check(paths: &[PathBuf], output: &mut impl Write) -> io::Result<bool> {
     let policy = Policy::load(&root)?;
     let listing = files::list(&root, &cwd, paths, policy.paths())?;
     if let Some(path) = listing.unmatched {
-        return Err(io::Error::other(format!(
+        return Err(usage(format!(
             "no files match {}",
             diagnostic_text(&path.to_string_lossy())
         )));
@@ -149,7 +194,7 @@ pub fn regenerate(output: &mut impl Write) -> io::Result<bool> {
 // A link swapped in before the move shows as a working directory that is somewhere else.
 fn enter(root: &Path, directory: &str, create: bool) -> io::Result<bool> {
     let home = root.join(directory);
-    let misplaced = || io::Error::other(format!("{directory} must be a directory"));
+    let misplaced = || red(format!("{directory} must be a directory"));
     if create
         && let Err(e) = fs::create_dir(&home)
         && e.kind() != io::ErrorKind::AlreadyExists
@@ -223,10 +268,11 @@ struct Policy {
 impl Policy {
     fn load(root: &Path) -> io::Result<Self> {
         let config =
-            config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())?;
+            config::parse(&files::policy(&root.join("blackhole.toml"))?.unwrap_or_default())
+                .map_err(red)?;
         let entered = enter(root, ".blackhole", false)?;
         let ledger_bytes = policy(entered, "ledger")?;
-        let base = ledger::load(ledger_bytes.as_deref())?;
+        let base = ledger::load(ledger_bytes.as_deref()).map_err(red)?;
         Ok(Self {
             config,
             entered,
@@ -274,7 +320,7 @@ fn scan(
     )?;
     let actual = ledger::counts(&findings);
     let today = objections::Date::today()?;
-    let objections = objections::parse(&filed, today)?;
+    let objections = objections::parse(&filed, today).map_err(red)?;
     let over = ledger::excess(
         &actual,
         &objections::allowances(&rules.base, &objections, today),
@@ -388,25 +434,23 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
     let entered = enter(&root, ".blackhole", false)?;
     let bytes = policy(entered, "objections")?.unwrap_or_default();
     let today = objections::Date::today()?;
-    let rows = objections::parse(&bytes, today)?;
+    let rows = objections::parse(&bytes, today).map_err(red)?;
     // Old rows for a rule that became advisory still parse, but a new one would allow nothing.
     let advisory = engine::registry()
         .iter()
         .any(|r| r.id == rule && r.gate == engine::Gate::Advisory);
     if advisory || !engine::can_allow(engine::registry(), &rule) {
-        return Err(io::Error::other("rule cannot be objected to"));
+        return Err(usage("rule cannot be objected to"));
     }
     let key = (rule, path);
-    let mut contents = String::from_utf8(bytes).map_err(io::Error::other)?;
+    let mut contents = String::from_utf8(bytes).map_err(red)?;
     if renew {
         if reason.is_some() {
-            return Err(io::Error::other("renewal takes no reason"));
+            return Err(usage("renewal takes no reason"));
         }
-        let row = rows
-            .get(&key)
-            .ok_or_else(|| io::Error::other("no objection"))?;
+        let row = rows.get(&key).ok_or_else(|| usage("no objection"))?;
         if row.renewal.is_some() {
-            return Err(io::Error::other("already renewed once"));
+            return Err(usage("already renewed once"));
         }
         let renewed = objections::Objection {
             renewal: Some(today),
@@ -426,11 +470,11 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
             .collect();
     } else {
         if rows.contains_key(&key) {
-            return Err(io::Error::other("duplicate objection"));
+            return Err(usage("duplicate objection"));
         }
         let reason = reason
             .filter(|s| !s.trim().is_empty() && !s.contains(['\r', '\n', '\t']))
-            .ok_or_else(|| io::Error::other("invalid reason"))?;
+            .ok_or_else(|| usage("invalid reason"))?;
         let policy = Policy::load(&root)?;
         let scan = scan_all(&root, &policy, &mut io::sink())?;
         let extra = scan
@@ -440,7 +484,7 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
             .unwrap_or(0)
             .saturating_sub(policy.base.get(&key).copied().unwrap_or(0));
         if extra == 0 || ledger::invalid_path(&key.1) {
-            return Err(io::Error::other("no representable overage"));
+            return Err(usage("no representable overage"));
         }
         let filed = objections::Objection {
             extra,
