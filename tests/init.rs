@@ -857,6 +857,7 @@ fn writes_the_judge_workflow_pinned_to_this_version() {
     assert!(text.contains(
         "(cd \"${RUNNER_TEMP}/judge.git\" && \"${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole\" ci \\\n            --base \"${BASE_SHA}\" --head \"${HEAD_SHA}\" --approvals \"${RUNNER_TEMP}/approvals.json\")"
     ));
+    assert!(text.contains(r"printf '\nblackhole ci: green\n'"));
     let uses: Vec<_> = text.lines().filter(|line| line.contains("uses:")).collect();
     assert_ne!(uses.len(), 0);
     for line in uses {

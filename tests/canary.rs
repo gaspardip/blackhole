@@ -17,6 +17,11 @@ const REF: &str = "repos/owner/repo/git/refs/heads/blackhole-canary-N";
 const REF_LOOKUP: &str = "repos/owner/repo/git/ref/heads/blackhole-canary-N";
 const JOB: &str = "repos/owner/repo/actions/jobs/99";
 const RUN: &str = "repos/owner/repo/actions/runs/42";
+const JUDGE_BASE: &str = "a09876543210a09876543210a09876543210abcd";
+fn contents() -> String {
+    format!("repos/owner/repo/contents/.github/workflows/blackhole.yml?ref={JUDGE_BASE}")
+}
+
 const LOGS: &str = "repos/owner/repo/actions/jobs/99/logs";
 const LINES: [&str; 6] = [
     "ledger: raise a ledger allowance",
@@ -120,6 +125,13 @@ fn finished(adopter: &Adopter, conclusion: &str, log: &str) {
         .fake
         .respond("GET", JOB, 200, &[], br#"{"run_id":42}"#);
     workflow_run(adopter, ".github/workflows/blackhole.yml", "main");
+    adopter.fake.respond(
+        "GET",
+        &contents(),
+        200,
+        &[],
+        &fs::read(adopter.root.join(".github/workflows/blackhole.yml")).unwrap(),
+    );
     let log = format!(
         "2026-11-26T10:00:00.0000000Z ::stop-commands::***\n{log}2026-11-26T10:00:01.0000000Z ::***::\n"
     );
@@ -130,7 +142,7 @@ fn workflow_run(adopter: &Adopter, path: &str, base: &str) {
     let run = serde_json::json!({
         "path": path,
         "event": "pull_request_target",
-        "pull_requests": [{"number": 12, "base": {"ref": base}}]
+        "pull_requests": [{"number": 12, "base": {"ref": base, "sha": JUDGE_BASE}}]
     });
     adopter
         .fake
@@ -283,7 +295,7 @@ fn a_forgery_the_check_does_not_name_got_through() {
     assert_eq!(code, 1);
 
     let passing = adopted();
-    finished(&passing, "success", "");
+    finished(&passing, "success", "blackhole ci: green\n");
     let (out, code) = canary(&passing, &[]);
     assert_eq!(code, 1);
     assert_eq!(out.matches(": not stopped\n").count(), 6, "{out}");
@@ -504,6 +516,42 @@ fn a_job_that_fails_before_the_judge_has_no_verdict() {
     finished(&adopter, "failure", "");
     adopter.fake.respond("GET", LOGS, 200, &[], RED.as_bytes());
     assert_unavailable(&adopter);
+}
+
+#[test]
+fn a_different_judge_workflow_at_the_runs_base_has_no_verdict() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    adopter
+        .fake
+        .respond("GET", &contents(), 200, &[], b"name: blackhole\n");
+    let (out, code) = canary(&adopter, &["--timeout", "0"]);
+    assert_eq!(code, 75, "{out}");
+    assert_eq!(
+        out.lines().next(),
+        Some("canary: the judge workflow differs from what init writes")
+    );
+    let calls = adopter.fake.calls();
+    assert!(calls.iter().any(|call| call.ends_with(&contents())));
+    assert!(calls.iter().all(|call| !call.ends_with(LOGS)));
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
+fn malformed_red_verdicts_have_no_verdict() {
+    for log in [
+        "blackhole ci: red (ledger, unknown)\n",
+        "blackhole ci: red (ledger, )\n",
+        "blackhole ci: red ()\n",
+        "blackhole ci: waiting\n",
+    ] {
+        assert_no_verdict("failure", log);
+    }
+}
+
+#[test]
+fn a_successful_job_with_no_judge_summary_has_no_verdict() {
+    assert_no_verdict("success", "");
 }
 
 #[test]

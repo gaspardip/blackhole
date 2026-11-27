@@ -119,6 +119,9 @@ jobs:
           marker="$(cat /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "${marker}"
           cat "${RUNNER_TEMP}/judge.log"
+          if [ "${code}" -eq 0 ]; then
+            printf '\nblackhole ci: green\n'
+          fi
           printf '\n::%s::\n' "${marker}"
           exit "${code}"
 "#;

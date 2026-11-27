@@ -326,7 +326,7 @@ impl Run<'_> {
         let endpoint =
             format!("repos/{slug}/commits/{head}/check-runs?check_name={CHECK}&per_page=100");
         let deadline = Instant::now() + self.timeout;
-        let (run, id) = 'poll: loop {
+        let (run, id, base_sha) = 'poll: loop {
             let runs = json(&call(self.repo, "GET", &endpoint, &[], 200)?)?;
             for run in runs["check_runs"].as_array().into_iter().flatten() {
                 if run["app"]["id"].as_u64() != Some(ACTIONS_APP) || run["status"] != "completed" {
@@ -335,8 +335,8 @@ impl Run<'_> {
                 let id = run["id"]
                     .as_u64()
                     .ok_or_else(|| io::Error::other("GitHub returned a check run without an id"))?;
-                if self.is_judge(id, number)? {
-                    break 'poll (run.clone(), id);
+                if let Some(base_sha) = self.judge_base(id, number)? {
+                    break 'poll (run.clone(), id, base_sha);
                 }
             }
             let now = Instant::now();
@@ -348,6 +348,11 @@ impl Run<'_> {
             }
             thread::sleep(POLL.min(deadline - now));
         };
+        if !self.workflow_matches(&base_sha)? {
+            return Ok(Outcome::Unavailable(
+                "canary: the judge workflow differs from what init writes".to_owned(),
+            ));
+        }
         let conclusion = run["conclusion"].as_str().unwrap_or("unknown");
         if !matches!(conclusion, "success" | "failure") {
             return Ok(Outcome::Unavailable(format!(
@@ -367,7 +372,7 @@ impl Run<'_> {
             log: String::from_utf8_lossy(&log.body).into_owned(),
         })
     }
-    fn is_judge(&self, job_id: u64, number: u64) -> io::Result<bool> {
+    fn judge_base(&self, job_id: u64, number: u64) -> io::Result<Option<String>> {
         let slug = &self.repo.slug;
         let job = json(&call(
             self.repo,
@@ -377,7 +382,7 @@ impl Run<'_> {
             200,
         )?)?;
         let Some(run_id) = job["run_id"].as_u64() else {
-            return Ok(false);
+            return Ok(None);
         };
         let run = json(&call(
             self.repo,
@@ -386,13 +391,33 @@ impl Run<'_> {
             &[],
             200,
         )?)?;
-        Ok(run["event"] == "pull_request_target"
-            && run["path"] == WORKFLOW_PATH
-            && run["pull_requests"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|pr| pr["number"].as_u64() == Some(number) && pr["base"]["ref"] == self.base))
+        if run["event"] != "pull_request_target" || run["path"] != WORKFLOW_PATH {
+            return Ok(None);
+        }
+        Ok(run["pull_requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|pr| pr["number"].as_u64() == Some(number) && pr["base"]["ref"] == self.base)
+            .map(|pr| pr["base"]["sha"].as_str().unwrap_or_default().to_owned()))
+    }
+
+    fn workflow_matches(&self, base_sha: &str) -> io::Result<bool> {
+        if base_sha.len() != 40 || !base_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        let endpoint = format!(
+            "repos/{}/contents/{WORKFLOW_PATH}?ref={base_sha}",
+            self.repo.slug
+        );
+        let response = github::api(
+            &self.repo.host,
+            "GET",
+            &endpoint,
+            &["-H", "Accept: application/vnd.github.raw"],
+        )
+        .map_err(|failure| io::Error::other(failure.to_string()))?;
+        Ok(response.status == 200 && response.body == workflow::content().as_bytes())
     }
 }
 
@@ -420,10 +445,23 @@ fn verdict<'a>(log: &'a str, conclusion: &str) -> Option<Vec<&'a str>> {
         .map(log_text)
         .rfind(|line| line.starts_with("blackhole ci:"));
     match (conclusion, summary) {
-        ("success", None | Some("blackhole ci: green")) => Some(Vec::new()),
+        ("success", Some("blackhole ci: green")) => Some(Vec::new()),
         ("failure", Some(summary)) => {
             let gates = summary.strip_prefix(ci::RED)?.strip_suffix(')')?;
-            (!gates.is_empty()).then(|| gates.split(", ").collect())
+            let gates: Vec<_> = gates.split(", ").collect();
+            (gates.iter().all(|gate| {
+                matches!(
+                    *gate,
+                    "behind"
+                        | "coverage"
+                        | "findings"
+                        | "ledger"
+                        | "objections"
+                        | "protected"
+                        | "tests"
+                )
+            }) && gates.is_sorted_by(|left, right| left < right))
+            .then_some(gates)
         }
         _ => None,
     }
