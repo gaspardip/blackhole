@@ -545,6 +545,20 @@ impl Scanner<'_, '_> {
             result,
         )
     }
+
+    fn unparseable(&self, path: &str, bytes: &[u8], message: String, result: &mut Vec<Finding>) {
+        let source = Source::new(bytes);
+        let error = (0, message);
+        let hits = collect(
+            self.rules,
+            path,
+            &source,
+            self.settings,
+            self.repository.as_ref(),
+            Err(&error),
+        );
+        source.locate(path, hits, result);
+    }
 }
 
 pub(crate) fn scan<'source, S, T>(
@@ -569,7 +583,7 @@ pub(crate) fn scan<'source, S, T>(
 }
 
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
+/// Panics if a rule reports an offset past the end of its input.
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -580,7 +594,7 @@ pub fn run<'a>(
 /// Applies configured rules to files already selected by the caller.
 ///
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
+/// Panics if a rule reports an offset past the end of its input.
 pub fn run_configured<'a>(
     rules: &[Rule],
     settings: Settings,
@@ -593,7 +607,7 @@ pub fn run_configured<'a>(
 /// Runs configured rules and returns findings and counted work across the supplied files.
 ///
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
+/// Panics if a rule reports an offset past the end of its input.
 #[doc(hidden)]
 #[must_use]
 pub fn run_with_work<'a>(
@@ -633,9 +647,13 @@ pub fn run_with_work<'a>(
         |scanner, _, files| {
             let mut work = 0u64;
             for (path, bytes) in files {
+                // A library caller has no verdict to withhold, so a file the machine cannot parse is a finding.
                 let counted = scanner
                     .file(path, bytes, &mut findings)
-                    .expect("a parser thread starts");
+                    .unwrap_or_else(|error| {
+                        scanner.unparseable(path, bytes, error.to_string(), &mut findings);
+                        0
+                    });
                 work = work.saturating_add(counted);
             }
             sort_findings(&mut findings);

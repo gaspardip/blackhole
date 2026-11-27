@@ -1358,3 +1358,30 @@ fn keyword_answers_survive_an_expensive_neighbor() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_parser_thread_that_cannot_start_is_a_finding_for_library_callers() {
+    const CHILD: &str = "BLACKHOLE_ENGINE_TEST_CHILD";
+    let name = "a_parser_thread_that_cannot_start_is_a_finding_for_library_callers";
+    if std::env::var_os(CHILD).is_some() {
+        let findings = run(registry(), [("a.ts", b"let a = 1;\n".as_slice())]);
+        let rules: Vec<_> = findings.iter().map(|finding| finding.rule).collect();
+        println!("rules={}", rules.join(","));
+        return;
+    }
+    // The parser's stack does not fit this address space, so its thread cannot start.
+    let out = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -v 700000 && exec \"$0\" --exact \"$1\" --nocapture --test-threads=1",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .arg(name)
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout.contains("rules=core/unparseable\n"), "{out:?}");
+}
