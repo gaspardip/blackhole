@@ -550,6 +550,25 @@ fn malformed_red_verdicts_have_no_verdict() {
 }
 
 #[test]
+fn a_moved_default_branch_has_no_verdict() {
+    let adopter = adopted();
+    finished(&adopter, "failure", "blackhole ci: red (behind)\n");
+    let (out, code) = canary(&adopter, &["--timeout", "0"]);
+    assert_eq!(code, 75, "{out}");
+    assert_eq!(
+        out.lines().next(),
+        Some("canary: the default branch moved during the run; run the canary again")
+    );
+    for line in LINES {
+        assert!(
+            out.lines().any(|row| row == format!("{line}: no verdict")),
+            "{out}"
+        );
+    }
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
 fn a_successful_job_with_no_judge_summary_has_no_verdict() {
     assert_no_verdict("success", "");
 }

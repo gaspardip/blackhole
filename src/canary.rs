@@ -583,8 +583,18 @@ fn report(
     let (named, log) = match outcome {
         Outcome::Judged { conclusion, log } => {
             let log = judge_output(log);
-            let named = log.and_then(|log| verdict(log, conclusion));
-            if named.is_none() {
+            let mut named = log.and_then(|log| verdict(log, conclusion));
+            // ci stops at a moved base before it judges any forgery.
+            if named
+                .as_ref()
+                .is_some_and(|gates| gates.contains(&"behind"))
+            {
+                writeln!(
+                    out,
+                    "canary: the default branch moved during the run; run the canary again"
+                )?;
+                named = None;
+            } else if named.is_none() {
                 writeln!(
                     out,
                     "canary: the blackhole check did not emit a judge verdict"
