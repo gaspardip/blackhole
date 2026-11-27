@@ -132,6 +132,41 @@ class Backtest(unittest.TestCase):
         self.assertEqual(summary["skipped"], 0)
         self.assertEqual(summary["rules"], {"ts/no-skipped-tests": {"changes": 1, "flag_rate": 0.5}})
 
+    def test_refuses_output_in_a_separate_git_directory(self) -> None:
+        source = self.repo
+        self.repo = self.root / "separate"
+        storage = self.root / "storage"
+        self.repo.mkdir()
+        self.git("clone", "--quiet", "--separate-git-dir", str(storage), str(source), ".")
+        output = storage / "reports"
+        result = self.invoke_backtest(self.binary, "--out", str(output))
+        self.assertEqual((result.returncode, output.exists()), (1, False))
+        self.assertIn("inside the source clone", result.stderr)
+
+    def test_refuses_report_symlink_into_a_linked_worktrees_git_directories(self) -> None:
+        source = self.repo
+        linked = self.root / "linked"
+        self.git("worktree", "add", "--quiet", "--detach", str(linked))
+        self.repo = linked
+        self.out.mkdir()
+        report = self.out / linked.name
+        for directory in (source / ".git", source / ".git/worktrees/linked"):
+            with self.subTest(directory=directory):
+                output = directory / "reports"
+                report.symlink_to(output, target_is_directory=True)
+                result = self.invoke_backtest(self.binary)
+                report.unlink()
+                self.assertEqual((result.returncode, output.exists()), (1, False))
+                self.assertIn("inside the source clone", result.stderr)
+
+    def test_refuses_a_nested_source_repo(self) -> None:
+        nested = self.repo / "nested"
+        nested.mkdir()
+        output = self.repo / "reports"
+        result = self.invoke_backtest(self.binary, "--repo", str(nested), "--out", str(output))
+        self.assertEqual((result.returncode, output.exists()), (1, False))
+        self.assertIn("worktree root", result.stderr)
+
     def test_sparse_checkout_does_not_change_verdict(self) -> None:
         self.merge("clean.ts", "export const value = 1;\n")
         full = self.run_backtest(self.binary)

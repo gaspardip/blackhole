@@ -66,9 +66,11 @@ def environment(home: Path) -> dict[str, str]:
 def run(
     cwd: Path, env: dict[str, str], *args: str | Path, check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
+    process = subprocess.run(
         args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        encoding="utf-8", errors="surrogateescape",
+    )
+    result = subprocess.CompletedProcess(
+        args, process.returncode, process.stdout.decode("utf-8", errors="surrogateescape"),
     )
     if check and result.returncode:
         raise RuntimeError(f"{args[0]} in {cwd} exited {result.returncode}: {result.stdout.strip()}")
@@ -148,10 +150,18 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
 
 
 def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None:
+    source_env = environment(Path(os.devnull))
+    source_paths = [
+        Path(git(repo, source_env, "rev-parse", "--path-format=absolute", option)
+             .stdout.removesuffix("\n")).resolve()
+        for option in ("--show-toplevel", "--git-dir", "--git-common-dir")
+    ]
+    if repo != source_paths[0]:
+        raise RuntimeError(f"source repo must be its worktree root: {source_paths[0]}")
     out = out.resolve()
     report = (out / repo.name).resolve()
     for directory in (out, report):
-        if directory.is_relative_to(repo):
+        if any(directory.is_relative_to(source) for source in source_paths):
             raise RuntimeError(f"output or report directory is inside the source clone: {directory}")
     out.mkdir(parents=True, exist_ok=True)
     states = Counter(dict.fromkeys((*STATES.values(), "error", "skipped"), 0))
