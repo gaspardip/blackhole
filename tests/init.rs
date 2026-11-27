@@ -85,6 +85,7 @@ fn installs_and_merges_once() {
         fs::read(root.join(".blackhole/ledger")).unwrap(),
         b"blackhole-ledger 1\n"
     );
+    let mut installed = None;
     for (name, matcher) in HOOK_FILES
         .into_iter()
         .zip(["^(Edit|Write|MultiEdit|NotebookEdit)$", "^apply_patch$"])
@@ -96,7 +97,11 @@ fn installs_and_merges_once() {
         assert_ne!(stop, "blackhole hook stop");
         assert_ne!(stop, &Value::String(previous_launcher("stop")));
         assert_ne!(stop, &Value::String(old_launcher(ISOLATED_ROOT, "stop")));
-        assert_eq!(stop, &Value::String(checked_launcher("stop")));
+        assert_ne!(stop, &Value::String(checked_launcher("stop")));
+        assert_ne!(stop, &Value::String(project_launcher("stop")));
+        if let Some(previous) = installed.replace(stop.clone()) {
+            assert_eq!(stop, &previous);
+        }
         let mut upgraded = original.clone();
         for index in [0, 1, 2, 3, 4] {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
@@ -888,4 +893,56 @@ fn the_launcher_uses_only_path_without_git() {
         }
     }
     assert!(!stray.join("node_modules/.bin/blackhole.ran").exists());
+}
+
+#[test]
+fn generated_stop_blocks_when_the_selected_binary_cannot_start() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let ambient = git_only_path();
+    let local = root.join("node_modules/.bin/blackhole");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    for bin in [local, ambient.path().join("blackhole")] {
+        for (script, status, launch_failed) in [
+            ("#!/no/such/blackhole-interpreter\n", 2, true),
+            ("#!/bin/sh\nexit 126\n", 2, true),
+            ("#!/bin/sh\nexit 127\n", 2, true),
+            ("#!/bin/sh\nexit 75\n", 75, false),
+        ] {
+            fs::write(&bin, script).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            for name in HOOK_FILES {
+                let doc: Value =
+                    serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+                let command = doc["hooks"]["Stop"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap();
+                let output = common::command("/bin/sh")
+                    .args(["-c", &format!("blackhole() {{ exit 0; }}; {command}")])
+                    .current_dir(root)
+                    .env("PATH", ambient.path())
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(status),
+                    "{name} {bin:?}: {output:?}"
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .filter(
+                            |line| line.starts_with("blackhole: hook stop could not run blackhole")
+                        )
+                        .count(),
+                    usize::from(launch_failed),
+                    "{name} {bin:?}: {output:?}"
+                );
+            }
+        }
+        fs::remove_file(bin).unwrap();
+    }
 }

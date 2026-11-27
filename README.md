@@ -21,7 +21,8 @@ Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
 a turn, `blackhole hook stop` checks the whole repository. The launchers use the
 checkout's executable `node_modules/.bin/blackhole` when available and the root
 git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
-With neither, the hook blocks.
+With neither, the hook blocks. If the selected executable exits 126 or 127,
+the launcher reports a launch failure and blocks (exit 2).
 
 Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
 Pre-edit compares the ledger path case-insensitively, but it does not catch
@@ -31,8 +32,6 @@ Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
 
 The hooks also do not catch these cases:
 
-- The npm install's `blackhole` needs `node` on the hook's PATH. Without it the
-  shim exits 127, which Codex treats as non-blocking.
 - A checkout directory whose name ends in a newline can make the launcher
   resolve the wrong root.
 - A Codex hook that rewrites a patch after blackhole has checked it can change

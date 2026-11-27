@@ -262,24 +262,29 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
                 r#"if root=$({root} 2>/dev/null) && local_bin="$root/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; exec blackhole hook {cmd}"#
             )
         };
-        let global = format!(
-            r#"command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; exec blackhole hook {cmd}"#
+        let on_path = format!(
+            r#"command -v blackhole >/dev/null 2>&1 || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}"#
         );
+        let global = format!("{on_path}; exec blackhole hook {cmd}");
         let nearest = r#"dir=$(pwd -P) && while [ "$dir" != / ] && [ ! -e "$dir/.git" ] && [ ! -L "$dir/.git" ]; do dir=${dir%/*}; dir=${dir:-/}; done && { [ -e "$dir/.git" ] || [ -L "$dir/.git" ]; }"#;
         let top =
             format!(r#"root=$({ISOLATED_ROOT} 2>/dev/null) && top=$(cd -P -- "$root" && pwd -P)"#);
         // `core.worktree` can point git elsewhere, so the local binary must sit beside the nearest `.git`.
-        let checked = format!(
-            r#"if {top} && {nearest} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
+        let local = format!(
+            r#"{top} && {nearest} && [ "$dir" = "$top" ] && local_bin="$top/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]"#
         );
+        let checked = format!(r#"if {local}; then exec "$local_bin" hook {cmd}; fi; "#);
         let project = format!(
             r#"if ! command -v git >/dev/null 2>&1 && [ -n "${{CLAUDE_PROJECT_DIR:-}}" ] && local_bin="$CLAUDE_PROJECT_DIR/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
         );
-        let command = format!("{checked}{global}");
+        let command = format!(
+            r#"if {local}; then hook_bin="$local_bin"; else {on_path}; hook_bin=blackhole; fi; hook_status=0; (exec "$hook_bin" hook {cmd}) || hook_status=$?; case "$hook_status" in 126|127) echo "blackhole: hook {cmd} could not run blackhole (exit $hook_status)" >&2; exit 2;; esac; exit "$hook_status""#
+        );
         let known = [
             format!("blackhole hook {cmd}"),
             launcher(PREVIOUS_ROOT),
             launcher(ISOLATED_ROOT),
+            format!("{checked}{global}"),
             format!("{checked}{project}{global}"),
             format!(
                 r#"if {nearest} && local_bin="$dir/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ] && {{ ! command -v git >/dev/null 2>&1 || {{ {top} && [ "$dir" = "$top" ]; }}; }}; then exec "$local_bin" hook {cmd}; fi; {global}"#
