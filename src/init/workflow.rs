@@ -30,8 +30,8 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_AUTHOR: ${{ github.event.pull_request.user.login }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      # The payload's base SHA can lag behind the base branch; this is its tip when the event fired.
-      BASE_SHA: ${{ github.sha }}
+      # The payload's base SHA can lag behind the base branch, so the fetch step reads the branch's tip.
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -58,11 +58,12 @@ jobs:
           # The token reaches git through the environment of this one command and is never written to disk.
           GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: basic ${auth}" \
             git -C "${repo}" fetch -q --no-tags "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
-            "${BASE_SHA}:refs/judge/base" "refs/pull/${PR_NUMBER}/head:refs/judge/head"
+            "refs/heads/${BASE_REF}:refs/judge/base" "refs/pull/${PR_NUMBER}/head:refs/judge/head"
           if [ "$(git -C "${repo}" rev-parse refs/judge/head)" != "${HEAD_SHA}" ]; then
             echo "The pull request head changed before fetch; the run for the new head judges it." >&2
             exit 1
           fi
+          printf 'BASE_SHA=%s\n' "$(git -C "${repo}" rev-parse refs/judge/base)" >> "${GITHUB_ENV}"
       - name: Collect approvals of the head
         env:
           GH_TOKEN: ${{ github.token }}

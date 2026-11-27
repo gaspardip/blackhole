@@ -19,7 +19,8 @@ Everything init writes is visible to git, so reverting that commit restores the
 repository byte for byte.
 
 The judge workflow (`blackhole.yml`) uses `pull_request_target` to judge every
-pull request from the default branch's copy of the workflow. It installs the
+pull request from the default branch's copy of the workflow, against the tip
+of the pull request's own base branch. It installs the
 exact `@gaspardip/blackhole` version that wrote it with `--ignore-scripts`,
 checks the registry signatures and the version, fetches the head into a bare
 repository without checking it out, and reads only `contents` and

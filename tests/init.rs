@@ -1856,3 +1856,96 @@ fn an_ignore_rule_does_not_hide_tracked_settings() {
     fs::write(root.join(".gitignore"), ".claude/\n").unwrap();
     init(root, true);
 }
+
+// The shell of one step of the generated judge workflow, as GitHub runs it.
+#[cfg(target_os = "linux")]
+fn workflow_step(name: &str) -> String {
+    let workflow = String::from_utf8(generated_workflow()).unwrap();
+    let start = workflow.find(&format!("      - name: {name}\n")).unwrap();
+    let mut lines = workflow[start..]
+        .lines()
+        .skip_while(|line| *line != "        run: |");
+    lines.next().unwrap();
+    lines
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| format!("{}\n", line.get(10..).unwrap_or_default()))
+        .collect()
+}
+
+// A GitHub stand-in served over file://, with a default branch, a release branch and pull request 5 into the release branch.
+#[cfg(target_os = "linux")]
+struct Judged {
+    server: tempfile::TempDir,
+    runner: tempfile::TempDir,
+    release: String,
+    head: String,
+}
+
+#[cfg(target_os = "linux")]
+fn judged_repository() -> Judged {
+    let server = tempdir().unwrap();
+    let source = server.path().join("work");
+    fs::create_dir(&source).unwrap();
+    common::git(&source, &["init", "-q", "-b", "main"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "main"]).unwrap();
+    common::git(&source, &["checkout", "-qb", "release"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "release"]).unwrap();
+    let release = common::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "change"]).unwrap();
+    let head = common::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    common::git(&source, &["update-ref", "refs/pull/5/head", &head]).unwrap();
+    common::git(&source, &["update-ref", "refs/heads/release", &release]).unwrap();
+    common::git(
+        server.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            "--mirror",
+            "work",
+            "owner/repo.git",
+        ],
+    )
+    .unwrap();
+    Judged {
+        server,
+        runner: tempdir().unwrap(),
+        release,
+        head,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_step(judged: &Judged, name: &str, env: &[(&str, &str)]) -> std::process::Output {
+    common::command("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail", "-c"])
+        .arg(workflow_step(name))
+        .env("RUNNER_TEMP", judged.runner.path())
+        .env("GITHUB_ENV", judged.runner.path().join("github_env"))
+        .env(
+            "GITHUB_SERVER_URL",
+            format!("file://{}", judged.server.path().display()),
+        )
+        .env("GITHUB_REPOSITORY", "owner/repo")
+        .env("GH_TOKEN", "token")
+        .env("PR_NUMBER", "5")
+        .env("HEAD_SHA", &judged.head)
+        .env("BASE_REF", "release")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_judge_compares_against_the_tip_of_the_pull_requests_own_base_branch() {
+    let judged = judged_repository();
+    let fetched = run_step(
+        &judged,
+        "Fetch the base and head commits without checking them out",
+        &[],
+    );
+    assert!(fetched.status.success(), "{fetched:?}");
+    let exported = fs::read_to_string(judged.runner.path().join("github_env")).unwrap();
+    assert_eq!(exported, format!("BASE_SHA={}\n", judged.release));
+}
