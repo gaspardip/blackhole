@@ -897,6 +897,20 @@ fn collect_approvals(runner: &Path, fake: &gh::FakeGh, head: &str) -> std::proce
         .unwrap()
 }
 
+fn approval_runner() -> (tempfile::TempDir, String) {
+    let runner = tempdir().unwrap();
+    let judge = runner.path().join("judge.git");
+    fs::create_dir(&judge).unwrap();
+    let git = |args: &[&str]| common::git(&judge, args).unwrap();
+    git(&["init", "--bare", "-q", "--template="]);
+    let tree = git(&["mktree"]);
+    let base = git(&["commit-tree", &tree, "-m", "base"]);
+    let head = git(&["commit-tree", &tree, "-p", &base, "-m", "head"]);
+    git(&["update-ref", "refs/judge/base", &base]);
+    git(&["update-ref", "refs/judge/head", &head]);
+    (runner, head)
+}
+
 fn approval_api(head: &str) -> gh::FakeGh {
     let fake = gh::FakeGh::new();
     let commits = json!([{"sha":head,"author":{"login":"writer"},"committer":null}]);
@@ -935,10 +949,9 @@ fn approval_api(head: &str) -> gh::FakeGh {
 
 #[test]
 fn approval_collection_checks_only_current_approvers_and_accepts_missing_collaborators() {
-    let runner = tempdir().unwrap();
-    let head = "current";
-    let fake = approval_api(head);
-    let out = collect_approvals(runner.path(), &fake, head);
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    let out = collect_approvals(runner.path(), &fake, &head);
     assert!(out.status.success(), "{out:?}\n{:#?}", fake.calls());
     let approvals: Value =
         serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
@@ -962,12 +975,39 @@ fn approval_collection_checks_only_current_approvers_and_accepts_missing_collabo
     assert!(
         serde_json::from_value::<blackhole_check::verdict::Approvals>(approvals)
             .unwrap()
-            .approved(head)
+            .approved(&head)
     );
 
     fake.respond("GET", GONE_PERMISSION, 502, &[], b"{}");
-    let out = collect_approvals(runner.path(), &fake, head);
+    let out = collect_approvals(runner.path(), &fake, &head);
     assert!(!out.status.success(), "{out:?}");
+}
+
+#[test]
+fn approvals_are_ignored_when_the_api_commits_differ_from_the_fetched_commits() {
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    fake.respond(
+        "GET",
+        PR_COMMITS,
+        200,
+        &[],
+        br#"[{"sha":"stale","author":{"login":"writer"}}]"#,
+    );
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(out.status.success(), "{out:?}");
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(approvals, json!({"authors":[],"reviews":[]}));
+    assert!(
+        !serde_json::from_value::<blackhole_check::verdict::Approvals>(approvals)
+            .unwrap()
+            .approved(&head)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Approvals were ignored because the pull request commit list could not be confirmed.\n"
+    );
 }
 
 #[test]

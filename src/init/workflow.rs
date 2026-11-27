@@ -68,11 +68,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           pr="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"
-          {
-            gh api --paginate "${pr}/commits?per_page=100" \
-              --jq '.[] | (.author.login, .committer.login) | select(. != null)'
-            printf '%s\n' "${PR_AUTHOR}"
-          } | jq -R . | jq -s unique > "${RUNNER_TEMP}/authors.json"
+          commits="$(
+            gh api --paginate "${pr}/commits?per_page=100" |
+              jq -cs '[.[][] | {sha, author: .author.login, committer: .committer.login}]'
+          )"
+          api_shas="$(jq -r '.[].sha' <<< "${commits}" | LC_ALL=C sort -u)"
+          fetched_shas="$(
+            git -C "${RUNNER_TEMP}/judge.git" rev-list refs/judge/base..refs/judge/head | LC_ALL=C sort -u
+          )"
+          if [[ "${api_shas}" != "${fetched_shas}" ]]; then
+            printf '%s\n' '{"authors":[],"reviews":[]}' > "${RUNNER_TEMP}/approvals.json"
+            echo "Approvals were ignored because the pull request commit list could not be confirmed."
+            exit 0
+          fi
+          jq --arg author "${PR_AUTHOR}" '[.[] | .author, .committer | strings] + [$author] | unique' \
+            <<< "${commits}" > "${RUNNER_TEMP}/authors.json"
           gh api --paginate "${pr}/reviews?per_page=100" |
             jq -rs --arg head "${HEAD_SHA}" '
               [.[][] | select(.user != null and .state != "COMMENTED")]
