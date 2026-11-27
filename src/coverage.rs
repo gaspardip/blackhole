@@ -153,6 +153,9 @@ pub(crate) fn changed<'a>(ctx: &mut DiffCtx<'a>, delta: &mut Delta<'a>) -> io::R
         } else {
             source_blob(base.historical_blob(old_path, batch)?, old_path, batch)?
         };
+        if old.is_some_and(|(id, _)| id == new) {
+            continue;
+        }
         if !fits_text_diff(old.map_or(0, |(_, size)| size), new_size) {
             delta.oversized.push(path);
             if !fits_text_diff(0, new_size) {
@@ -162,7 +165,6 @@ pub(crate) fn changed<'a>(ctx: &mut DiffCtx<'a>, delta: &mut Delta<'a>) -> io::R
         }
         let lines = batch.read(new)?.split_inclusive(|&b| b == b'\n').count();
         let hunks = match old {
-            Some((id, _)) if id == new => continue,
             Some((id, _)) => hunks(id, new)?,
             None => std::iter::once(1..lines + 1).collect(),
         };

@@ -1652,3 +1652,53 @@ fn check_and_stop_distinguish_a_replaced_tracked_file_from_a_gitlink() {
     );
     assert_eq!(stopped.stderr, checked.stdout);
 }
+
+#[test]
+fn coverage_skips_the_size_limit_for_an_unchanged_oversized_blob() {
+    for change in ["mode", "rename"] {
+        let dir = repo();
+        let root = dir.path();
+        fs::write(
+            root.join("blackhole.toml"),
+            "[coverage]\nlcov = \"reports/lcov.info\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("a.py"), "x = 1\n").unwrap();
+        common::git(root, &["add", "-A"]).unwrap();
+        common::git(root, &["commit", "-qm", "base"]).unwrap();
+        let blob = common::git(root, &["rev-parse", "HEAD:a.py"]).unwrap();
+        if change == "mode" {
+            common::git(root, &["update-index", "--chmod=+x", "a.py"]).unwrap();
+        } else {
+            common::git(root, &["mv", "a.py", "b.py"]).unwrap();
+        }
+        common::git(root, &["commit", "-qm", "head"]).unwrap();
+        let shims = tempdir().unwrap();
+        git_shim(
+            shims.path(),
+            r#"case " $* " in *" cat-file "*)
+                while IFS= read -r request; do
+                    case "$request" in
+                        "info $BLOB") printf '%s blob 1072693249\n' "$BLOB"; continue;;
+                    esac
+                    printf '%s\n' "$request" | "$real" "$@" || exit $?
+                done
+                exit 0;;
+            esac"#,
+        );
+        let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .env("PATH", shims.path())
+            .env("BLOB", &blob)
+            .args(["ci", "--base", "HEAD~", "--head", "HEAD"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+        assert_eq!(out.status.code(), Some(0), "{change}: {out:?}");
+        assert_eq!(
+            stdout.lines().last(),
+            Some("blackhole ci: green"),
+            "{change}"
+        );
+    }
+}
