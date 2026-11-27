@@ -1388,3 +1388,39 @@ fn check_and_stop_report_a_tracked_fifo() {
         checked.stdout
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn ci_finishes_with_a_verdict_when_git_stops_resolving_a_revision() {
+    let dir = repo();
+    let root = dir.path();
+    common::git(root, &["commit", "--allow-empty", "-qm", "base"]).unwrap();
+    let shims = tempdir().unwrap();
+    for (signal, status) in [
+        ("USR1", 1),
+        ("HUP", 75),
+        ("INT", 75),
+        ("KILL", 75),
+        ("TERM", 75),
+    ] {
+        git_killed_on(shims.path(), "rev-parse", signal, false);
+        let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .env("PATH", shims.path())
+            .args(["ci", "--base", "HEAD", "--head", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(status), "{signal}: {out:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let last = stdout.lines().last().unwrap();
+        if status == 1 {
+            assert!(stdout.starts_with("git crashed: "), "{stdout}");
+            assert_eq!(last, "blackhole ci: red (unreadable)", "{stdout}");
+        } else {
+            assert!(
+                last.starts_with("blackhole ci: no verdict: git did not finish: "),
+                "{signal}: {stdout}"
+            );
+        }
+    }
+}

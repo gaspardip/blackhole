@@ -212,14 +212,20 @@ pub fn run_with_coverage(
     artifacts: Option<&Path>,
     out: &mut impl Write,
 ) -> io::Result<State> {
+    let result = match judge(base, head, approvals, today, artifacts) {
+        Err(e) if crate::mark(&e) == Some(crate::Fault::Red) => Ok(Verdict::unreadable(&e)),
+        result => result,
+    };
     // The judge reads fetched commits, so a failure nobody marked is the fetch or the machine, not the change.
-    judge(base, head, approvals, today, artifacts, out).map_err(|e| {
-        if crate::mark(&e).is_some() {
-            e
-        } else {
-            crate::no_verdict(e)
-        }
-    })
+    result
+        .and_then(|verdict| write_verdict(verdict, out))
+        .map_err(|e| {
+            if crate::mark(&e).is_some() {
+                e
+            } else {
+                crate::no_verdict(e)
+            }
+        })
 }
 
 fn judge(
@@ -228,8 +234,7 @@ fn judge(
     approvals: Option<&Path>,
     today: Option<Date>,
     artifacts: Option<&Path>,
-    out: &mut impl Write,
-) -> io::Result<State> {
+) -> io::Result<Verdict> {
     let base = git::commit(base)?;
     let head = git::commit(head)?;
     let approved = match approvals {
@@ -248,16 +253,16 @@ fn judge(
         }
         None => false,
     };
-    let result = match evaluate(
+    evaluate(
         &base,
         &head,
         approved,
         today.map_or_else(Date::today, Ok)?,
         artifacts,
-    ) {
-        Err(e) if crate::mark(&e) == Some(crate::Fault::Red) => Verdict::unreadable(&e),
-        result => result?,
-    };
+    )
+}
+
+fn write_verdict(result: Verdict, out: &mut impl Write) -> io::Result<State> {
     out.write_all(&result.lines)?;
     let (waiting, red): (Vec<_>, Vec<_>) = result
         .gates
