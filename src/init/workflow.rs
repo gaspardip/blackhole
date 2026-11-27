@@ -122,3 +122,63 @@ jobs:
           printf '\n::%s::\n' "${marker}"
           exit "${code}"
 "#;
+
+pub(super) const REVIEW_PATH: &str = ".github/workflows/blackhole-review.yml";
+pub(super) const RERUN_PATH: &str = ".github/workflows/blackhole-rerun.yml";
+
+pub(super) const REVIEW: &str = r#"name: blackhole review
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
+"#;
+
+pub(super) const RERUN: &str = r#"name: blackhole rerun
+
+on:
+  workflow_run:
+    workflows: ["blackhole review"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          LC_ALL: C
+        run: |
+          if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid review head SHA." >&2
+            exit 1
+          fi
+          actions="repos/${GITHUB_REPOSITORY}/actions"
+          id=$(gh api "${actions}/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA}" \
+            --jq '.workflow_runs | max_by([.created_at, .id]) | .id // empty')
+          if [[ -z "${id}" ]]; then
+            echo "No blackhole judge run found for this head."
+            exit 0
+          fi
+          run="${actions}/runs/${id}"
+          while true; do
+            status=$(gh api "${run}" --jq .status)
+            [[ "${status}" == completed ]] && break
+            sleep 5
+          done
+          gh api --method POST "${run}/rerun"
+"#;

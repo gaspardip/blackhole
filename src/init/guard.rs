@@ -52,7 +52,7 @@ enum Classic {
 }
 
 /// Reads GitHub for the conditions under which an agent cannot get a change past the judge.
-pub(super) fn verdict(root: &Path, workflow: &[u8]) -> Result<(), Stop> {
+pub(super) fn verdict(root: &Path, workflows: &[(&str, &[u8])]) -> Result<(), Stop> {
     let repo = github::origin(root)
         .map_err(|e| not(format!("cannot read the origin remote ({e})")))?
         .ok_or_else(|| {
@@ -76,14 +76,20 @@ pub(super) fn verdict(root: &Path, workflow: &[u8]) -> Result<(), Stop> {
         .as_str()
         .ok_or_else(|| unexpected(&endpoint, &response))?;
     let encoded = github::encode(branch);
-    on_branch(&repo, branch, &encoded, workflow)?;
+    for &workflow in workflows {
+        on_branch(&repo, branch, &encoded, workflow)?;
+    }
     let rulesets = required(&repo, branch, &encoded)?;
     credential(&repo, &login, &info, &user, rulesets)
 }
 
-fn on_branch(repo: &Repo, branch: &str, encoded: &str, workflow: &[u8]) -> Result<(), Stop> {
+fn on_branch(
+    repo: &Repo,
+    branch: &str,
+    encoded: &str,
+    (path, workflow): (&str, &[u8]),
+) -> Result<(), Stop> {
     let slug = &repo.slug;
-    let path = super::workflow::PATH;
     let endpoint = format!("repos/{slug}/contents/{path}?ref={encoded}");
     let file = get(
         repo,

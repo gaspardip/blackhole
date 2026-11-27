@@ -13,6 +13,8 @@ use tempfile::tempdir;
 
 const HOOK_FILES: [&str; 2] = [".claude/settings.json", ".codex/hooks.json"];
 const WORKFLOW: &str = ".github/workflows/blackhole.yml";
+const REVIEW_WORKFLOW: &str = ".github/workflows/blackhole-review.yml";
+const RERUN_WORKFLOW: &str = ".github/workflows/blackhole-rerun.yml";
 
 const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
 while IFS= read -r name; do
@@ -868,6 +870,148 @@ fn writes_the_judge_workflow_pinned_to_this_version() {
     }
 }
 
+#[test]
+fn writes_and_keeps_the_review_workflows() {
+    let dir = repo();
+    let root = dir.path();
+    let report = init(root, true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        assert!(report.lines().any(|line| line == format!("Wrote {path}")));
+    }
+    let relay = fs::read_to_string(root.join(REVIEW_WORKFLOW)).unwrap();
+    assert_eq!(
+        relay,
+        r#"name: blackhole review
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
+"#
+    );
+    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
+    assert!(rerun.starts_with(
+        "name: blackhole rerun\n\non:\n  workflow_run:\n    workflows: [\"blackhole review\"]\n    types: [completed]\n\npermissions: {}\n"
+    ));
+    assert_eq!(rerun.matches("permissions:").count(), 2);
+    assert!(rerun.contains("\n    permissions:\n      actions: write\n    steps:\n"));
+    assert!(rerun.contains("HEAD_SHA: ${{ github.event.workflow_run.head_sha }}"));
+    assert_eq!(rerun.matches("github.event.").count(), 1);
+    assert!(!rerun.contains("uses:"));
+    let report = init(root, true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        assert!(report.lines().any(|line| line == format!("Kept {path}")));
+    }
+    assert_eq!(
+        fs::read_to_string(root.join(REVIEW_WORKFLOW)).unwrap(),
+        relay
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap(),
+        rerun
+    );
+}
+
+#[test]
+fn the_rerun_waits_for_the_newest_matching_run() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
+    let (_, script) = rerun.split_once("        run: |\n").unwrap();
+    let gh = root.join("gh");
+    fs::write(
+        &gh,
+        r#"#!/bin/bash
+set -eu
+echo "$*" >> calls
+case "$*" in
+  "api repos/owner/repo/actions/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA} --jq "*)
+    printf '%s\n' "$RUNS" | jq -r "${4}"
+    ;;
+  "api repos/owner/repo/actions/runs/42 --jq .status")
+    if [ -e polled ]; then echo completed; else touch polled; echo in_progress; fi
+    ;;
+  "api --method POST repos/owner/repo/actions/runs/42/rerun")
+    test -e polled
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let sleep = root.join("sleep");
+    fs::write(&sleep, "#!/bin/sh\necho sleep >> calls\n").unwrap();
+    fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut paths = vec![root.to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let runs = json!({"workflow_runs":[
+        {"id":41,"created_at":"2026-11-01T12:00:00Z"},
+        {"id":42,"created_at":"2026-11-02T12:00:00Z"},
+    ]});
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let run = |sha: &str, runs: &Value| {
+        common::command("bash")
+            .current_dir(root)
+            .args(["-eo", "pipefail", "-c", script])
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("GITHUB_REPOSITORY", "owner/repo")
+            .env("HEAD_SHA", sha)
+            .env("RUNS", runs.to_string())
+            .output()
+            .unwrap()
+    };
+    let invalid = run(&head.to_uppercase(), &runs);
+    assert!(!invalid.status.success());
+    assert!(!root.join("calls").exists());
+    let missing = run(head, &json!({"workflow_runs":[]}));
+    assert!(missing.status.success(), "{missing:?}");
+    assert_eq!(String::from_utf8_lossy(&missing.stdout).lines().count(), 1);
+    let out = run(head, &runs);
+    assert!(out.status.success(), "{out:?}");
+    let calls = fs::read_to_string(root.join("calls")).unwrap();
+    let calls: Vec<_> = calls.lines().collect();
+    for call in &calls[..2] {
+        assert!(call.contains(&format!("?event=pull_request_target&head_sha={head} ")));
+    }
+    assert_eq!(
+        calls[2..],
+        [
+            "api repos/owner/repo/actions/runs/42 --jq .status",
+            "sleep",
+            "api repos/owner/repo/actions/runs/42 --jq .status",
+            "api --method POST repos/owner/repo/actions/runs/42/rerun",
+        ]
+    );
+}
+
+#[test]
+fn a_different_review_workflow_stops_init_before_writing() {
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        let dir = repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(root.join(path), "name: different\n").unwrap();
+        let before = snapshot(root);
+        let message = init(root, false);
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains("first at line 1;"), "{message}");
+        assert_eq!(snapshot(root), before);
+    }
+}
+
 const PR_COMMITS: &str = "repos/owner/repo/pulls/42/commits?per_page=100";
 const PR_REVIEWS: &str = "repos/owner/repo/pulls/42/reviews?per_page=100";
 const RETIRED_PERMISSION: &str = "repos/owner/repo/collaborators/Retired/permission";
@@ -1130,6 +1274,17 @@ fn guarded_github(workflow: &[u8]) -> gh::FakeGh {
         br#"{"default_branch":"main","permissions":{"admin":false,"push":true}}"#,
     );
     fake.respond("GET", CONTENTS, 200, &[], workflow);
+    let dir = repo();
+    init(dir.path(), true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        fake.respond(
+            "GET",
+            &format!("repos/owner/repo/contents/{path}?ref=main"),
+            200,
+            &[],
+            &fs::read(dir.path().join(path)).unwrap(),
+        );
+    }
     let checks = json!([{"context":"blackhole","integration_id":15368}]);
     fake.respond("GET", RULES, 200, &[], &rules(&checks));
     fake.respond(
@@ -1179,6 +1334,32 @@ fn guarded_verdict(fake: &gh::FakeGh, path: Option<std::ffi::OsString>) -> (Stri
 }
 
 #[test]
+fn the_guard_requires_both_review_workflows_on_the_default_branch() {
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        let fake = guarded_github(&generated_workflow());
+        let endpoint = format!("repos/owner/repo/contents/{path}?ref=main");
+        fake.respond("GET", &endpoint, 404, &[], b"");
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!("not guarded: {path} is not on main (commit it and merge it into main)"),
+                1,
+            )
+        );
+        fake.respond("GET", &endpoint, 200, &[], b"name: different");
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: {path} on main differs from the one init writes (merge the generated file into main)"
+                ),
+                1,
+            )
+        );
+    }
+}
+
+#[test]
 fn guarded_repository_reads_as_guarded_and_suggests_the_canary() {
     let fake = guarded_github(&generated_workflow());
     let dir = repo();
@@ -1206,7 +1387,7 @@ fn guarded_repository_reads_as_guarded_and_suggests_the_canary() {
     );
     // Rulesets answered every condition, so the admin-only classic protection was never asked for.
     assert!(!fake.calls().iter().any(|call| call.ends_with(CLASSIC)));
-    assert_eq!(fake.calls().len(), 5);
+    assert_eq!(fake.calls().len(), 7);
 }
 
 enum Canned {
@@ -1554,7 +1735,7 @@ fn committing_and_reverting_the_adoption_restores_every_byte() {
     .unwrap();
     assert_eq!(
         written,
-        "M .claude/settings.json\n M .codex/hooks.json\n?? .blackhole/ledger\n?? .github/workflows/blackhole.yml\n?? blackhole.toml"
+        "M .claude/settings.json\n M .codex/hooks.json\n?? .blackhole/ledger\n?? .github/workflows/blackhole-rerun.yml\n?? .github/workflows/blackhole-review.yml\n?? .github/workflows/blackhole.yml\n?? blackhole.toml"
     );
     common::git(root, &["add", "-A"]).unwrap();
     common::git(root, &["commit", "-qm", "adopt blackhole"]).unwrap();
@@ -1583,6 +1764,8 @@ fn a_path_git_ignores_stops_init_before_any_write() {
         (".claude/", ".claude/settings.json"),
         ("*.json", ".claude/settings.json"),
         (".github", WORKFLOW),
+        (REVIEW_WORKFLOW, REVIEW_WORKFLOW),
+        (RERUN_WORKFLOW, RERUN_WORKFLOW),
         ("/.blackhole/*", ".blackhole/ledger"),
     ] {
         let dir = repo();

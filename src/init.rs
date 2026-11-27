@@ -12,11 +12,13 @@ const INVALID_HOOKS: &str = "unexpected hooks configuration";
 const CLAUDE: &str = ".claude/settings.json";
 const CODEX: &str = ".codex/hooks.json";
 // Every file init can write, so a revert of the adoption commit restores each one.
-const ADOPTED: [&str; 5] = [
+const ADOPTED: [&str; 7] = [
     "blackhole.toml",
     CLAUDE,
     CODEX,
     workflow::PATH,
+    workflow::REVIEW_PATH,
+    workflow::RERUN_PATH,
     crate::files::LEDGER_PATH,
 ];
 const PREVIOUS_ROOT: &str = "git --no-lazy-fetch rev-parse --show-toplevel";
@@ -29,7 +31,7 @@ $names
 BLACKHOLE_GIT_ENV
 exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
 
-/// Installs project hooks, the judge workflow and the initial ledger, then reports whether GitHub guards the repository.
+/// Installs project hooks, the judge workflows and the initial ledger, then reports whether GitHub guards the repository.
 ///
 /// Returns 0 when guarded, 1 when a repository setting is missing and 75 when GitHub cannot be read.
 ///
@@ -38,9 +40,19 @@ exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
 pub fn run(output: &mut impl Write) -> io::Result<u8> {
     let root = crate::files::root()?;
     let _lock = crate::files::lock(&root)?;
-    let claude = settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?;
-    let codex = settings(&root, CODEX, "^apply_patch$")?;
-    let judge = judge_workflow(&root)?;
+    let judge = workflow::content();
+    let workflows = [
+        (workflow::PATH, judge.as_bytes()),
+        (workflow::REVIEW_PATH, workflow::REVIEW.as_bytes()),
+        (workflow::RERUN_PATH, workflow::RERUN.as_bytes()),
+    ];
+    let settings = [
+        settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?,
+        settings(&root, CODEX, "^apply_patch$")?,
+        judge_workflow(&root, workflows[0])?,
+        judge_workflow(&root, workflows[1])?,
+        judge_workflow(&root, workflows[2])?,
+    ];
     let config = root.join("blackhole.toml");
     let existing = crate::files::policy(&config)?;
     // A malformed ledger or objections file would turn every hook red, so it stops init before anything is written.
@@ -51,16 +63,15 @@ pub fn run(output: &mut impl Write) -> io::Result<u8> {
     )?;
     unignored(&root)?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
-    let created = claude.install_then(&root, || {
-        codex.install_then(&root, || judge.install_then(&root, || first_ledger(&root)))
-    })?;
+    let created = install_settings(&root, &settings)?;
     let mut report = Vec::new();
-    for (path, wrote) in [
-        ("blackhole.toml", existing.is_none()),
-        (CLAUDE, claude.merged.is_some()),
-        (CODEX, codex.merged.is_some()),
-        (workflow::PATH, judge.merged.is_some()),
-    ] {
+    let written = settings
+        .iter()
+        .map(|file| (file.path, file.merged.is_some()));
+    for (path, wrote) in [("blackhole.toml", existing.is_none())]
+        .into_iter()
+        .chain(written)
+    {
         writeln!(report, "{} {path}", if wrote { "Wrote" } else { "Kept" })?;
     }
     writeln!(
@@ -85,7 +96,7 @@ pub fn run(output: &mut impl Write) -> io::Result<u8> {
         "The judge holds only when the agent has weaker credentials than a person.\nKeep admin, bypass, workflow permissions and the approving account out of the agent's reach."
     )?;
     output.write_all(&report)?;
-    match guard::verdict(&root, workflow::content().as_bytes()) {
+    match guard::verdict(&root, &workflows) {
         Ok(()) => {
             writeln!(
                 output,
@@ -149,13 +160,22 @@ fn settings<'a>(root: &Path, path: &'a str, matcher: &str) -> io::Result<Setting
     read().map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
 }
 
-fn judge_workflow(root: &Path) -> io::Result<Settings<'static>> {
-    let (dir, name) = parts(workflow::PATH);
-    let wanted = workflow::content().into_bytes();
+fn install_settings(root: &Path, files: &[Settings<'_>]) -> io::Result<Option<usize>> {
+    match files.split_first() {
+        Some((file, rest)) => file.install_then(root, || install_settings(root, rest)),
+        None => first_ledger(root),
+    }
+}
+
+fn judge_workflow(
+    root: &Path,
+    (path, wanted): (&'static str, &[u8]),
+) -> io::Result<Settings<'static>> {
+    let (dir, name) = parts(path);
     let previous = crate::policy(crate::enter(root, dir, false)?, name)?;
     let merged = match &previous {
-        None => Some(wanted),
-        Some(existing) if *existing == wanted => None,
+        None => Some(wanted.to_vec()),
+        Some(existing) if existing == wanted => None,
         Some(existing) => {
             let line = 1 + existing
                 .split_inclusive(|&b| b == b'\n')
@@ -163,14 +183,13 @@ fn judge_workflow(root: &Path) -> io::Result<Settings<'static>> {
                 .take_while(|(a, b)| a == b)
                 .count();
             return Err(io::Error::other(format!(
-                "{} differs from the workflow blackhole {} writes, first at line {line}; remove it and rerun init",
-                workflow::PATH,
+                "{path} differs from the workflow blackhole {} writes, first at line {line}; remove it and rerun init",
                 env!("CARGO_PKG_VERSION")
             )));
         }
     };
     Ok(Settings {
-        path: workflow::PATH,
+        path,
         previous,
         merged,
     })
