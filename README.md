@@ -8,12 +8,76 @@ that can be switched off, and a judge the agent cannot edit.
 
 Status: pre-release. Nothing is published yet.
 
+## Adopting blackhole
+
+Run `blackhole init` from anywhere in the checkout. It writes `blackhole.toml`,
+the first ledger, the agent hooks described below and the judge workflow
+`.github/workflows/blackhole.yml`. It refuses to start when git ignores any of
+those paths, and it refuses to replace a workflow at that path that differs
+from the one it writes. Commit the files, open a pull request and merge it.
+Everything init writes is visible to git, so reverting that commit restores the
+repository byte for byte.
+
+The workflow runs on `pull_request_target`, so every pull request is judged by
+the default branch's copy of it. It installs the exact `@gaspardip/blackhole`
+version that wrote it with `--ignore-scripts`, checks the registry signatures
+and the version, fetches the head into a bare repository without checking it
+out, and reads only `contents` and `pull-requests`. Its job posts the check
+`blackhole`. It collects reviews and reviewer permissions for `--approvals`.
+GitHub does not run `pull_request_target` on a review, so after an approval
+re-run the `blackhole` job from the pull request's Checks tab.
+
+The last line init prints is `guarded` or `not guarded: <reason and fix>`. It
+reads GitHub through `gh` with GET calls only and checks, in this order:
+
+1. `origin` names a GitHub repository (`git config remote.origin.url`).
+2. gh is signed in (`GET user`) and can read the repository (`GET repos/{owner}/{repo}`).
+3. The default branch holds the same workflow (`GET repos/{owner}/{repo}/contents/.github/workflows/blackhole.yml?ref={branch}`).
+4. The default branch requires pull requests and the `blackhole` check from
+   GitHub Actions (`GET repos/{owner}/{repo}/rules/branches/{branch}`, and
+   `GET repos/{owner}/{repo}/branches/{branch}/protection` when the rulesets do
+   not already require both).
+5. gh's account is not an admin (`permissions.admin` from step 2), cannot
+   bypass any ruleset on the branch (`current_user_can_bypass` from
+   `GET repos/{owner}/{repo}/rulesets/{id}`), and its token lists its scopes
+   without `workflow` (`X-OAuth-Scopes` from step 2).
+
+Run init signed in as the account your agent uses. It exits 0 when guarded, 1
+when a setting needs fixing and 75 when GitHub cannot be read.
+
+`blackhole canary` then proves the judge on the real repository. It pushes one
+branch with a commit per forgery (a raised ledger allowance, an edit to
+`blackhole.toml`, an edit to the objections file, a deleted test file, a
+finding, and an edit to the judge workflow), opens a draft pull request, and
+waits up to `--timeout` seconds (default 1200) for the GitHub Actions
+`blackhole` check on its head. It prints one line per forgery, closes the pull
+request and deletes the branch even when interrupted, and exits 0 only when the
+check named every forgery. A push GitHub refuses because gh's credential cannot
+change workflows counts as stopped. It exits 1 when a forgery got through and
+75 when no check finished in time.
+
+Adoption does not catch these cases:
+
+- Another workflow that runs pull request code with `checks: write` can post a
+  passing `blackhole` check under GitHub Actions. Set the repository's default
+  workflow permissions to read only; a non-admin cannot read that setting, so
+  init does not check it.
+- Classic branch protection is visible only to admins, so a branch protected
+  only that way never reads as guarded. Use a ruleset.
+- init reads only `origin` and the first 100 rules on the default branch.
+- Requiring branches to be up to date is left to you. Without it, two pull
+  requests that are green alone can merge into a red default branch.
+- The workflow trusts the npm registry's signature for the pinned version; it
+  embeds no hash of the package.
+- The canary does not forge coverage, and its finding sits at the root, so a
+  root `exclude` lets it through. It runs your pre-push hooks. Interrupted
+  during its first push, it can leave the branch behind.
+
 ## Agent hooks
 
-Run `blackhole init` from anywhere in the checkout. It creates a root
-`blackhole.toml` if needed, records existing allowable findings in the first
-ledger, and installs project hooks for Claude Code and Codex. Rerunning it
-keeps the existing ledger. Trust the project hooks in your agent to activate
+`blackhole init` creates a root `blackhole.toml` if needed, records existing
+allowable findings in the first ledger, and installs project hooks for Claude
+Code and Codex. Rerunning it keeps the existing ledger. Trust the project hooks in your agent to activate
 them.
 
 Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
@@ -23,7 +87,7 @@ checkout's executable `node_modules/.bin/blackhole` when available and the root
 git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
 With neither, the hook blocks.
 
-Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
+Shell edits bypass edit hooks. The judge workflow judges every pull request.
 Pre-edit compares the ledger path case-insensitively, but it does not catch
 aliases of a ledger that does not exist yet on filesystems that ignore some
 Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
@@ -197,8 +261,8 @@ when the judge runs without evidence.
 ## GitHub judge
 
 Release one publishes the `blackhole judge` check from the `blackhole-judge` App
-only for pull requests targeting `main` in `gaspardip/blackhole`. Adopters run
-`blackhole ci` in their own workflow.
+only for pull requests targeting `main` in `gaspardip/blackhole`. Adopters use
+the workflow `blackhole init` writes (see [Adopting blackhole](#adopting-blackhole)).
 
 On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from the
 tip of `main` when the event fired, in a job without secrets or token permissions. It fetches
