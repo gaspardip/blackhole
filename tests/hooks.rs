@@ -1175,7 +1175,7 @@ fn post_edit_validates_targets_before_listing() {
 
 // A git that the machine stops with a signal never answered, whatever the checkout holds.
 #[cfg(unix)]
-fn git_killed_on(dir: &Path, subcommand: &str, once: bool) {
+fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
     use std::os::unix::fs::PermissionsExt;
     let real = String::from_utf8(
         common::command("sh")
@@ -1188,11 +1188,11 @@ fn git_killed_on(dir: &Path, subcommand: &str, once: bool) {
     let state = dir.join("killed");
     let guard = if once {
         format!(
-            "[ -e '{0}' ] || {{ : > '{0}'; kill -9 $$; }}",
+            "[ -e '{0}' ] || {{ : > '{0}'; kill -{signal} $$; }}",
             state.display()
         )
     } else {
-        "kill -9 $$".to_owned()
+        format!("kill -{signal} $$")
     };
     let shim = dir.join("git");
     fs::write(
@@ -1213,14 +1213,17 @@ fn check_keeps_no_verdict_for_a_stopped_machine() {
     let root = dir.path();
     fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
     let shims = tempdir().unwrap();
-    git_killed_on(shims.path(), "ls-files", false);
-    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
-        .current_dir(root)
-        .env("PATH", shims.path())
-        .arg("check")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    // Only a signal from outside is an outage; any other could come from what git read.
+    for (signal, code) in [("KILL", 75), ("TERM", 75), ("USR1", 1)] {
+        git_killed_on(shims.path(), "ls-files", signal, false);
+        let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .env("PATH", shims.path())
+            .arg("check")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code), "{signal}: {out:?}");
+    }
     // A parser thread the system cannot start is not a finding in the file.
     let out = common::command("sh")
         .current_dir(root)
@@ -1242,7 +1245,7 @@ fn a_retry_judges_from_the_starting_directory() {
     let expected = check(root, &["a.py"], 1);
     let shims = tempdir().unwrap();
     // The first listing runs after the policy is read from inside `.blackhole`.
-    git_killed_on(shims.path(), "ls-files", true);
+    git_killed_on(shims.path(), "ls-files", "KILL", true);
     let mut cmd = common::command(env!("CARGO_BIN_EXE_blackhole"));
     cmd.args(["hook", "post-edit"])
         .current_dir(root)

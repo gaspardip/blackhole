@@ -48,7 +48,7 @@ has one next move.
 | 0 | green | None. |
 | 1 | red | The author fixes what the output names. |
 | 3 | waiting | A person with write access who wrote none of the change approves the head. Only `ci` waits, on its `protected` and `tests` gates. |
-| 75 | no verdict | The tool could not judge for a reason outside the checkout: git is missing, cannot start or was stopped by a signal, its own output failed, the system ran out of memory, disk, threads or time, or a fetched commit could not be read. Run it again or repair the environment. |
+| 75 | no verdict | The tool could not judge for a reason outside the checkout: git is missing, cannot start or was stopped from outside (hangup, interrupt, kill or terminate), its own output failed, the system ran out of memory, disk, threads or time, or a fetched commit could not be read. Run it again or repair the environment. |
 | 2 | usage | Fix the flags, arguments, paths or other input you typed, or run it inside a git checkout. |
 
 Anything the checkout's own content can cause is red, and the message names the
