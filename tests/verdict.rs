@@ -107,7 +107,7 @@ fn gate_table() {
             head_ledger: Ok(&head),
             base_rows: &Rows::new(),
             head_rows: Ok(&Rows::new()),
-            findings: &findings,
+            findings: Ok(&findings),
             test_removals: &[],
         })
         .unwrap();
@@ -150,7 +150,7 @@ fn a_move_git_reports_as_two_changes_is_protected() {
             head_ledger: Ok(&Counts::new()),
             base_rows: &Rows::new(),
             head_rows: Ok(&Rows::new()),
-            findings: &[],
+            findings: Ok(&[]),
             test_removals: &[],
         })
         .unwrap();
@@ -206,7 +206,7 @@ fn objection_transitions() {
             head_ledger: Ok(&empty),
             base_rows: &rows(old),
             head_rows: Ok(&rows(new)),
-            findings: &findings,
+            findings: Ok(&findings),
             test_removals: &[],
         })
         .unwrap();

@@ -79,7 +79,7 @@ pub struct Inputs<'a> {
     pub head_ledger: Result<&'a Counts, &'a io::Error>,
     pub base_rows: &'a Rows,
     pub head_rows: Result<&'a Rows, &'a io::Error>,
-    pub findings: &'a [Finding],
+    pub findings: Result<&'a [Finding], &'a io::Error>,
     pub test_removals: &'a [Finding],
 }
 #[derive(Default)]
@@ -100,6 +100,15 @@ impl Verdict {
             gates: BTreeSet::from(["unreadable"]),
             lines: format!("{error}\n").into_bytes(),
         }
+    }
+}
+
+// A policy entry in the wrong shape is red where it was read, apart from the gate its contents would fail.
+pub(crate) fn unreadable_or(error: &io::Error, gate: &'static str) -> &'static str {
+    if crate::mark(error) == Some(crate::Fault::Red) {
+        "unreadable"
+    } else {
+        gate
     }
 }
 
@@ -147,6 +156,10 @@ fn protected(i: &Inputs<'_>, moved: &Counts, guard: &GlobSet, v: &mut Verdict) -
 fn eligible(i: &Inputs<'_>, v: &mut Verdict) -> io::Result<Rows> {
     let mut rows = Rows::new();
     match i.head_rows {
+        Err(e) if crate::mark(e) == Some(crate::Fault::Red) => {
+            v.gates.insert("unreadable");
+            writeln!(v.lines, "{e}")?;
+        }
         Err(e) => {
             v.gates.insert("objections");
             write!(v.lines, "objection: ")?;
@@ -216,20 +229,28 @@ pub(crate) fn judge_with_guard(
     }
     let rows = eligible(i, &mut v)?;
     if let Err(e) = i.head_ledger {
-        v.gates.insert("ledger");
+        v.gates.insert(unreadable_or(e, "ledger"));
         writeln!(v.lines, "{e}")?;
     }
-    let actual = ledger::counts(i.findings);
-    let stale = ledger::excess(head, &actual);
-    if !stale.is_empty() {
-        v.gates.insert("ledger");
-        crate::report_stale(&stale, &actual, &mut v.lines)?;
+    match i.findings {
+        Err(e) => {
+            v.gates.insert("unreadable");
+            writeln!(v.lines, "{e}")?;
+        }
+        Ok(findings) => {
+            let actual = ledger::counts(findings);
+            let stale = ledger::excess(head, &actual);
+            if !stale.is_empty() {
+                v.gates.insert("ledger");
+                crate::report_stale(&stale, &actual, &mut v.lines)?;
+            }
+            let over = ledger::excess(&actual, &objections::allowances(&allowed, &rows, i.today));
+            if !over.is_empty() {
+                v.gates.insert("findings");
+            }
+            crate::report(findings, &over, &mut v.lines)?;
+        }
     }
-    let over = ledger::excess(&actual, &objections::allowances(&allowed, &rows, i.today));
-    if !over.is_empty() {
-        v.gates.insert("findings");
-    }
-    crate::report(i.findings, &over, &mut v.lines)?;
     v.lines.append(&mut removal_lines);
     Ok(v)
 }

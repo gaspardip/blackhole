@@ -545,7 +545,9 @@ pub fn object(rule: String, path: String, reason: Option<&str>, renew: bool) -> 
 }
 
 /// Escapes characters that could disrupt a line of CLI output.
-fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
+/// Escapes the characters that would break a diagnostic line.
+#[must_use]
+pub fn diagnostic_text(text: &str) -> std::borrow::Cow<'_, str> {
     let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
     // A literal escape must remain distinguishable from the control character it spells.
     if !text.chars().any(control)

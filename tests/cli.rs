@@ -1326,3 +1326,153 @@ fn ci_last_line_names_the_verdict_state() {
         2,
     );
 }
+
+fn rev(root: &Path) -> String {
+    String::from_utf8(git_output(root, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim_end()
+        .to_owned()
+}
+
+fn ci_line(root: &Path, base: &str, code: i32) -> String {
+    let out = run(root, &["ci", "--base", base, "--head", "HEAD"], code);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    stdout.lines().last().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn ci_judges_the_policy_directory_entry() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let base = rev(root);
+    // Local check refuses a `.blackhole` that is not a directory, so the judge must too.
+    fs::write(root.join(".blackhole"), "anything\n").unwrap();
+    commit(root);
+    assert_eq!(ci_line(root, &base, 1), "blackhole ci: red (unreadable)");
+    let broken = rev(root);
+    fs::remove_file(root.join(".blackhole")).unwrap();
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    fs::write(root.join(".blackhole/ledger"), "blackhole-ledger 1\n").unwrap();
+    commit(root);
+    assert!(ci_line(root, &broken, 75).starts_with("blackhole ci: no verdict: "));
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_classifies_policy_entries_at_their_source() {
+    use std::os::unix::fs::symlink;
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let base = rev(root);
+    fs::create_dir(root.join(".blackhole")).unwrap();
+    symlink("../a.py", root.join(".blackhole/ledger")).unwrap();
+    commit(root);
+    assert_eq!(
+        ci_line(root, &base, 1),
+        "blackhole ci: red (unreadable); waiting (protected)"
+    );
+    fs::remove_file(root.join(".blackhole/ledger")).unwrap();
+    fs::create_dir(root.join(".blackhole/objections")).unwrap();
+    fs::write(root.join(".blackhole/objections/x"), "").unwrap();
+    commit(root);
+    assert_eq!(
+        ci_line(root, &base, 1),
+        "blackhole ci: red (unreadable); waiting (protected)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_validates_head_policy_before_approval() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    let base = rev(root);
+    fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
+    commit(root);
+    let out = run(root, &["ci", "--base", &base, "--head", "HEAD"], 1);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("blackhole.toml: unclosed array")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("\nblackhole ci: red (configuration); waiting (protected)\n"),
+        "{stdout}"
+    );
+    // A file the judge cannot read leaves the approval it can still name.
+    fs::remove_file(root.join("blackhole.toml")).unwrap();
+    fs::create_dir(root.join(".github")).unwrap();
+    fs::write(root.join(".github/x.yml"), "on: push\n").unwrap();
+    std::os::unix::fs::symlink("loop.py", root.join("loop.py")).unwrap();
+    commit(root);
+    assert_eq!(
+        ci_line(root, &base, 1),
+        "blackhole ci: red (unreadable); waiting (protected)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_coverage_reads_head_sources_strictly_and_base_sources_historically() {
+    use std::os::unix::fs::symlink;
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    fs::create_dir(root.join("real")).unwrap();
+    fs::write(root.join("real/x.txt"), "").unwrap();
+    symlink("nowhere", root.join("a.py")).unwrap();
+    commit(root);
+    let base = rev(root);
+    // A head that repairs an old dangling link is judged on its new file.
+    fs::remove_file(root.join("a.py")).unwrap();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    commit(root);
+    assert_eq!(ci_line(root, &base, 1), "blackhole ci: red (coverage)");
+    symlink("real", root.join("b.py")).unwrap();
+    commit(root);
+    assert_eq!(ci_line(root, &base, 1), "blackhole ci: red (unreadable)");
+}
+
+#[test]
+fn ci_inputs_keep_usage_and_outages_apart() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("blackhole.toml"), "exclude = [\"a\\n[\"]\n").unwrap();
+    commit(root);
+    fs::write(root.join("a.py"), "pass").unwrap();
+    commit(root);
+    // A cause that spans lines must not break the verdict line.
+    let out = run(root, &["ci", "--base", "HEAD~", "--head", "HEAD"], 75);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("blackhole ci: no verdict: ") && stdout.lines().count() == 1,
+        "{stdout:?}"
+    );
+    let missing = root.join("missing/approvals.json");
+    let out = run(
+        root,
+        &[
+            "ci",
+            "--base",
+            "HEAD",
+            "--head",
+            "HEAD",
+            "--approvals",
+            missing.to_str().unwrap(),
+        ],
+        2,
+    );
+    assert_eq!(out.stdout, b"");
+}

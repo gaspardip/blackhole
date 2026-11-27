@@ -83,11 +83,11 @@ fn hunks(old: &str, new: &str) -> io::Result<Vec<Range<usize>>> {
 }
 
 fn source_blob<'a>(
-    tree: &'a Tree,
+    id: Option<&'a str>,
     path: &str,
     batch: &mut Batch,
 ) -> io::Result<Option<(&'a str, Vec<u8>)>> {
-    let Some(id) = tree.blob(path, batch)? else {
+    let Some(id) = id else {
         return Ok(None);
     };
     let bytes = batch.read(id)?;
@@ -107,10 +107,11 @@ pub(crate) fn changed<'a>(
         if matches!(change.kind, Kind::Deleted) || excludes.is_match(path) {
             continue;
         }
-        let Some((new, bytes)) = source_blob(head, path, batch)? else {
+        let Some((new, bytes)) = source_blob(head.blob(path, batch)?, path, batch)? else {
             if source(path, &[]) {
-                return Err(io::Error::other(format!(
-                    "coverage: {path:?} has no source blob"
+                return Err(crate::red(format!(
+                    "coverage: {} has no source blob; make it a regular file",
+                    crate::diagnostic_text(path)
                 )));
             }
             continue;
@@ -126,7 +127,7 @@ pub(crate) fn changed<'a>(
         let old = if excludes.is_match(old_path) {
             None
         } else {
-            source_blob(base, old_path, batch)?.map(|(id, _)| id)
+            source_blob(base.historical_blob(old_path, batch)?, old_path, batch)?.map(|(id, _)| id)
         };
         let hunks = match old {
             Some(id) if id == new => continue,

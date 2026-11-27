@@ -124,7 +124,8 @@ fn main() -> ExitCode {
             1
         }
         Fault::NoVerdict if ci => {
-            let _ = writeln!(out, "blackhole ci: no verdict: {error}");
+            let cause = blackhole_check::diagnostic_text(&error.to_string()).into_owned();
+            let _ = writeln!(out, "blackhole ci: no verdict: {cause}");
             NO_VERDICT
         }
         Fault::NoVerdict => {

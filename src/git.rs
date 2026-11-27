@@ -80,6 +80,7 @@ pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
 enum Entry {
     File(String),
     Link(String),
+    Directory,
     Other,
 }
 enum Blob<'a> {
@@ -112,13 +113,25 @@ impl Tree {
             let entry = match (kind, mode) {
                 ("blob", "100644" | "100755") => Entry::File(id.into()),
                 ("blob", "120000") => Entry::Link(id.into()),
+                ("tree", _) => Entry::Directory,
                 _ => Entry::Other,
             };
             entries.insert(path.into(), entry);
         }
         Ok(Self(entries))
     }
-    pub(crate) fn judge_file(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
+    // Local check refuses a `.blackhole` that is not a directory, so a commit cannot hide its policy files behind one.
+    pub(crate) fn policy(&self, path: &str, batch: &mut Batch) -> io::Result<Option<Vec<u8>>> {
+        if path.starts_with(".blackhole/")
+            && self
+                .0
+                .get(".blackhole")
+                .is_some_and(|entry| !matches!(entry, Entry::Directory))
+        {
+            return Err(crate::red(
+                ".blackhole must be a directory; make it a directory or remove it",
+            ));
+        }
         match self.0.get(path) {
             None => Ok(None),
             Some(Entry::File(id)) => batch.read(id).map(Some),
@@ -151,7 +164,7 @@ impl Tree {
                     })?;
                     paths.links.insert(path, target.into());
                 }
-                Entry::Other => (),
+                Entry::Directory | Entry::Other => (),
             }
         }
         Ok(paths)
@@ -221,8 +234,8 @@ impl Tree {
                     pending.extend(target.rsplit('/').map(str::to_owned));
                 }
                 (Some(Entry::File(id)), true) => return Ok(Blob::File(id)),
-                (Some(Entry::Other), true) => return Ok(Blob::Absent),
-                (Some(Entry::Other), false) => {}
+                (Some(Entry::Directory | Entry::Other), true) => return Ok(Blob::Absent),
+                (Some(Entry::Directory | Entry::Other), false) => {}
                 _ => return Ok(Blob::UnresolvedLink),
             }
         }

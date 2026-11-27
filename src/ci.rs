@@ -3,8 +3,8 @@ use crate::{
     engine::{self, DiffCtx, DiffFindings, Run},
     files::{LEDGER_PATH, OBJECTIONS_PATH},
     git::{self, Batch, Tree},
-    ledger::{self, Counts},
-    objections::{self, Date, Rows},
+    ledger,
+    objections::{self, Date},
     verdict::{self, Approvals, Inputs, Verdict},
 };
 use std::{
@@ -13,21 +13,16 @@ use std::{
     path::Path,
 };
 
-fn ledger(tree: &Tree, batch: &mut Batch) -> io::Result<Counts> {
-    ledger::load(tree.judge_file(LEDGER_PATH, batch)?.as_deref())
+fn configuration(bytes: Option<Vec<u8>>) -> io::Result<config::Config> {
+    config::parse(&bytes.unwrap_or_default())
 }
-fn configuration(tree: &Tree, batch: &mut Batch) -> io::Result<config::Config> {
-    config::parse(
-        &tree
-            .judge_file("blackhole.toml", batch)?
-            .unwrap_or_default(),
-    )
-}
-fn rows(tree: &Tree, batch: &mut Batch, day: Date) -> io::Result<Rows> {
-    objections::parse(
-        &tree.judge_file(OBJECTIONS_PATH, batch)?.unwrap_or_default(),
-        day,
-    )
+
+// A red failure leaves the gates that do not depend on it; any other failure ends the judgment.
+fn red_or<T>(result: io::Result<T>) -> io::Result<io::Result<T>> {
+    match result {
+        Err(e) if crate::mark(&e) != Some(crate::Fault::Red) => Err(e),
+        result => Ok(result),
+    }
 }
 
 fn diff_rules(ctx: &mut DiffCtx<'_>) -> io::Result<DiffFindings> {
@@ -55,19 +50,28 @@ fn evaluate(
     let base_tree = Tree::load(base).map_err(crate::no_verdict)?;
     let head_tree = Tree::load(head)?;
     let mut batch = Batch::start()?;
-    let base_config = configuration(&base_tree, &mut batch).map_err(crate::no_verdict)?;
-    let head_config;
-    let scan_config = if approved {
-        head_config = configuration(&head_tree, &mut batch).map_err(crate::red)?;
-        &head_config
-    } else {
-        &base_config
+    let mut base_policy = |path| base_tree.policy(path, &mut batch);
+    let base_config = base_policy("blackhole.toml")
+        .and_then(configuration)
+        .map_err(crate::no_verdict)?;
+    let base_ledger = base_policy(LEDGER_PATH)
+        .and_then(|bytes| ledger::load(bytes.as_deref()))
+        .map_err(crate::no_verdict)?;
+    let base_rows = base_policy(OBJECTIONS_PATH)
+        .and_then(|bytes| objections::parse(&bytes.unwrap_or_default(), today))
+        .map_err(crate::no_verdict)?;
+    // The head's policy is judged whether or not it is approved, and applied only once it is.
+    let head_config =
+        red_or(head_tree.policy("blackhole.toml", &mut batch))?.and_then(configuration);
+    let head_ledger = red_or(head_tree.policy(LEDGER_PATH, &mut batch))?
+        .and_then(|bytes| ledger::load(bytes.as_deref()));
+    let head_rows = red_or(head_tree.policy(OBJECTIONS_PATH, &mut batch))?
+        .and_then(|bytes| objections::parse(&bytes.unwrap_or_default(), today));
+    let scan_config = match &head_config {
+        Ok(config) if approved => config,
+        _ => &base_config,
     };
     let excludes = &scan_config.exclude;
-    let base_ledger = ledger(&base_tree, &mut batch).map_err(crate::no_verdict)?;
-    let base_rows = rows(&base_tree, &mut batch, today).map_err(crate::no_verdict)?;
-    let head_ledger = ledger(&head_tree, &mut batch);
-    let head_rows = rows(&head_tree, &mut batch, today);
     let changes = git::changes(base, head)?;
     let mut ctx = DiffCtx {
         base: &base_tree,
@@ -79,15 +83,20 @@ fn evaluate(
         approved,
         batch: &mut batch,
     };
-    let diff = diff_rules(&mut ctx)?;
-    let findings = crate::scan_files(
-        scan_config,
-        diff.diagnostics,
-        head_tree.paths(),
-        &mut *ctx.batch,
-        |batch| head_tree.repository_paths(batch),
-        |batch, path| head_tree.read(path, batch),
-    )?;
+    let (removals, findings) = match red_or(diff_rules(&mut ctx))? {
+        Ok(diff) => {
+            let findings = crate::scan_files(
+                scan_config,
+                diff.diagnostics,
+                head_tree.paths(),
+                &mut *ctx.batch,
+                |batch| head_tree.repository_paths(batch),
+                |batch, path| head_tree.read(path, batch),
+            );
+            (diff.removals, red_or(findings)?)
+        }
+        Err(e) => (Vec::new(), Err(e)),
+    };
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,
@@ -98,25 +107,39 @@ fn evaluate(
             head_ledger: head_ledger.as_ref(),
             base_rows: &base_rows,
             head_rows: head_rows.as_ref(),
-            findings: &findings,
-            test_removals: &diff.removals,
+            findings: findings.as_deref(),
+            test_removals: &removals,
         },
         &base_config.guard,
         ctx.renames,
     )?;
+    if let Err(e) = &head_config {
+        verdict
+            .gates
+            .insert(verdict::unreadable_or(e, "configuration"));
+        writeln!(verdict.lines, "{e}")?;
+    }
     if let Some(lcov) = &base_config.lcov {
-        let delta = crate::coverage::changed(
+        let delta = red_or(crate::coverage::changed(
             &changes,
             &base_config.exclude,
             &base_tree,
             &head_tree,
             &mut batch,
-        )?;
-        if !delta.is_empty()
-            && let Err(e) = crate::coverage::check(&delta, artifacts, head, lcov)
-        {
-            verdict.gates.insert("coverage");
-            writeln!(verdict.lines, "coverage: {e}")?;
+        ))?;
+        match delta {
+            Ok(delta) => {
+                if !delta.is_empty()
+                    && let Err(e) = crate::coverage::check(&delta, artifacts, head, lcov)
+                {
+                    verdict.gates.insert("coverage");
+                    writeln!(verdict.lines, "coverage: {e}")?;
+                }
+            }
+            Err(e) => {
+                verdict.gates.insert("unreadable");
+                writeln!(verdict.lines, "{e}")?;
+            }
         }
     }
     batch.finish()?;
@@ -181,9 +204,19 @@ fn judge(
     let base = git::commit(base)?;
     let head = git::commit(head)?;
     let approved = match approvals {
-        Some(path) => serde_json::from_slice::<Approvals>(&fs::read(path)?)
-            .map_err(|e| crate::usage(format!("{}: {e}", path.display())))?
-            .approved(&head),
+        Some(path) => {
+            let bytes = fs::read(path).map_err(|e| {
+                // The caller named the file, so only the machine running out of something is an outage.
+                if crate::fault(&e) == crate::Fault::NoVerdict {
+                    e
+                } else {
+                    crate::usage(format!("{}: {e}", path.display()))
+                }
+            })?;
+            serde_json::from_slice::<Approvals>(&bytes)
+                .map_err(|e| crate::usage(format!("{}: {e}", path.display())))?
+                .approved(&head)
+        }
         None => false,
     };
     let result = match evaluate(
