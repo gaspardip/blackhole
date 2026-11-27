@@ -15,6 +15,8 @@ const CHECKS: &str = "repos/owner/repo/commits/SHA/check-runs?check_name=blackho
 const OPEN_PRS: &str = "repos/owner/repo/pulls?head=owner:blackhole-canary-N&state=open";
 const REF: &str = "repos/owner/repo/git/refs/heads/blackhole-canary-N";
 const REF_LOOKUP: &str = "repos/owner/repo/git/ref/heads/blackhole-canary-N";
+const JOB: &str = "repos/owner/repo/actions/jobs/99";
+const RUN: &str = "repos/owner/repo/actions/runs/42";
 const LOGS: &str = "repos/owner/repo/actions/jobs/99/logs";
 const LINES: [&str; 6] = [
     "ledger: raise a ledger allowance",
@@ -114,7 +116,25 @@ fn finished(adopter: &Adopter, conclusion: &str, log: &str) {
     adopter
         .fake
         .respond("GET", CHECKS, 200, &[], run.as_bytes());
+    adopter
+        .fake
+        .respond("GET", JOB, 200, &[], br#"{"run_id":42}"#);
+    workflow_run(adopter, ".github/workflows/blackhole.yml", "main");
+    let log = format!(
+        "2026-11-26T10:00:00.0000000Z ::stop-commands::***\n{log}2026-11-26T10:00:01.0000000Z ::***::\n"
+    );
     adopter.fake.respond("GET", LOGS, 200, &[], log.as_bytes());
+}
+
+fn workflow_run(adopter: &Adopter, path: &str, base: &str) {
+    let run = serde_json::json!({
+        "path": path,
+        "event": "pull_request_target",
+        "pull_requests": [{"number": 12, "base": {"ref": base}}]
+    });
+    adopter
+        .fake
+        .respond("GET", RUN, 200, &[], run.to_string().as_bytes());
 }
 
 fn canary(adopter: &Adopter, args: &[&str]) -> (String, i32) {
@@ -263,7 +283,7 @@ fn a_forgery_the_check_does_not_name_got_through() {
     assert_eq!(code, 1);
 
     let passing = adopted();
-    finished(&passing, "success", RED);
+    finished(&passing, "success", "");
     let (out, code) = canary(&passing, &[]);
     assert_eq!(code, 1);
     assert_eq!(out.matches(": not stopped\n").count(), 6, "{out}");
@@ -427,7 +447,11 @@ fn a_push_and_cleanup_failure_emits_one_escaped_line() {
 fn assert_no_verdict(conclusion: &str, log: &str) {
     let adopter = adopted();
     finished(&adopter, conclusion, log);
-    let (out, code) = canary(&adopter, &[]);
+    assert_unavailable(&adopter);
+}
+
+fn assert_unavailable(adopter: &Adopter) {
+    let (out, code) = canary(adopter, &["--timeout", "0"]);
     assert_eq!(code, 75, "{out}");
     for line in LINES {
         assert!(
@@ -445,9 +469,40 @@ fn a_cancelled_check_has_no_verdict() {
 
 #[test]
 fn a_job_that_fails_before_the_judge_has_no_verdict() {
+    let adopter = adopted();
+    finished(&adopter, "failure", "");
+    adopter.fake.respond("GET", LOGS, 200, &[], RED.as_bytes());
+    assert_unavailable(&adopter);
+}
+
+#[test]
+fn a_check_from_another_workflow_has_no_verdict() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    workflow_run(&adopter, ".github/workflows/other.yml", "main");
+    assert_unavailable(&adopter);
+    assert!(
+        adopter
+            .fake
+            .calls()
+            .iter()
+            .all(|call| !call.ends_with(LOGS))
+    );
+}
+
+#[test]
+fn a_check_for_another_base_has_no_verdict() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    workflow_run(&adopter, ".github/workflows/blackhole.yml", "other");
+    assert_unavailable(&adopter);
+}
+
+#[test]
+fn an_earlier_red_line_cannot_override_the_last_ci_line() {
     assert_no_verdict(
         "failure",
-        "2026-11-26T10:00:00.0000000Z setup-node failed\n",
+        &format!("{RED}2026-11-26T10:00:00.0000001Z blackhole ci: green\n"),
     );
 }
 

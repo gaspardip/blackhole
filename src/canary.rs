@@ -61,7 +61,10 @@ impl Forgery {
         gates.contains(&self.gate)
             && match (&self.change, self.gate) {
                 (Change::Write(path, _), "protected") => {
-                    log.contains(&format!("protected: {path}: "))
+                    let prefix = format!("protected: {path}: ");
+                    log.lines()
+                        .map(log_text)
+                        .any(|line| line.starts_with(&prefix))
                 }
                 _ => true,
             }
@@ -316,17 +319,18 @@ impl Run<'_> {
         let endpoint =
             format!("repos/{slug}/commits/{head}/check-runs?check_name={CHECK}&per_page=100");
         let deadline = Instant::now() + self.timeout;
-        let run = loop {
+        let (run, id) = 'poll: loop {
             let runs = json(&call(self.repo, "GET", &endpoint, &[], 200)?)?;
-            if let Some(run) = runs["check_runs"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|run| {
-                    run["app"]["id"].as_u64() == Some(ACTIONS_APP) && run["status"] == "completed"
-                })
-            {
-                break run.clone();
+            for run in runs["check_runs"].as_array().into_iter().flatten() {
+                if run["app"]["id"].as_u64() != Some(ACTIONS_APP) || run["status"] != "completed" {
+                    continue;
+                }
+                let id = run["id"]
+                    .as_u64()
+                    .ok_or_else(|| io::Error::other("GitHub returned a check run without an id"))?;
+                if self.is_judge(id, number)? {
+                    break 'poll (run.clone(), id);
+                }
             }
             let now = Instant::now();
             if now >= deadline {
@@ -344,9 +348,6 @@ impl Run<'_> {
                 crate::diagnostic_text(conclusion)
             )));
         }
-        let id = run["id"]
-            .as_u64()
-            .ok_or_else(|| io::Error::other("GitHub returned a check run without an id"))?;
         let log = call(
             self.repo,
             "GET",
@@ -359,24 +360,66 @@ impl Run<'_> {
             log: String::from_utf8_lossy(&log.body).into_owned(),
         })
     }
+    fn is_judge(&self, job_id: u64, number: u64) -> io::Result<bool> {
+        let slug = &self.repo.slug;
+        let job = json(&call(
+            self.repo,
+            "GET",
+            &format!("repos/{slug}/actions/jobs/{job_id}"),
+            &[],
+            200,
+        )?)?;
+        let Some(run_id) = job["run_id"].as_u64() else {
+            return Ok(false);
+        };
+        let run = json(&call(
+            self.repo,
+            "GET",
+            &format!("repos/{slug}/actions/runs/{run_id}"),
+            &[],
+            200,
+        )?)?;
+        Ok(run["event"] == "pull_request_target"
+            && run["path"] == WORKFLOW_PATH
+            && run["pull_requests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|pr| pr["number"].as_u64() == Some(number) && pr["base"]["ref"] == self.base))
+    }
 }
 
-// The last summary line wins: diagnostics before it can quote any text a forged path holds.
-fn gates(log: &str) -> Vec<&str> {
-    log.lines()
-        .filter_map(|line| {
-            let text = line
-                .split_once(' ')
-                .filter(|(stamp, _)| {
-                    stamp.as_bytes().get(10) == Some(&b'T') && stamp.ends_with('Z')
-                })
-                .map_or(line, |(_, rest)| rest);
-            text.strip_prefix(ci::RED)?.strip_suffix(')')
-        })
-        .next_back()
-        .filter(|gates| !gates.is_empty())
-        .map(|gates| gates.split(", ").collect())
-        .unwrap_or_default()
+fn log_text(line: &str) -> &str {
+    line.split_once(' ')
+        .filter(|(stamp, _)| stamp.as_bytes().get(10) == Some(&b'T') && stamp.ends_with('Z'))
+        .map_or(line, |(_, rest)| rest)
+}
+
+// The judge brackets its output with these markers, which the runner may mask.
+fn judge_output(log: &str) -> Option<&str> {
+    let (start, marker) = log.split_inclusive('\n').find_map(|line| {
+        let marker = log_text(line.trim_end()).strip_prefix("::stop-commands::")?;
+        Some((line, marker))
+    })?;
+    let (_, output) = log.split_once(start)?;
+    let closing = format!("::{marker}::");
+    let end = output.lines().find(|line| log_text(line) == closing)?;
+    output.split_once(end).map(|(output, _)| output)
+}
+
+fn verdict<'a>(log: &'a str, conclusion: &str) -> Option<Vec<&'a str>> {
+    let summary = log
+        .lines()
+        .map(log_text)
+        .rfind(|line| line.starts_with("blackhole ci:"));
+    match (conclusion, summary) {
+        ("success", None | Some("blackhole ci: green")) => Some(Vec::new()),
+        ("failure", Some(summary)) => {
+            let gates = summary.strip_prefix(ci::RED)?.strip_suffix(')')?;
+            (!gates.is_empty()).then(|| gates.split(", ").collect())
+        }
+        _ => None,
+    }
 }
 
 fn cleanup_process(repo: &Repo, branch: &str) -> io::Result<Child> {
@@ -491,22 +534,25 @@ fn report(
     refused: bool,
     outcome: &Outcome,
 ) -> io::Result<u8> {
-    let (failed, log) = match outcome {
-        Outcome::Judged { conclusion, log } => (conclusion == "failure", log.as_str()),
+    let (named, log) = match outcome {
+        Outcome::Judged { conclusion, log } => {
+            let log = judge_output(log);
+            let named = log.and_then(|log| verdict(log, conclusion));
+            if named.is_none() {
+                writeln!(
+                    out,
+                    "canary: the blackhole check did not emit a judge verdict"
+                )?;
+            }
+            (named, log.unwrap_or_default())
+        }
         Outcome::Unavailable(message) => {
             writeln!(out, "{message}")?;
-            (false, "")
+            (None, "")
         }
     };
-    let named = gates(log);
-    let missing_summary = failed && named.is_empty();
-    if missing_summary {
-        writeln!(
-            out,
-            "canary: the failed blackhole check did not emit a judge verdict"
-        )?;
-    }
-    let no_verdict = missing_summary || matches!(outcome, Outcome::Unavailable(_));
+    let no_verdict = named.is_none();
+    let named = named.unwrap_or_default();
     let mut code = if no_verdict { 75 } else { 0 };
     let all = forgeries.iter().map(|f| (f, false));
     for (forgery, is_workflow) in all.chain([(workflow, true)]) {
@@ -514,7 +560,7 @@ fn report(
             "no verdict"
         } else if refused && is_workflow {
             "stopped by GitHub, which refused the push because gh's credential cannot change workflows"
-        } else if failed && forgery.stopped(&named, log) {
+        } else if forgery.stopped(&named, log) {
             "stopped"
         } else {
             code = 1;
