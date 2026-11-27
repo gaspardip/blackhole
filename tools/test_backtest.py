@@ -161,6 +161,16 @@ class Backtest(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(git_files(), before)
 
+    def test_protected_gate_does_not_count_as_a_rule_finding(self) -> None:
+        path = ".github/note:1:2 ts/no-skipped-tests marker"
+        (self.repo / path).parent.mkdir(parents=True)
+        self.merge(path, "Protected change\n")
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual(rows[0]["last_line"], "blackhole ci: red (protected)")
+        self.assertEqual(summary["rules"], {})
+        self.assertEqual(rows[0]["findings"], [])
+        self.assertEqual(rows[0]["gates"], ["protected"])
+
     def test_squash_backtest_skips_conflicts_and_keeps_judging(self) -> None:
         clean = self.commit("clean.ts", "export const value = 1;\n")
         conflict = self.commit("blackhole.toml", 'exclude = ["legacy.test.ts"]\n')

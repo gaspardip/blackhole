@@ -12,6 +12,11 @@ from pathlib import Path
 POLICY = ("blackhole.toml", ".blackhole/ledger")
 STATES = {0: "green", 1: "red", 3: "waiting", 75: "no_verdict"}
 FINDING = re.compile(r"^(.+?):([0-9]+):[0-9]+ ([a-z0-9-]+/[a-z0-9-]+)(?: |$)")
+RED_GATES = re.compile(r"blackhole ci: red \(([a-z]+(?:, [a-z]+)*)\)")
+GATE_MESSAGE = re.compile(
+    r"^(?:protected: |objection: |coverage: |ledger line [0-9]+: )"
+    r"|: ledger allows [0-9]+, found [0-9]+; run blackhole ledger$",
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class Verdict:
     last_line: str | None = None
     findings: list[Finding] = field(default_factory=list)
     reason: str | None = None
+    gates: list[str] = field(default_factory=list)
 
 
 def environment(home: Path) -> dict[str, str]:
@@ -122,13 +128,19 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
     result = run(tree, env, binary, "ci", "--base", base, "--head", head, check=False)
     lines = result.stdout.splitlines()
     state = STATES.get(result.returncode, "error")
+    last_line = lines[-1] if lines else None
+    gates = []
+    if state == "red" and last_line and (match := RED_GATES.fullmatch(last_line)):
+        gates = match[1].split(", ")
     findings = []
     if state in {"green", "red", "waiting"}:
         for line in lines:
+            if GATE_MESSAGE.search(line):
+                continue
             if match := FINDING.match(line):
                 path, number, rule = match.groups()
                 findings.append(Finding(path, int(number), rule))
-    return Verdict(state, result.returncode, lines[-1] if lines else None, findings)
+    return Verdict(state, result.returncode, last_line, findings, gates=gates)
 
 
 def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None:
