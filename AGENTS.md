@@ -45,7 +45,7 @@ Run `BLACKHOLE_BLESS=1 ~/.agents/bin/heavy run -- cargo test --test fixtures` to
 Explain any changed line in `tests/corpus/*.snapshot` in the pull request.
 
 The ledger at `.blackhole/ledger` records existing findings by rule and path.
-Only `blackhole ledger` writes it. Allowances can only shrink.
+`blackhole init` creates the first ledger. `blackhole ledger` can only shrink existing allowances.
 
 Only the root `blackhole.toml` sets repository-relative `exclude` globs.
 File an overage with `blackhole object <rule> <path> <reason>`. Objections last through day 30 and accept one renewal with `--renew`.

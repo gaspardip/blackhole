@@ -8,6 +8,36 @@ that can be switched off, and a judge the agent cannot edit.
 
 Status: pre-release. Nothing is published yet.
 
+## Agent hooks
+
+Run `blackhole init` from anywhere in the checkout. It creates a root
+`blackhole.toml` if needed, records existing allowable findings in the first
+ledger, and installs project hooks for Claude Code and Codex. Rerunning it
+keeps the existing ledger. Trust the project hooks in your agent to activate
+them.
+
+Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
+`blackhole hook post-edit` reports findings in the edited files. At the end of
+a turn, `blackhole hook stop` checks the whole repository. The launchers use the
+checkout's executable `node_modules/.bin/blackhole` when available and the root
+git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
+With neither, the hook blocks.
+
+Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
+Pre-edit compares the ledger path case-insensitively, but it does not catch
+aliases of a ledger that does not exist yet on filesystems that ignore some
+Unicode characters when comparing names, such as HFS Plus. Post-edit, stop and
+`ci` still judge the ledger.
+
+The hooks also do not catch these cases:
+
+- The npm install's `blackhole` needs `node` on the hook's PATH. Without it the
+  shim exits 127, which Codex treats as non-blocking.
+- A checkout directory whose name ends in a newline can make the launcher
+  resolve the wrong root.
+- A Codex hook that rewrites a patch after blackhole has checked it can change
+  which files the edit touches.
+
 ## Working on this repo
 
 ```sh
@@ -134,6 +164,22 @@ Root `exclude` patterns apply. In CI, the base limit applies until an
 independently approved head supplies a new limit. See the
 [file-size contract](docs/contracts/boundary/file-size.md) for counting and
 selection details.
+
+`boundary/banned-imports` reports configured module names and their slash
+subpaths in TypeScript and JavaScript as advisory findings that do not change
+the verdict. Use the same `[boundaries]` table for both boundary settings.
+
+```toml
+[boundaries]
+banned-imports = ["lodash", "node:fs"]
+```
+
+Builtins match with or without `node:`. The rule also checks supported
+`package.json` imports aliases and reports loader uses whose specifier it cannot
+read. An empty list leaves the rule inactive. In CI, the base list applies
+until an independently approved head supplies a new list. See the
+[banned-imports contract](docs/contracts/boundary/banned-imports.md) for the
+supported forms.
 
 `blackhole ci` requires the existing independent head approval for changes to
 conventional TypeScript, lint, formatter, test, coverage and Git hook configs,

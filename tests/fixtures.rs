@@ -79,6 +79,7 @@ impl Case {
         let hits = run_configured(
             rules,
             config.engine_settings(),
+            config.banned_imports(),
             self.files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
         );
         verify_locations(

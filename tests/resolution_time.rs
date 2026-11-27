@@ -1,8 +1,8 @@
 #[path = "common/work.rs"]
 mod work;
-use work::{assert_growth, assert_work};
+use work::{assert_growth, assert_work, run_with_work};
 
-use blackhole_check::engine::{registry, run, run_with_work};
+use blackhole_check::engine::{registry, run};
 use std::fmt::Write;
 
 fn source(shape: &str, n: usize) -> String {
@@ -748,5 +748,160 @@ fn reducer_resolution_scales_with_repeated_reads() {
             work
         });
         assert_growth(small, large, 6, shape);
+    }
+}
+
+#[test]
+fn resolves_large_loader_inputs() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(check_loader_inputs)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn check_loader_inputs() {
+    let config =
+        blackhole_check::config::parse(b"[boundaries]\nbanned-imports=['restricted']").unwrap();
+    let rule = registry()
+        .iter()
+        .find(|rule| rule.id == "boundary/banned-imports")
+        .unwrap();
+    let scan = |path, source: &str| {
+        blackhole_check::engine::run_with_work(
+            std::slice::from_ref(rule),
+            config.engine_settings(),
+            config.banned_imports(),
+            [(path, source.as_bytes())],
+        )
+    };
+    let (hits, work) = scan("large.ts", "import 'restricted';");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(work, 9, "one static import");
+    let names: Vec<_> = (0..20_000).map(|i| format!("v{i}")).collect();
+    let cases = [
+        ("unknown member chain", format!("x{};", ".a".repeat(512))),
+        (
+            "object bindings",
+            format!("const {{{}}}=x; {};", names.join(","), names.join(";")),
+        ),
+        (
+            "call chain 2500",
+            format!("require{}();", ".call".repeat(2_500)),
+        ),
+        (
+            "call chain 5000",
+            format!("require{}();", ".call".repeat(5_000)),
+        ),
+        (
+            "call chain 10000",
+            format!("require{}();", ".call".repeat(10_000)),
+        ),
+        (
+            "apply chain 10000",
+            format!("require{}();", ".apply".repeat(10_000)),
+        ),
+        (
+            "bind chain 10000",
+            format!("require{}();", ".bind(null)".repeat(10_000)),
+        ),
+        (
+            "nested calls 3000",
+            format!("{}0{};", "f(require,".repeat(3_000), ")".repeat(3_000)),
+        ),
+        (
+            "repeated loader",
+            format!("const r=require; {}", "r('x');".repeat(20_000)),
+        ),
+    ];
+    let mut nested_work = Vec::new();
+    for (root, n) in [
+        ("require", 2500),
+        ("require", 5000),
+        ("require", 10000),
+        ("arguments", 30000),
+    ] {
+        let source = format!(
+            "{}0{};",
+            "consume(".repeat(n),
+            format!(",{root})").repeat(n)
+        );
+        let (hits, work) = scan("large.cjs", &source);
+        assert_eq!(hits.len(), n);
+        assert_work(work, source.len(), 10, root);
+        nested_work.push(work);
+    }
+    assert_growth(nested_work[0], nested_work[1], 3, "nested require");
+    assert_growth(nested_work[1], nested_work[2], 3, "nested require");
+    let mut chain_work = Vec::new();
+    for (label, mut source) in cases {
+        source.push_str("\nrequire('restricted');");
+        let (hits, work) = scan("large.ts", &source);
+        assert!(
+            hits.iter()
+                .any(|f| f.line == 2 && f.note.as_deref() == Some("restricted")),
+            "{label}"
+        );
+        assert_work(work, source.len(), 10, label);
+        if label.starts_with("call chain") {
+            chain_work.push(work);
+        }
+    }
+    assert_growth(chain_work[0], chain_work[1], 3, "call chain");
+    assert_growth(chain_work[1], chain_work[2], 3, "call chain");
+}
+
+#[test]
+fn repeated_package_manifest_lookups_respect_the_work_budget() {
+    let config =
+        blackhole_check::config::parse(b"[boundaries]\nbanned-imports=['restricted']").unwrap();
+    let rule = registry()
+        .iter()
+        .find(|rule| rule.id == "boundary/banned-imports")
+        .unwrap();
+    for kind in ["wildcards", "conditions"] {
+        let [small, large] = [128, 512].map(|n| {
+            let mut entries = serde_json::Map::new();
+            for i in 0..n {
+                let key = if kind == "wildcards" {
+                    format!("#path{i}/*")
+                } else {
+                    format!("condition{i}")
+                };
+                entries.insert(key, "allowed".into());
+            }
+            let imports = if kind == "wildcards" {
+                entries.insert("#entry/*".into(), "restricted/*".into());
+                serde_json::Value::Object(entries)
+            } else {
+                entries.insert("default".into(), "restricted/tool".into());
+                serde_json::json!({ "#entry/tool": entries })
+            };
+            let manifest = serde_json::json!({ "imports": imports }).to_string();
+            let source = "import '#entry/tool';\n".repeat(n);
+            let (hits, work) = blackhole_check::engine::run_with_work(
+                std::slice::from_ref(rule),
+                config.engine_settings(),
+                config.banned_imports(),
+                [
+                    ("app.mjs", source.as_bytes()),
+                    ("package.json", manifest.as_bytes()),
+                ],
+            );
+            assert_eq!(hits.len(), n, "{kind} at {n}");
+            assert_eq!(
+                hits.first().unwrap().note.as_deref(),
+                Some("restricted/tool")
+            );
+            assert_eq!(
+                hits.last().unwrap().note.as_deref(),
+                Some("package manifest resolution exceeded the work budget"),
+                "{kind} at {n}"
+            );
+            assert_work(work, source.len(), 10, kind);
+            work
+        });
+        assert_growth(small, large, 4, kind);
     }
 }

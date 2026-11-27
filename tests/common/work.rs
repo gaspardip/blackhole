@@ -1,3 +1,5 @@
+use blackhole_check::engine::{self, Finding, Rule, Settings};
+
 /// # Panics
 /// Panics if the work exceeds the per-byte cap.
 #[track_caller]
@@ -14,4 +16,8 @@ pub fn assert_growth(small: u64, large: u64, factor: u64, label: &str) {
         large <= small * factor,
         "work grew from {small} to {large} (limit {factor}x) {label}"
     );
+}
+
+pub(super) fn run_with_work(rules: &[Rule], path: &str, bytes: &[u8]) -> (Vec<Finding>, u64) {
+    engine::run_with_work(rules, Settings::default(), &[], [(path, bytes)])
 }

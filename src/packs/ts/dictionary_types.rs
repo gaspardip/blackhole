@@ -2361,7 +2361,7 @@ mod tests {
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
-        use crate::engine::{run, run_with_work};
+        use crate::engine::{Settings, run, run_with_work};
         use std::fmt::Write as _;
 
         const READS: usize = 4_000;
@@ -2379,7 +2379,12 @@ mod tests {
                 writeln!(source, "const v{i} = v{};", i - 1).unwrap();
             }
             source.push_str(&"guard(v4000);\n".repeat(READS));
-            let (hits, work) = run_with_work(&[guard::<0, 0>()], "guard.ts", source.as_bytes());
+            let (hits, work) = run_with_work(
+                &[guard::<0, 0>()],
+                Settings::default(),
+                &[],
+                [("guard.ts", source.as_bytes())],
+            );
             // Each call visits one parameter and compares its one-byte name.
             let cap = (source.len() / 3 + 2 * READS) as u64;
             assert!(work <= cap, "{work} work exceeds {cap}");

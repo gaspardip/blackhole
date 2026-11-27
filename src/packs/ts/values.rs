@@ -110,20 +110,20 @@ pub(super) fn has_with(ctx: &TsCtx<'_>) -> bool {
     })
 }
 
-pub(super) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
+pub(crate) fn symbol(ctx: &TsCtx<'_>, id: &IdentifierReference<'_>) -> Option<SymbolId> {
     ctx.semantic
         .scoping()
         .get_reference(id.reference_id.get()?)
         .symbol_id()
 }
 #[derive(PartialEq)]
-pub(super) enum Imported<'a> {
+pub(crate) enum Imported<'a> {
     Named(&'a str),
     Default,
     Namespace,
 }
 
-pub(super) fn import_of<'a>(
+pub(crate) fn import_of<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<(&'a str, Imported<'a>)> {
@@ -197,7 +197,7 @@ fn under_with_statement(ctx: &TsCtx<'_>, id: oxc::syntax::node::NodeId) -> bool 
         })[id.index()]
 }
 
-pub(super) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+pub(crate) fn symbol_is_mutated(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
     ctx.record_work(1);
     let scoping = ctx.semantic.scoping();
     !scoping.symbol_flags(symbol).is_const_variable()
@@ -214,19 +214,20 @@ fn mutation_index(ctx: &TsCtx<'_>) -> HashSet<SymbolId> {
         .collect()
 }
 
+pub(crate) fn is_written(ctx: &TsCtx<'_>, symbol: SymbolId) -> bool {
+    ctx.resolution
+        .written
+        .get_or_init(|| mutation_index(ctx))
+        .contains(&symbol)
+}
+
 pub(super) fn declaration<'a>(
     ctx: &TsCtx<'a>,
     id: &IdentifierReference<'_>,
 ) -> Option<AstKind<'a>> {
     let scope = ctx.semantic.scoping();
     let symbol = symbol(ctx, id)?;
-    if ctx
-        .resolution
-        .written
-        .get_or_init(|| mutation_index(ctx))
-        .contains(&symbol)
-        || unreadable(ctx, symbol)
-    {
+    if is_written(ctx, symbol) || unreadable(ctx, symbol) {
         return None;
     }
     let redeclarations = scope.symbol_redeclarations(symbol);
@@ -447,7 +448,7 @@ pub(super) fn any_assigned_path<'a>(
     })
 }
 
-pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+pub(crate) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     loop {
         if !ctx.take_work(1) {
             return expr;
@@ -469,7 +470,7 @@ pub(super) fn unwrapped<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'
     }
 }
 
-pub(super) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+pub(crate) fn inner<'a>(ctx: &TsCtx<'_>, mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
     while ctx.take_work(1) {
         expr = match expr {
             Expression::ParenthesizedExpression(n) => &n.expression,
@@ -689,7 +690,11 @@ pub(super) fn resolves_to_global<'a>(
 pub(super) use strings::{contains_shape, static_string_contains_shape};
 
 pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&'a str> {
-    match resolve(ctx, expr) {
+    string_value(resolve(ctx, expr))
+}
+
+pub(crate) fn string_value<'a>(expr: &Expression<'a>) -> Option<&'a str> {
+    match expr {
         Expression::StringLiteral(s) => s.value.as_str(),
         Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
             t.quasis.first()?.value.cooked?.as_str()
@@ -699,6 +704,13 @@ pub(super) fn literal<'a>(ctx: &TsCtx<'a>, expr: &'a Expression<'a>) -> Option<&
 }
 
 pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    property_key(key, |expr| resolve(ctx, expr))
+}
+
+pub(crate) fn property_key<'a>(
+    key: &'a PropertyKey<'a>,
+    resolve: impl FnOnce(&'a Expression<'a>) -> &'a Expression<'a>,
+) -> Option<&'a str> {
     if let PropertyKey::StaticIdentifier(id) = key {
         return Some(id.name.as_str());
     }
@@ -706,7 +718,7 @@ pub(super) fn key<'a>(ctx: &TsCtx<'a>, key: &'a PropertyKey<'a>) -> Option<&'a s
     if let Expression::NumericLiteral(n) = expr {
         return n.raw.as_ref().map(oxc::str::Str::as_str);
     }
-    literal(ctx, expr)
+    string_value(resolve(expr))
 }
 
 pub(super) struct MemberKeys<'ctx, 'a>(pub(super) &'ctx TsCtx<'a>);
@@ -922,19 +934,23 @@ pub(super) fn outer<'a>(ctx: &TsCtx<'a>, id: oxc::syntax::node::NodeId) -> Optio
 
 /// Wrappers that leave the wrapped expression's value and target unchanged.
 fn transparent(kind: &AstKind<'_>) -> bool {
-    matches!(
-        kind,
-        AstKind::ParenthesizedExpression(_)
-            | AstKind::ChainExpression(_)
-            | AstKind::TSAsExpression(_)
-            | AstKind::TSSatisfiesExpression(_)
-            | AstKind::TSInstantiationExpression(_)
-            | AstKind::TSNonNullExpression(_)
-            | AstKind::TSTypeAssertion(_)
-    )
+    transparent_child(*kind).is_some()
 }
 
-pub(super) fn global_object(name: &str) -> bool {
+pub(crate) fn transparent_child(kind: AstKind<'_>) -> Option<oxc::syntax::node::NodeId> {
+    Some(match kind {
+        AstKind::ParenthesizedExpression(n) => n.expression.node_id(),
+        AstKind::ChainExpression(n) => n.expression.node_id(),
+        AstKind::TSAsExpression(n) => n.expression.node_id(),
+        AstKind::TSSatisfiesExpression(n) => n.expression.node_id(),
+        AstKind::TSInstantiationExpression(n) => n.expression.node_id(),
+        AstKind::TSNonNullExpression(n) => n.expression.node_id(),
+        AstKind::TSTypeAssertion(n) => n.expression.node_id(),
+        _ => return None,
+    })
+}
+
+pub(crate) fn global_object(name: &str) -> bool {
     matches!(name, "window" | "self" | "global" | "globalThis")
 }
 

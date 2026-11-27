@@ -1,5 +1,10 @@
+use blackhole_check::{hooks, init};
 use clap::{Parser, Subcommand};
-use std::{io, path::PathBuf, process::ExitCode};
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 #[derive(Parser)]
 #[command(name = "blackhole", version)]
@@ -10,6 +15,10 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Action {
+    Init,
+    Hook {
+        event: hooks::Event,
+    },
     Ledger,
     Ci {
         #[arg(long)]
@@ -39,6 +48,8 @@ enum Action {
 fn main() -> ExitCode {
     let mut out = io::stdout().lock();
     let result = match Args::parse().command {
+        Action::Init => init::run(&mut out).map(|()| false),
+        Action::Hook { event } => return hooks::run(event),
         Action::Check { paths } => blackhole_check::check(&paths, &mut out),
         Action::Object {
             rule,
@@ -65,7 +76,7 @@ fn main() -> ExitCode {
     match result {
         Ok(found) => ExitCode::from(u8::from(found)),
         Err(e) => {
-            eprintln!("blackhole: {e}");
+            let _ = writeln!(io::stderr().lock(), "blackhole: {e}");
             ExitCode::from(2)
         }
     }

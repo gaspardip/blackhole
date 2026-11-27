@@ -1,0 +1,15 @@
+import {createRequire as make} from "node:module";
+const require = make(import.meta.url);
+require("lodash");
+const load = require;
+load("lodash");
+module.require("lodash");
+require.call(null, "lodash");
+require.apply(null, ["lodash"]);
+(0, require)("lodash");
+globalThis.require("lodash");
+window.require("lodash");
+global.require("lodash");
+consume(require);
+require.bind(null);
+consume(make(import.meta.url));

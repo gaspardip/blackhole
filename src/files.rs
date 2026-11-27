@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeSet, HashMap, HashSet},
     env, fs,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -8,13 +9,12 @@ fn git(dir: &Path, args: &[&str]) -> io::Result<Vec<u8>> {
     crate::git::output(crate::git::command().args(args).current_dir(dir))
 }
 
+// Cache one parent so a batch stays bounded even under a long directory path.
+pub(crate) type Seen = Option<(PathBuf, PathBuf)>;
+
 // Links in the directories are followed as the filesystem follows them. The last name stays as written so a link can be selected.
 // Directories that are gone stay as written too, so the ledger rows under them can still be selected.
-fn resolve(path: &Path) -> io::Result<PathBuf> {
-    existing(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
-}
-
-fn existing(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolve(path: &Path, seen: &mut Seen) -> io::Result<PathBuf> {
     let absent = |e: &io::Error| {
         matches!(
             e.kind(),
@@ -28,12 +28,21 @@ fn existing(path: &Path) -> io::Result<PathBuf> {
             break fs::canonicalize(at)?;
         };
         gone.push(name);
+        if let Some((dir, real)) = seen
+            && dir == parent
+        {
+            break real.clone();
+        }
         match fs::canonicalize(parent) {
             // A link that points nowhere is an entry, and a name that cannot be looked at is an error: neither is a directory that is gone.
             Err(e) if absent(&e) && fs::symlink_metadata(parent).is_err_and(|e| absent(&e)) => {
                 at = parent;
             }
-            dir => break dir?,
+            dir => {
+                let real = dir?;
+                *seen = Some((parent.to_owned(), real.clone()));
+                break real;
+            }
         }
     };
     found.extend(gone.into_iter().rev());
@@ -48,15 +57,34 @@ pub(crate) fn root() -> io::Result<PathBuf> {
         .map_err(io::Error::other)?;
     let top = fs::canonicalize(top)?;
     // `core.worktree` can send git anywhere, so its answer must be where the nearest `.git` sits.
+    if let Some(dir) = nearest_checkout(&cwd)?
+        && fs::canonicalize(dir)? == top
+    {
+        return Ok(top);
+    }
+    Err(io::Error::other("checkout root mismatch"))
+}
+
+pub(crate) fn in_checkout() -> bool {
+    env::current_dir().is_ok_and(|cwd| {
+        nearest_checkout(&cwd).is_ok_and(|dir| {
+            dir.is_some_and(|dir| {
+                let git = dir.join(".git");
+                git.is_file() || git.join("HEAD").is_file()
+            })
+        })
+    })
+}
+
+fn nearest_checkout(cwd: &Path) -> io::Result<Option<&Path>> {
     for dir in cwd.ancestors() {
         match dir.join(".git").symlink_metadata() {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
-            Ok(_) if fs::canonicalize(dir)? == top => return Ok(top),
-            Ok(_) => break,
+            Ok(_) => return Ok(Some(dir)),
         }
     }
-    Err(io::Error::other("checkout root mismatch"))
+    Ok(None)
 }
 
 // Held while the ledger is read and replaced, so two runs cannot interleave.
@@ -93,8 +121,26 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+// What two names of one file share, wherever a link or a second name leads to it.
 #[cfg(unix)]
-fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+pub(crate) fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map(|m| (m.dev(), m.ino()))
+}
+
+// shortcut: std gives no file identity elsewhere, so there a second hard link is a different file; compare volume and file index when Windows is supported
+#[cfg(not(unix))]
+pub(crate) fn identity(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path)
+        .ok()
+        .filter(|target| target.is_file())
+}
+
+#[cfg(unix)]
+pub(crate) fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     (a.dev(), a.ino()) == (b.dev(), b.ino())
 }
@@ -110,44 +156,194 @@ pub(crate) const OBJECTIONS_PATH: &str = ".blackhole/objections";
 
 // A policy file is read only as a regular file: a link would point it outside the repository.
 pub(crate) fn policy(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let named = match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        other => other?,
+    let Some(named) = regular(path)? else {
+        return Ok(None);
     };
-    if named.is_file() {
-        // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
-        let mut file = fs::File::open(path)?;
-        // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
-        if same(&named, &file.metadata()?) {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            return Ok(Some(bytes));
-        }
+    // shortcut: a link swapped in after the look is still opened, and read only when it leads to the same file, and opening a device can have an effect of its own; open without following links once a crate that names the flag is approved
+    let mut file = fs::File::open(path)?;
+    // The name can become a link between the look and the open, so the opened file must be the one that was looked at.
+    if same(&named, &file.metadata()?) {
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        return Ok(Some(bytes));
     }
-    Err(io::Error::other(format!(
-        "{} must be a regular file",
-        path.display()
-    )))
+    Err(not_regular(path))
 }
 
-pub(crate) fn list(root: &Path, paths: &[PathBuf]) -> io::Result<(Vec<String>, Vec<PathBuf>)> {
-    let cwd = env::current_dir()?;
-    let paths = paths
-        .iter()
-        .map(|p| resolve(&cwd.join(p)))
-        .collect::<io::Result<Vec<_>>>()?;
-    let mut selected = Vec::new();
-    let names = git(root, &["ls-files", "-co", "--exclude-standard", "-z"])?;
-    for bytes in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
-        let name = std::str::from_utf8(bytes).map_err(|_| {
-            io::Error::other(format!("path is not valid UTF-8: {}", bytes.escape_ascii()))
+fn not_regular(path: &Path) -> io::Error {
+    io::Error::other(format!("{} must be a regular file", path.display()))
+}
+
+pub(crate) fn regular(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(meta)),
+        Ok(_) => Err(not_regular(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Listing<'a> {
+    pub names: Vec<String>,
+    pub rows: Option<HashSet<&'a str>>,
+    pub unmatched: Option<PathBuf>,
+}
+
+pub(crate) fn list<'a>(
+    root: &Path,
+    cwd: &Path,
+    paths: &[PathBuf],
+    rows: impl Iterator<Item = &'a str>,
+) -> io::Result<Listing<'a>> {
+    if paths.is_empty() {
+        return Ok(Listing {
+            names: listed(root, [Path::new(".")])?,
+            ..Listing::default()
+        });
+    }
+    let mut queries = BTreeSet::new();
+    let mut wanted = HashMap::new();
+    let mut unmatched = None;
+    let mut seen = None;
+    for path in paths {
+        let named = cwd.join(path);
+        let real = resolve(&named, &mut seen).map_err(|e| {
+            let path = named.to_string_lossy();
+            io::Error::new(e.kind(), format!("{}: {e}", crate::diagnostic_text(&path)))
         })?;
-        let file = root.join(name);
-        if paths.is_empty() || paths.iter().any(|path| file.starts_with(path)) {
+        let literal = named.strip_prefix(root).ok().filter(|p| {
+            !p.components()
+                .any(|part| part == std::path::Component::ParentDir)
+        });
+        if literal.is_some() || real.starts_with(root) {
+            queries.extend(literal.map(|p| p.components().collect::<PathBuf>()));
+            queries.extend(real.strip_prefix(root).ok().map(Path::to_owned));
+            wanted.insert(real, false);
+        } else {
+            unmatched.get_or_insert(real);
+        }
+    }
+    let mut select = |name: &str| {
+        let named = root.join(name);
+        let real = resolve(&named, &mut seen).ok();
+        let mut hit = false;
+        for path in named
+            .ancestors()
+            .chain(real.iter().flat_map(|p| p.ancestors()))
+        {
+            if let Some(matched) = wanted.get_mut(path) {
+                *matched = true;
+                hit = true;
+            }
+        }
+        hit
+    };
+    let rows: HashSet<_> = rows.filter(|name| select(name)).collect();
+    queries.extend(rows.iter().map(PathBuf::from));
+    let names = listed(root, queries.iter().map(PathBuf::as_path))?;
+    for name in &names {
+        select(name);
+    }
+    let unmatched = unmatched.or_else(|| {
+        wanted
+            .into_iter()
+            .filter_map(|(path, hit)| (!hit).then_some(path))
+            .min()
+    });
+    Ok(Listing {
+        names,
+        rows: Some(rows),
+        unmatched,
+    })
+}
+
+fn listed<'a>(root: &Path, paths: impl IntoIterator<Item = &'a Path>) -> io::Result<Vec<String>> {
+    listed_matching(root, paths, |_| true)
+}
+
+pub(crate) fn listed_matching<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+    mut matches: impl FnMut(&Path) -> bool,
+) -> io::Result<Vec<String>> {
+    let paths: Vec<_> = paths
+        .into_iter()
+        .map(|path| {
+            if path == Path::new("") {
+                Path::new(".")
+            } else {
+                path
+            }
+        })
+        .collect();
+    // Use one argument budget for both short names and paths near the filesystem limit.
+    let longest = paths.iter().map(|p| p.as_os_str().len()).max().unwrap_or(0);
+    let batch = (64 * 1024 / (longest + 16)).max(1);
+    let mut selected = Vec::new();
+    for paths in paths.chunks(batch) {
+        let names = crate::git::output(
+            crate::git::command()
+                .current_dir(root)
+                .arg("--literal-pathspecs")
+                .args(["ls-files", "-co", "--exclude-standard", "-z", "--"])
+                .args(paths),
+        )?;
+        for name in names.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                if !matches(Path::new(std::ffi::OsStr::from_bytes(name))) {
+                    continue;
+                }
+            }
+            let name = std::str::from_utf8(name).map_err(|_| {
+                io::Error::other(format!("path is not valid UTF-8: {}", name.escape_ascii()))
+            })?;
+            #[cfg(not(unix))]
+            if !matches(Path::new(name)) {
+                continue;
+            }
             selected.push(name.to_owned());
         }
     }
     selected.sort_unstable();
     selected.dedup();
-    Ok((selected, paths))
+    Ok(selected)
+}
+
+pub(crate) fn repository_paths<'a>(
+    root: &Path,
+    names: impl Iterator<Item = &'a str>,
+) -> io::Result<crate::packs::boundary::RepositoryPaths> {
+    let mut paths = crate::packs::boundary::RepositoryPaths::default();
+    for name in names {
+        let real = root.join(name);
+        let virtual_path = Path::new("/").join(name);
+        match fs::symlink_metadata(&real) {
+            Ok(meta) if meta.is_symlink() => {
+                let target = fs::read_link(&real)?;
+                let target = match target.strip_prefix(root) {
+                    Ok(local) => {
+                        let up: PathBuf =
+                            Path::new(name).components().skip(1).map(|_| "..").collect();
+                        up.join(local)
+                    }
+                    Err(_) => target,
+                };
+                paths.links.insert(virtual_path, target);
+            }
+            Ok(meta) if meta.is_file() => {
+                paths.files.insert(virtual_path);
+            }
+            Ok(_) => (),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(io::Error::new(e.kind(), format!("{name:?}: {e}"))),
+        }
+    }
+    Ok(paths)
 }
