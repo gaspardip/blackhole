@@ -96,7 +96,7 @@ class ReleaseUploads(unittest.TestCase):
         self.assertEqual(commands[2][-5:], ["--draft=false", "--title", TAG, "--notes", "Candidate"])
 
     def test_github_resumes_a_draft_without_reuploading_matching_assets(self) -> None:
-        asset = {"name": self.crate.name, "digest": f"sha256:{SHA256}"}
+        asset = {"name": self.crate.name, "state": "uploaded", "digest": f"sha256:{SHA256}"}
         draft = {
             "tag_name": TAG, "draft": True, "prerelease": True, "assets": [asset],
             "name": "Edited title", "body": "Edited notes",
@@ -114,7 +114,7 @@ class ReleaseUploads(unittest.TestCase):
     def test_github_skips_a_complete_matching_release(self) -> None:
         sums_sha = "19a05c5d142cc56b07cac500240109127bd26f0618994eba0c91a8c0e8bc1935"
         assets = [
-            {"name": path.name, "digest": f"sha256:{digest}"}
+            {"name": path.name, "state": "uploaded", "digest": f"sha256:{digest}"}
             for path, digest in [(self.crate, SHA256), (self.npm, SHA256), (self.sums, sums_sha)]
         ]
         release = {
@@ -127,18 +127,42 @@ class ReleaseUploads(unittest.TestCase):
             publish_github(TAG, self.npm, self.crate, self.sums)
             gh.assert_not_called()
 
-    def test_github_refuses_to_change_a_release_with_mismatched_digests(self) -> None:
-        asset = {"name": self.crate.name, "digest": "sha256:wrong"}
-        release = {
-            "tag_name": TAG, "draft": False, "prerelease": True, "assets": [asset],
-            "name": TAG, "body": "Candidate",
-        }
+    def test_github_retries_an_interrupted_draft_upload(self) -> None:
+        starter = {"id": 123, "name": self.crate.name, "state": "starter"}
+        uploaded = {"name": self.npm.name, "state": "uploaded", "digest": f"sha256:{SHA256}"}
+        draft = {"tag_name": TAG, "draft": True, "prerelease": True, "assets": [uploaded, starter]}
         with patch.dict("os.environ", ENV), \
-             patch("release_uploads.urlopen", return_value=response([release])), \
+             patch("release_uploads.urlopen", return_value=response([draft])), \
              patch("release_uploads.subprocess.run") as gh:
-            with self.assertRaisesRegex(ValueError, "candidate.crate.*digest"):
-                publish_github(TAG, self.npm, self.crate, self.sums)
-            gh.assert_not_called()
+            publish_github(TAG, self.npm, self.crate, self.sums)
+        commands = [call.args[0] for call in gh.call_args_list]
+        self.assertEqual(commands, [
+            ["gh", "api", "--method", "DELETE", "repos/owner/project/releases/assets/123"],
+            ["gh", "release", "upload", TAG, "--repo", "owner/project", str(self.crate), str(self.sums)],
+            ["gh", "release", "edit", TAG, "--repo", "owner/project", "--draft=false",
+             "--title", TAG, "--notes", "Candidate"],
+        ])
+
+    def test_github_refuses_to_change_a_release_with_invalid_assets(self) -> None:
+        starter = {"id": 123, "name": self.npm.name, "state": "starter", "digest": None}
+        mismatch = {"name": self.crate.name, "state": "uploaded", "digest": "sha256:wrong"}
+        cases = (
+            (True, [starter, mismatch], "candidate.crate.*digest"),
+            (False, [mismatch], "candidate.crate.*digest"),
+            (True, [starter, starter | {"name": "other"}], "unexpected asset other"),
+            (False, [starter], "candidate.tgz.*starter state"),
+        )
+        for draft, assets, message in cases:
+            release = {
+                "tag_name": TAG, "draft": draft, "prerelease": True, "assets": assets,
+                "name": TAG, "body": "Candidate",
+            }
+            with self.subTest(draft=draft, assets=assets), patch.dict("os.environ", ENV), \
+                 patch("release_uploads.urlopen", return_value=response([release])), \
+                 patch("release_uploads.subprocess.run") as gh:
+                with self.assertRaisesRegex(ValueError, message):
+                    publish_github(TAG, self.npm, self.crate, self.sums)
+                gh.assert_not_called()
 
     def test_github_refuses_to_change_a_published_release_with_mismatched_metadata(self) -> None:
         release = {

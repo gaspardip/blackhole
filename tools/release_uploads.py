@@ -83,6 +83,7 @@ def publish_github(tag: str, npm: Path, crate: Path, sums: Path) -> None:
     release = github_release(repo, tag)
     draft = release is None or release["draft"]
     present = set()
+    interrupted = []
     if release is not None:
         if release["prerelease"] is not prerelease:
             raise ValueError("GitHub release has a different prerelease setting")
@@ -90,9 +91,20 @@ def publish_github(tag: str, npm: Path, crate: Path, sums: Path) -> None:
             raise ValueError("GitHub release has a different title or notes")
         for asset in release["assets"]:
             name = asset["name"]
-            if name not in expected or asset["digest"] != expected[name]:
+            if name not in expected:
+                raise ValueError(f"GitHub release has an unexpected asset {name}")
+            if asset["state"] == "starter":
+                if not draft:
+                    raise ValueError(f"Published GitHub release asset {name} is still in starter state")
+                interrupted.append(asset["id"])
+                continue
+            if asset["digest"] != expected[name]:
                 raise ValueError(f"GitHub release asset {name} has an unexpected digest")
             present.add(name)
+        for asset_id in interrupted:
+            subprocess.run([
+                "gh", "api", "--method", "DELETE", f"repos/{repo}/releases/assets/{asset_id}",
+            ], check=True)
     else:
         flags = ["--prerelease"] if prerelease else []
         subprocess.run([
