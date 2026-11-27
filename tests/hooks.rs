@@ -1055,3 +1055,24 @@ fn post_edit_validates_targets_before_listing() {
     fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
     hook(root, "post-edit", &outside, 1);
 }
+
+#[test]
+fn post_edit_judges_file_names_with_packages_like_check() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join("tests/pkg")).unwrap();
+    for name in ["tests/pkg/package.json", "tests/pkg/good.ts", "a.specs.ts"] {
+        fs::write(root.join(name), "{}").unwrap();
+    }
+    let red = check(root, &["a.specs.ts"], 1);
+    assert!(String::from_utf8_lossy(&red).contains("a.specs.ts:1:1 ts/test-file-names"));
+    assert_eq!(
+        hook(root, "post-edit", &edit("Write", "a.specs.ts"), 2),
+        red
+    );
+    assert_eq!(check(root, &["tests/pkg/good.ts"], 0), b"");
+    assert_eq!(
+        hook(root, "post-edit", &edit("Write", "tests/pkg/good.ts"), 0),
+        b""
+    );
+}
