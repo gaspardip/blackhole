@@ -48,12 +48,16 @@ has one next move.
 | 0 | green | None. |
 | 1 | red | The author fixes what the output names. |
 | 3 | waiting | A person with write access who wrote none of the change approves the head. Only `ci` waits, on its `protected` and `tests` gates. |
-| 75 | no verdict | The tool could not judge: git failed or is missing, a file it needed was unreadable or vanished, or I/O failed. Run it again or repair the environment. |
-| 2 | usage | Fix the flags, arguments or other input you typed. |
+| 75 | no verdict | The tool could not judge for a reason outside the checkout: git is missing or cannot start, its own output failed, the system ran out of memory, disk or time, or a fetched commit could not be read. Run it again or repair the environment. |
+| 2 | usage | Fix the flags, arguments or other input you typed, or run it inside a git checkout. |
 
-A malformed `blackhole.toml`, ledger or objections file in the checkout is red.
-In `ci`, the same file broken on the base commit is no verdict, because the pull
-request cannot fix `main`. Broken on the head, it stays a red gate. When red
+Anything the checkout's own content can cause is red, and the message names the
+path and the fix: an unreadable or non-regular file, a looping link, a checkout
+root that git places elsewhere, a git failure caused by the checkout's own
+configuration, or a malformed `blackhole.toml`, ledger or objections file. In
+`ci`, a link that resolves outside the head commit or a file it cannot judge
+there is the red gate `unreadable`. The same configuration broken on the base
+commit is no verdict, because the pull request cannot fix `main`. When red
 and waiting gates are both set, `ci` is red and still lists the waiting gates.
 Its last line names the state:
 
@@ -68,7 +72,7 @@ blackhole ci: no verdict: <cause>
 The agent hooks block on red. On no verdict they judge once more, then block
 with `blackhole: no verdict: <cause>`, post-edit included. The stop hook lets
 the agent stop when Claude Code or Codex sets `stop_hook_active`, so an outage
-cannot loop forever. A red stop still blocks. A payload the post-edit hook
+cannot loop forever. Only no verdict releases it: a red stop still blocks. A payload the post-edit hook
 cannot read exits 1, since the edit has already happened, and outside a
 checkout a failing hook exits 1 without blocking.
 
