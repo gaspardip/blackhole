@@ -65,6 +65,50 @@ fn checking_a_file_does_not_read_an_unrelated_manifest() -> common::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn package_discovery_checks_only_ancestors_of_selected_scripts() -> common::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let uid = common::command("id").arg("-u").output()?;
+    assert!(uid.status.success());
+    if uid.stdout == b"0\n" {
+        return Ok(());
+    }
+
+    let blocked = root.join("blocked");
+    fs::create_dir(&blocked)?;
+    fs::write(blocked.join("package.json"), "{}")?;
+    fs::write(blocked.join("nested.ts"), "")?;
+    fs::write(root.join("normal.ts"), "")?;
+    common::git(root, &["init", "-q"])?;
+    common::git(root, &["add", "."])?;
+    let original = fs::metadata(&blocked)?.permissions();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))?;
+
+    let check = |args: &[&str]| {
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .arg("check")
+            .args(args)
+            .current_dir(root)
+            .output()
+    };
+    let scoped = check(&["normal.ts"]);
+    let unscoped = check(&[]);
+    fs::set_permissions(&blocked, original)?;
+
+    let scoped = scoped?;
+    assert_eq!(scoped.status.code(), Some(0), "{scoped:?}");
+    assert_eq!(scoped.stdout, b"");
+    assert_eq!(scoped.stderr, b"");
+    let unscoped = unscoped?;
+    assert_eq!(unscoped.status.code(), Some(2), "{unscoped:?}");
+    assert!(String::from_utf8(unscoped.stderr)?.contains("Permission denied"));
+    Ok(())
+}
+
 #[test]
 fn naming_survives_parse_failure() {
     use blackhole_check::engine::{registry, run};

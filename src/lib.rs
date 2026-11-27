@@ -198,7 +198,18 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
     let all = || names.iter().map(String::as_str);
     let selected = all()
         .filter(|name| selection.is_empty() || selection.iter().any(|chosen| under(name, chosen)));
-    let packages = package_dirs(&config, all(), |name| files::is_file(&root.join(name)))?;
+    let script_dirs: BTreeSet<_> = selected
+        .clone()
+        .filter(|name| !config.exclude.is_match(name) && engine::source_type(name).is_some())
+        .flat_map(|name| Path::new(name).ancestors().skip(1))
+        .collect();
+    let packages = package_dirs(&config, all(), |name, dir| {
+        if script_dirs.contains(dir) {
+            files::is_file(&root.join(name))
+        } else {
+            Ok(false)
+        }
+    })?;
     let findings = scan_files(
         &config,
         Vec::new(),
@@ -230,12 +241,12 @@ fn scan(root: &Path, paths: &[PathBuf], output: &mut impl Write) -> io::Result<S
 fn package_dirs<'a>(
     config: &config::Config,
     names: impl Iterator<Item = &'a str>,
-    mut is_file: impl FnMut(&str) -> io::Result<bool>,
+    mut is_file: impl FnMut(&str, &Path) -> io::Result<bool>,
 ) -> io::Result<BTreeSet<&'a Path>> {
     let mut packages = BTreeSet::new();
     for name in names.filter(|name| !config.exclude.is_match(name)) {
         if let Some(dir) = engine::package_dir(name)
-            && is_file(name)?
+            && is_file(name, dir)?
         {
             packages.insert(dir);
         }
