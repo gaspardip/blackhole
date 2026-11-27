@@ -48,7 +48,10 @@ enum Action {
 fn main() -> ExitCode {
     let mut out = io::stdout().lock();
     let result = match Args::parse().command {
-        Action::Init => init::run(&mut out).map(|()| false),
+        Action::Init => match init::run(&mut out) {
+            Ok(code) => return ExitCode::from(code),
+            Err(e) => Err(e),
+        },
         Action::Hook { event } => return hooks::run(event),
         Action::Check { paths } => blackhole_check::check(&paths, &mut out),
         Action::Object {

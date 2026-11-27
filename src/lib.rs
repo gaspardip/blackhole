@@ -4,6 +4,7 @@ mod coverage;
 pub mod engine;
 mod files;
 mod git;
+mod github;
 pub mod hooks;
 pub mod init;
 mod judge_files;

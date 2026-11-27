@@ -3,6 +3,8 @@ mod agent;
 #[path = "common/cli.rs"]
 mod cli;
 pub mod common;
+#[path = "common/gh.rs"]
+mod gh;
 use agent::run;
 use cli::{check, repo};
 use serde_json::{Value, json};
@@ -30,11 +32,33 @@ fn previous_launcher(event: &str) -> String {
     old_launcher("git --no-lazy-fetch rev-parse --show-toplevel", event)
 }
 
+const NO_REMOTE: &str = "not guarded: origin names no GitHub repository (add the GitHub repository as the origin remote)";
+
+// A checkout without a GitHub remote completes the install and reads as not guarded without calling gh.
 fn init(root: &Path, success: bool) -> String {
-    let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
+    let fake = gh::FakeGh::new();
+    let out = agent::run_input(
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .arg("init")
+            .env("PATH", fake.path()),
+        b"",
+        if success { 1 } else { 2 },
+        false,
+    );
+    assert_eq!(fake.calls(), Vec::<String>::new());
     // A run that fails reports no file as written.
     assert!(success || out.stdout.is_empty(), "{out:?}");
-    String::from_utf8(if success { out.stdout } else { out.stderr }).unwrap()
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !success || stdout.ends_with(&format!("\n{NO_REMOTE}\n")),
+        "{stdout}"
+    );
+    if success {
+        stdout
+    } else {
+        String::from_utf8(out.stderr).unwrap()
+    }
 }
 #[test]
 fn installs_and_merges_once() {
@@ -547,7 +571,7 @@ fn settings_modes_survive_install_and_rollback() {
                 .current_dir(root)
                 .output()
                 .unwrap();
-            assert_eq!(out.status.success(), !failure);
+            assert_eq!(out.status.code(), Some(if failure { 2 } else { 1 }));
             for (file, mode) in files {
                 let p = root.join(file);
                 assert_eq!(
@@ -879,4 +903,321 @@ fn keeps_an_identical_workflow_and_refuses_a_different_one() {
     {
         assert!(!root.join(name).exists(), "{name}");
     }
+}
+
+const SCOPES: (&str, &str) = ("X-Oauth-Scopes", "repo, read:org");
+const RULES: &str = "repos/owner/repo/rules/branches/main?per_page=100";
+const CLASSIC: &str = "repos/owner/repo/branches/main/protection";
+const CONTENTS: &str = "repos/owner/repo/contents/.github/workflows/blackhole.yml?ref=main";
+
+fn generated_workflow() -> Vec<u8> {
+    let dir = repo();
+    init(dir.path(), true);
+    fs::read(dir.path().join(WORKFLOW)).unwrap()
+}
+
+fn rules(checks: &Value) -> Vec<u8> {
+    json!([
+        {"type":"pull_request","ruleset_source_type":"Repository","ruleset_id":7,"parameters":{}},
+        {"type":"required_status_checks","ruleset_id":7,"parameters":{"required_status_checks":checks}}
+    ])
+    .to_string()
+    .into_bytes()
+}
+
+// Canned answers of a repository whose only ruleset requires pull requests and the blackhole check from GitHub Actions.
+fn guarded_github(workflow: &[u8]) -> gh::FakeGh {
+    let fake = gh::FakeGh::new();
+    fake.respond("GET", "user", 200, &[SCOPES], br#"{"login":"agent"}"#);
+    fake.respond(
+        "GET",
+        "repos/owner/repo",
+        200,
+        &[],
+        br#"{"default_branch":"main","permissions":{"admin":false,"push":true}}"#,
+    );
+    fake.respond("GET", CONTENTS, 200, &[], workflow);
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    fake.respond("GET", RULES, 200, &[], &rules(&checks));
+    fake.respond(
+        "GET",
+        "repos/owner/repo/rulesets/7",
+        200,
+        &[],
+        br#"{"id":7,"name":"main rules","current_user_can_bypass":"never"}"#,
+    );
+    fake.respond("GET", CLASSIC, 404, &[], br#"{"message":"Not Found"}"#);
+    fake
+}
+
+fn guarded_verdict(fake: &gh::FakeGh, path: Option<std::ffi::OsString>) -> (String, i32) {
+    let dir = repo();
+    let root = dir.path();
+    common::git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    )
+    .unwrap();
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .arg("init")
+        .env("PATH", path.unwrap_or_else(|| fake.path()))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.starts_with("Wrote blackhole.toml\n"), "{stdout}");
+    assert!(stdout.contains(&format!("Wrote {WORKFLOW}\n")), "{stdout}");
+    for call in fake.calls() {
+        assert!(
+            call.starts_with("api --hostname github.com --method GET -i "),
+            "{call}"
+        );
+        assert!(!call.contains(" -f ") && !call.contains(" -F "), "{call}");
+    }
+    (
+        stdout.lines().next_back().unwrap().to_owned(),
+        out.status.code().unwrap(),
+    )
+}
+
+#[test]
+fn guarded_repository_reads_as_guarded_and_suggests_the_canary() {
+    let fake = guarded_github(&generated_workflow());
+    let dir = repo();
+    let root = dir.path();
+    common::git(
+        root,
+        &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+    )
+    .unwrap();
+    let out = agent::run_input(
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .arg("init")
+            .env("PATH", fake.path()),
+        b"",
+        0,
+        false,
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines[lines.len() - 1], "guarded");
+    assert!(
+        lines[lines.len() - 2].contains("blackhole canary"),
+        "{stdout}"
+    );
+    // Rulesets answered every condition, so the admin-only classic protection was never asked for.
+    assert!(!fake.calls().iter().any(|call| call.ends_with(CLASSIC)));
+    assert_eq!(fake.calls().len(), 5);
+}
+
+enum Canned {
+    Respond(
+        &'static str,
+        u16,
+        Vec<(&'static str, &'static str)>,
+        Vec<u8>,
+    ),
+    Fail(&'static str, i32, &'static str),
+}
+use Canned::{Fail, Respond};
+
+fn assert_verdicts(cases: Vec<(&str, i32, Vec<Canned>)>) {
+    let workflow = generated_workflow();
+    for (line, code, canned) in cases {
+        let fake = guarded_github(&workflow);
+        for answer in canned {
+            match answer {
+                Respond(endpoint, status, headers, body) => {
+                    fake.respond("GET", endpoint, status, &headers, &body);
+                }
+                Fail(endpoint, exit, stderr) => fake.fail("GET", endpoint, exit, stderr),
+            }
+        }
+        assert_eq!(guarded_verdict(&fake, None), (line.to_owned(), code));
+    }
+}
+
+fn body(text: &str) -> Vec<u8> {
+    text.as_bytes().to_vec()
+}
+
+#[test]
+fn unreadable_github_is_not_guarded() {
+    assert_verdicts(vec![
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)",
+            1,
+            vec![Fail(
+                "user",
+                4,
+                "To get started with GitHub CLI, please run:  gh auth login\n",
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)",
+            1,
+            vec![Respond(
+                "user",
+                401,
+                vec![],
+                body(r#"{"message":"Bad credentials"}"#),
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (error connecting to api.github.com; rerun init once GitHub answers)",
+            75,
+            vec![Fail(
+                "user",
+                1,
+                "error connecting to api.github.com\ncheck your internet connection\n",
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (repos/owner/repo/rules/branches/main?per_page=100 answered HTTP 502; rerun init once GitHub answers)",
+            75,
+            vec![Respond(RULES, 502, vec![], vec![])],
+        ),
+        (
+            "not guarded: cannot read owner/repo on GitHub (sign gh in as an account that can read it)",
+            1,
+            vec![Respond(
+                "repos/owner/repo",
+                404,
+                vec![],
+                body(r#"{"message":"Not Found"}"#),
+            )],
+        ),
+    ]);
+    let missing = git_only_path();
+    let fake = guarded_github(&generated_workflow());
+    assert_eq!(
+        guarded_verdict(&fake, Some(missing.path().into())),
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)".to_owned(),
+            1
+        )
+    );
+    assert_eq!(fake.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn each_missing_branch_rule_is_the_one_final_line() {
+    let only = |kind: &str| {
+        json!([{"type":kind,"ruleset_id":7,"parameters":{"required_status_checks":[{"context":"blackhole","integration_id":15368}]}}])
+            .to_string()
+            .into_bytes()
+    };
+    let unprotected = || {
+        Respond(
+            CLASSIC,
+            404,
+            vec![],
+            body(r#"{"message":"Branch not protected"}"#),
+        )
+    };
+    assert_verdicts(vec![
+        (
+            "not guarded: .github/workflows/blackhole.yml is not on main (commit it and merge it into main)",
+            1,
+            vec![Respond(
+                CONTENTS,
+                404,
+                vec![],
+                body(r#"{"message":"Not Found"}"#),
+            )],
+        ),
+        (
+            "not guarded: .github/workflows/blackhole.yml on main differs from the one init writes (merge the generated file into main)",
+            1,
+            vec![Respond(CONTENTS, 200, vec![], body("name: blackhole\n"))],
+        ),
+        (
+            "not guarded: main does not require pull requests (add a ruleset for main that requires a pull request before merging)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], only("required_status_checks")),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: cannot read the branch protection of main without admin rights (require pull requests and the blackhole check in a ruleset for main, which gh can read)",
+            1,
+            vec![Respond(RULES, 200, vec![], body("[]"))],
+        ),
+        (
+            "not guarded: main does not require the blackhole check (require the blackhole check from GitHub Actions in a ruleset for main)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], only("pull_request")),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: main accepts the blackhole check from a source other than GitHub Actions (set the check's source to GitHub Actions)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], rules(&json!([{"context":"blackhole"}]))),
+                unprotected(),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn each_credential_that_can_get_past_the_judge_is_not_guarded() {
+    assert_verdicts(vec![
+        (
+            "not guarded: gh is signed in as agent, an admin of owner/repo who can bypass or change the rules (sign gh in as an account without admin rights)",
+            1,
+            // Classic protection alone, which GitHub shows to an admin.
+            vec![
+                Respond(RULES, 200, vec![], body("[]")),
+                Respond(
+                    CLASSIC,
+                    200,
+                    vec![],
+                    body(
+                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"checks":[{"context":"blackhole","app_id":15368}]}}"#,
+                    ),
+                ),
+                Respond(
+                    "repos/owner/repo",
+                    200,
+                    vec![],
+                    body(r#"{"default_branch":"main","permissions":{"admin":true}}"#),
+                ),
+            ],
+        ),
+        (
+            "not guarded: gh is signed in as agent, who can bypass ruleset main rules (take agent and its teams and roles off the ruleset's bypass list)",
+            1,
+            vec![Respond(
+                "repos/owner/repo/rulesets/7",
+                200,
+                vec![],
+                body(r#"{"name":"main rules","current_user_can_bypass":"pull_requests_only"}"#),
+            )],
+        ),
+        (
+            "not guarded: gh's token holds the workflow scope, so it can rewrite the judge (run gh auth refresh --remove-scopes workflow)",
+            1,
+            vec![Respond(
+                "user",
+                200,
+                vec![("X-Oauth-Scopes", "repo, workflow")],
+                body(r#"{"login":"agent"}"#),
+            )],
+        ),
+        (
+            "not guarded: GitHub does not reveal the rights of gh's token, so it may rewrite workflows (sign gh in with gh auth login, whose token lists its scopes)",
+            1,
+            vec![Respond("user", 200, vec![], body(r#"{"login":"agent"}"#))],
+        ),
+    ]);
 }

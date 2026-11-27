@@ -1,3 +1,4 @@
+mod guard;
 mod settings_json;
 mod workflow;
 
@@ -20,11 +21,13 @@ $names
 BLACKHOLE_GIT_ENV
 exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
 
-/// Installs project hooks, the judge workflow and the initial ledger.
+/// Installs project hooks, the judge workflow and the initial ledger, then reports whether GitHub guards the repository.
+///
+/// Returns 0 when guarded, 1 when a repository setting is missing and 75 when GitHub cannot be read.
 ///
 /// # Errors
 /// Reports invalid settings, repository discovery and filesystem failures.
-pub fn run(output: &mut impl Write) -> io::Result<()> {
+pub fn run(output: &mut impl Write) -> io::Result<u8> {
     let root = crate::files::root()?;
     let _lock = crate::files::lock(&root)?;
     let claude = settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?;
@@ -72,7 +75,21 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
         report,
         "The judge holds only when the agent has weaker credentials than a person.\nKeep admin, bypass, workflow permissions and the approving account out of the agent's reach."
     )?;
-    output.write_all(&report)
+    output.write_all(&report)?;
+    match guard::verdict(&root, workflow::content().as_bytes()) {
+        Ok(()) => {
+            writeln!(
+                output,
+                "Run blackhole canary to watch the judge stop scripted forgeries in a draft pull request."
+            )?;
+            writeln!(output, "guarded")?;
+            Ok(0)
+        }
+        Err(stop) => {
+            writeln!(output, "not guarded: {}", stop.reason)?;
+            Ok(stop.code)
+        }
+    }
 }
 
 fn parts(path: &str) -> (&str, &str) {
