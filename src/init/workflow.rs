@@ -76,12 +76,19 @@ jobs:
           fetched_shas="$(
             git -C "${RUNNER_TEMP}/judge.git" rev-list refs/judge/base..refs/judge/head | LC_ALL=C sort -u
           )"
+          unlinked="$(jq 'any(.[]; (.author | type) != "string" or (.committer | type) != "string")' <<< "${commits}")"
+          reason=
           if [[ "${api_shas}" != "${fetched_shas}" ]]; then
+            reason="the pull request commit list could not be confirmed"
+          elif [[ "${unlinked}" = true ]]; then
+            reason="a commit author is not linked to a GitHub account"
+          fi
+          if [[ -n "${reason}" ]]; then
             printf '%s\n' '{"authors":[],"reviews":[]}' > "${RUNNER_TEMP}/approvals.json"
-            echo "Approvals were ignored because the pull request commit list could not be confirmed."
+            printf 'Approvals were ignored because %s.\n' "${reason}"
             exit 0
           fi
-          jq --arg author "${PR_AUTHOR}" '[.[] | .author, .committer | strings] + [$author] | unique' \
+          jq --arg author "${PR_AUTHOR}" '[.[] | .author, .committer] + [$author] | unique' \
             <<< "${commits}" > "${RUNNER_TEMP}/authors.json"
           gh api --paginate "${pr}/reviews?per_page=100" |
             jq -rs --arg head "${HEAD_SHA}" '

@@ -913,7 +913,7 @@ fn approval_runner() -> (tempfile::TempDir, String) {
 
 fn approval_api(head: &str) -> gh::FakeGh {
     let fake = gh::FakeGh::new();
-    let commits = json!([{"sha":head,"author":{"login":"writer"},"committer":null}]);
+    let commits = json!([{"sha":head,"author":{"login":"writer"},"committer":{"login":"writer"}}]);
     fake.respond("GET", PR_COMMITS, 200, &[], commits.to_string().as_bytes());
     let review = |login: &str, state: &str, commit: &str| json!({"user":{"login":login},"state":state,"commit_id":commit});
     let first = json!([
@@ -1008,6 +1008,40 @@ fn approvals_are_ignored_when_the_api_commits_differ_from_the_fetched_commits() 
         String::from_utf8(out.stdout).unwrap(),
         "Approvals were ignored because the pull request commit list could not be confirmed.\n"
     );
+}
+
+#[test]
+fn approvals_are_ignored_when_the_commit_author_has_no_login() {
+    assert_unlinked_commit("author");
+}
+
+#[test]
+fn approvals_are_ignored_when_the_committer_has_no_login() {
+    assert_unlinked_commit("committer");
+}
+
+fn assert_unlinked_commit(role: &str) {
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    let mut commit = json!({"sha":head,"author":{"login":"writer"},"committer":{"login":"writer"}});
+    commit[role]["login"] = Value::Null;
+    fake.respond(
+        "GET",
+        PR_COMMITS,
+        200,
+        &[],
+        json!([commit]).to_string().as_bytes(),
+    );
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(out.status.success(), "{out:?}");
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(approvals, json!({"authors":[],"reviews":[]}));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Approvals were ignored because a commit author is not linked to a GitHub account.\n"
+    );
+    assert!(fake.calls().iter().all(|call| !call.ends_with(PR_REVIEWS)));
 }
 
 #[test]
