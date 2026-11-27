@@ -14,7 +14,13 @@ use oxc::{
     span::SourceType,
     syntax::{line_terminator::is_line_terminator, node::NodeId},
 };
-use std::{cell::Cell, collections::BTreeMap, io, num::NonZeroUsize, path::Path};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    io,
+    num::NonZeroUsize,
+    path::Path,
+};
 
 pub enum Family {
     Judge,
@@ -46,6 +52,7 @@ pub enum Run {
     Ts(fn(&TsCtx<'_>, &mut Findings)),
     TsConservative(fn(&TsCtx<'_>, &mut Findings)),
     Repo(fn(&TsCtx<'_>, &RepoCtx<'_, '_>, &mut Findings)),
+    Structure(fn(&StructureCtx<'_>, &mut Vec<String>)),
     Diff(fn(&mut DiffCtx<'_>, &mut DiffFindings) -> io::Result<()>),
     Lines(fn(&str, &str, usize, &mut Findings)),
     ParseError,
@@ -83,6 +90,29 @@ pub struct FileCtx<'a> {
     pub path: &'a str,
     pub text: &'a str,
     pub comments: Option<&'a [Comment]>,
+}
+
+pub struct StructureCtx<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) bytes: &'a [u8],
+    packages: &'a BTreeSet<&'a Path>,
+    work: Cell<u64>,
+}
+
+impl StructureCtx<'_> {
+    pub(crate) fn record_work(&self, steps: usize) {
+        self.work.set(self.work.get().saturating_add(steps as u64));
+    }
+
+    pub(crate) fn is_package(&self, dir: &Path) -> bool {
+        self.packages.contains(dir)
+    }
+}
+
+pub(crate) fn package_dir(path: &str) -> Option<&Path> {
+    let path = Path::new(path);
+    path.parent()
+        .filter(|_| path.file_name().is_some_and(|name| name == "package.json"))
 }
 
 pub struct TsCtx<'a> {
@@ -210,7 +240,9 @@ pub fn registry() -> &'static [Rule] {
         crate::packs::ts::no_unsafe_dictionary_type::RULE,
         crate::packs::ts::no_unsignaled_poll::RULE,
         crate::packs::ts::no_widen_then_assert::RULE,
+        crate::packs::ts::package_exports::RULE,
         crate::packs::ts::strict_msw::RULE,
+        crate::packs::ts::test_file_names::RULE,
     ]
 }
 
@@ -378,7 +410,7 @@ fn collect<'r>(
                     check(ts, repository, &mut findings);
                 }
             }
-            Run::Diff(_) => (),
+            Run::Diff(_) | Run::Structure(_) => (),
         }
         hits.extend(findings.0.into_iter().map(|(at, note)| (at, rule, note)));
     }
@@ -525,15 +557,43 @@ pub(crate) struct Scanner<'a, 'source> {
 }
 
 impl Scanner<'_, '_> {
-    pub(crate) fn file(&self, path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
-        run_file(
+    pub(crate) fn file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        packages: &BTreeSet<&Path>,
+        result: &mut Vec<Finding>,
+    ) -> u64 {
+        let ctx = StructureCtx {
+            path,
+            bytes,
+            packages,
+            work: Cell::new(0),
+        };
+        for rule in self.rules {
+            if let Run::Structure(check) = rule.run {
+                let mut notes = Vec::new();
+                ctx.record_work(1);
+                check(&ctx, &mut notes);
+                result.extend(notes.into_iter().map(|note| Finding {
+                    rule: rule.id,
+                    gate: rule.gate,
+                    path: path.to_owned(),
+                    line: 1,
+                    col: 1,
+                    note: Some(note),
+                }));
+            }
+        }
+        let parsed_work = run_file(
             self.rules,
             path,
             bytes,
             self.settings,
             self.repository.as_ref(),
             result,
-        )
+        );
+        parsed_work.saturating_add(ctx.work.get())
     }
 }
 
@@ -593,6 +653,9 @@ pub fn run_with_work<'a>(
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> (Vec<Finding>, u64) {
     let mut findings = Vec::new();
+    let structural = rules
+        .iter()
+        .any(|rule| matches!(rule.run, Run::Structure(_)));
     scan(
         rules,
         settings,
@@ -600,8 +663,10 @@ pub fn run_with_work<'a>(
         |enabled| {
             let mut pending = files.into_iter();
             let mut inventory = Vec::new();
-            let (paths, by_name) = if enabled {
+            if enabled || structural {
                 inventory.extend(pending.by_ref());
+            }
+            let (paths, by_name) = if enabled {
                 let by_name: BTreeMap<_, _> = inventory.iter().copied().collect();
                 let paths = RepositoryPaths {
                     files: by_name
@@ -617,13 +682,20 @@ pub fn run_with_work<'a>(
             (
                 paths,
                 Reader::new(move |name| Ok(by_name.get(name).map(|bytes| bytes.to_vec()))),
-                inventory.into_iter().chain(pending),
+                (inventory, pending),
             )
         },
-        |scanner, _, files| {
+        |scanner, _, (inventory, pending)| {
             let mut work = 0u64;
-            for (path, bytes) in files {
-                work = work.saturating_add(scanner.file(path, bytes, &mut findings));
+            let mut packages = BTreeSet::new();
+            if structural {
+                for (path, _) in &inventory {
+                    work = work.saturating_add(1);
+                    packages.extend(package_dir(path));
+                }
+            }
+            for (path, bytes) in inventory.into_iter().chain(pending) {
+                work = work.saturating_add(scanner.file(path, bytes, &packages, &mut findings));
             }
             sort_findings(&mut findings);
             (findings, work)

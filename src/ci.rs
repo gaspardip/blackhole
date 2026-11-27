@@ -79,10 +79,14 @@ fn evaluate(
         batch: &mut batch,
     };
     let diff = diff_rules(&mut ctx)?;
+    let packages = crate::package_dirs(scan_config, head_tree.paths(), |path| {
+        Ok(head_tree.blob(path, ctx.batch)?.is_some())
+    })?;
     let findings = crate::scan_files(
         scan_config,
         diff.diagnostics,
         head_tree.paths(),
+        &packages,
         &mut *ctx.batch,
         |batch| head_tree.repository_paths(batch),
         |batch, path| head_tree.read(path, batch),

@@ -1,0 +1,1 @@
+{"exports": {"./*": {"import": {"monorepo": "./*.js", "default": "./dist/*.js"}}}}

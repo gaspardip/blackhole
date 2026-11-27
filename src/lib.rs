@@ -46,14 +46,21 @@ mod packs {
         pub(crate) mod no_unsafe_dictionary_type;
         pub(crate) mod no_unsignaled_poll;
         pub(crate) mod no_widen_then_assert;
+        pub(crate) mod package_exports;
         mod playwright;
         pub(crate) mod reflect_method;
         mod regions;
         mod saved_methods;
         pub(crate) mod strict_msw;
         pub(crate) mod test_context;
+        pub(crate) mod test_file_names;
         mod transports;
         pub(crate) mod values;
+
+        fn script_extension(extension: &str) -> bool {
+            let base = extension.strip_prefix(['c', 'm']).unwrap_or(extension);
+            matches!(base, "ts" | "tsx" | "js" | "jsx")
+        }
     }
     pub(crate) mod core {
         pub(crate) mod no_suppression;
@@ -65,6 +72,7 @@ pub mod verdict;
 mod advisory_tests;
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -264,10 +272,30 @@ fn scan(
     // Both policy files are read before any file is judged.
     let filed = policy(rules.entered, "objections")?.unwrap_or_default();
     let names = listing.names.iter().map(String::as_str);
+    let script_dirs: BTreeSet<_> = names
+        .clone()
+        .filter(|name| !rules.config.exclude.is_match(name) && engine::source_type(name).is_some())
+        .flat_map(|name| Path::new(name).ancestors().skip(1))
+        .collect();
+    // A narrowed listing leaves out the manifests above it, so git lists only the candidates, and a candidate that is a directory lists its descendants, which are not manifests.
+    let candidates: BTreeSet<_> = script_dirs
+        .iter()
+        .map(|dir| dir.join("package.json"))
+        .collect();
+    let manifests =
+        files::listed_matching(root, candidates.iter().map(PathBuf::as_path), |path| {
+            candidates.contains(path)
+        })?;
+    let packages = package_dirs(
+        &rules.config,
+        manifests.iter().map(String::as_str),
+        |name| files::is_file(&root.join(name)),
+    )?;
     let findings = scan_files(
         &rules.config,
         Vec::new(),
         names,
+        &packages,
         (),
         |()| inventory(root, listing),
         |(), name| files::read(&root.join(name)),
@@ -303,10 +331,27 @@ fn inventory(
     files::repository_paths(root, all.names.iter().map(String::as_str))
 }
 
+fn package_dirs<'a>(
+    config: &config::Config,
+    names: impl Iterator<Item = &'a str>,
+    mut is_file: impl FnMut(&str) -> io::Result<bool>,
+) -> io::Result<BTreeSet<&'a Path>> {
+    let mut packages = BTreeSet::new();
+    for name in names.filter(|name| !config.exclude.is_match(name)) {
+        if let Some(dir) = engine::package_dir(name)
+            && is_file(name)?
+        {
+            packages.insert(dir);
+        }
+    }
+    Ok(packages)
+}
+
 fn scan_files<'a, S: Send>(
     config: &config::Config,
     mut findings: Vec<engine::Finding>,
     names: impl Iterator<Item = &'a str>,
+    packages: &BTreeSet<&Path>,
     mut source: S,
     inventory: impl FnOnce(&mut S) -> io::Result<packs::boundary::RepositoryPaths>,
     mut read: impl FnMut(&mut S, &str) -> io::Result<Option<Vec<u8>>> + Send,
@@ -323,7 +368,7 @@ fn scan_files<'a, S: Send>(
         |scanner, reader, ()| -> io::Result<()> {
             for name in names.filter(|name| !config.exclude.is_match(name)) {
                 if let Some(bytes) = reader.read(name)? {
-                    scanner.file(name, &bytes, &mut findings);
+                    scanner.file(name, &bytes, packages, &mut findings);
                 }
             }
             Ok(())

@@ -96,12 +96,20 @@ pub(crate) fn lock(root: &Path) -> io::Result<fs::File> {
     Ok(dir)
 }
 
+pub(crate) fn is_file(path: &Path) -> io::Result<bool> {
+    Ok(with_file(path, || Ok(()))?.is_some())
+}
+
+pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    with_file(path, || fs::read(path))
+}
+
 // A file can go away or turn into a directory between the listing and the read, and then it has nothing to check.
 // A link to a file is read under the link's name, or a link could hide what kind of file it is.
-pub(crate) fn read(path: &Path) -> io::Result<Option<Vec<u8>>> {
+fn with_file<T>(path: &Path, use_file: impl FnOnce() -> io::Result<T>) -> io::Result<Option<T>> {
     let found = fs::metadata(path).and_then(|meta| {
         if meta.is_file() {
-            fs::read(path).map(Some)
+            use_file().map(Some)
         } else {
             Ok(None)
         }

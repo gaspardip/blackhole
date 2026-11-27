@@ -1055,3 +1055,59 @@ fn post_edit_validates_targets_before_listing() {
     fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
     hook(root, "post-edit", &outside, 1);
 }
+
+#[test]
+fn post_edit_judges_file_names_with_packages_like_check() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join("tests/pkg")).unwrap();
+    for name in ["tests/pkg/package.json", "tests/pkg/good.ts", "a.specs.ts"] {
+        fs::write(root.join(name), "{}").unwrap();
+    }
+    let red = check(root, &["a.specs.ts"], 1);
+    assert!(String::from_utf8_lossy(&red).contains("a.specs.ts:1:1 ts/test-file-names"));
+    assert_eq!(
+        hook(root, "post-edit", &edit("Write", "a.specs.ts"), 2),
+        red
+    );
+    assert_eq!(check(root, &["tests/pkg/good.ts"], 0), b"");
+    assert_eq!(
+        hook(root, "post-edit", &edit("Write", "tests/pkg/good.ts"), 0),
+        b""
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_package_json_directory_does_not_change_a_scoped_check() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, os::unix::fs::PermissionsExt};
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("normal.ts"), "").unwrap();
+    let scoped = |root: &Path| {
+        (
+            check(root, &["normal.ts"], 0),
+            hook(root, "post-edit", &edit("Write", "normal.ts"), 0),
+        )
+    };
+    let expected = scoped(root);
+    let blocked = root.join("package.json/blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join("package.json"), "{}").unwrap();
+    fs::write(
+        root.join("package.json")
+            .join(OsStr::from_bytes(b"\xff.ts")),
+        "",
+    )
+    .unwrap();
+    common::git(root, &["add", "."]).unwrap();
+    assert_eq!(scoped(root), expected);
+    let uid = common::command("id").arg("-u").output().unwrap();
+    assert!(uid.status.success());
+    if uid.stdout != b"0\n" {
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let actual = scoped(root);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
