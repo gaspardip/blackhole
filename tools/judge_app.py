@@ -29,6 +29,8 @@ class Verdict:
     job_result: str
     conclusion: str
     judged_on: str | None
+    # The last line `blackhole ci` printed.
+    summary: str
 
 
 def base64url(data: bytes) -> bytes:
@@ -67,7 +69,7 @@ def github(api_url: str, path: str, token: str, body: dict | None = None) -> dic
 
 
 def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: str,
-            read_token: str, api_url: str = "https://api.github.com") -> int:
+            read_token: str, details_url: str, api_url: str = "https://api.github.com") -> int:
     if not re.fullmatch(r"[1-9][0-9]*", app_id):
         raise ValueError("expected a numeric GitHub App ID")
     pull = github(api_url, f"{REPO}/pulls/{snapshot.number}", read_token)
@@ -83,6 +85,7 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
     })["token"]
 
     conclusion = "failure"
+    title = "blackhole ci failed"
     if verdict.job_result != "success":
         summary = f"The judge job ended with {verdict.job_result}."
     elif tip != snapshot.base:
@@ -91,19 +94,26 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
         summary = "Judged on another day. Re-run the whole judge."
     elif verdict.conclusion == "success":
         conclusion = "success"
+        title = "blackhole ci passed"
         summary = "blackhole ci passed."
     elif verdict.conclusion == "failure":
         summary = "blackhole ci reported a policy violation. See the judge job log."
+    elif verdict.conclusion == "action_required" and verdict.summary.startswith("blackhole ci: waiting ("):
+        # Unlike neutral or skipped, action_required does not satisfy a required check.
+        conclusion = "action_required"
+        title = "blackhole ci: waiting on a person"
+        summary = verdict.summary
+    elif verdict.conclusion == "no_verdict" and verdict.summary.startswith("blackhole ci: no verdict: "):
+        title = "blackhole ci: no verdict"
+        # An indented line is a code block, so text from the judged commit cannot render as markdown.
+        summary = f"    {verdict.summary}"
     else:
         summary = "The judge job returned an invalid verdict."
 
     body = {
         "name": "blackhole judge", "head_sha": snapshot.head, "external_id": f"pr/{snapshot.number}",
-        "status": "completed", "conclusion": conclusion,
-        "output": {
-            "title": "blackhole ci passed" if conclusion == "success" else "blackhole ci failed",
-            "summary": summary,
-        },
+        "status": "completed", "conclusion": conclusion, "details_url": details_url,
+        "output": {"title": title, "summary": summary},
     }
     check = github(api_url, f"{REPO}/check-runs", token, body)
     if check["app"]["id"] != int(app_id):
@@ -114,9 +124,12 @@ def publish(snapshot: Snapshot, verdict: Verdict, *, app_id: str, private_key: s
 def main() -> None:
     env = os.environ
     snapshot = Snapshot(int(env["PR_NUMBER"]), env["PR_HEAD_SHA"], env["MAIN_SHA"])
-    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"], env.get("JUDGE_DATE"))
+    verdict = Verdict(env["JUDGE_RESULT"], env["JUDGE_CONCLUSION"], env.get("JUDGE_DATE"),
+                      env.get("JUDGE_SUMMARY", ""))
+    details_url = f'{env["GITHUB_SERVER_URL"]}/{env["GITHUB_REPOSITORY"]}/actions/runs/{env["GITHUB_RUN_ID"]}'
     run_id = publish(snapshot, verdict, app_id=env["JUDGE_APP_ID"],
-                     private_key=env["JUDGE_APP_PRIVATE_KEY"], read_token=env["PR_READ_TOKEN"])
+                     private_key=env["JUDGE_APP_PRIVATE_KEY"], read_token=env["PR_READ_TOKEN"],
+                     details_url=details_url)
     print(f"Published blackhole judge check run {run_id}.")
 
 

@@ -28,6 +28,7 @@ jobs:
     outputs:
       conclusion: ${{ steps.verdict.outputs.conclusion }}
       date: ${{ steps.verdict.outputs.date }}
+      summary: ${{ steps.verdict.outputs.summary }}
     steps:
       - name: Build and run the base judge
         id: verdict
@@ -50,20 +51,30 @@ jobs:
           (cd "${src}" && cargo build --locked --release)
 
           judged_on="$(date -u +%F)"
-          code=0
-          (cd "${repo}" && "${CARGO_TARGET_DIR}/release/blackhole" ci --base "${MAIN_SHA}" \
-            --head "${PR_HEAD_SHA}" --today "${judged_on}") > "${log}" 2>&1 || code=$?
-          # Paths in diagnostics can resemble workflow commands.
-          marker="$(cat /proc/sys/kernel/random/uuid)"
-          printf '::stop-commands::%s\n' "${marker}"
-          cat "${log}"
-          printf '\n::%s::\n' "${marker}"
+          # Exit 75 is no verdict, which can be transient, so it gets one more run.
+          for attempt in 1 2; do
+            code=0
+            (cd "${repo}" && "${CARGO_TARGET_DIR}/release/blackhole" ci --base "${MAIN_SHA}" \
+              --head "${PR_HEAD_SHA}" --today "${judged_on}") > "${log}" 2>&1 || code=$?
+            # Paths in diagnostics can resemble workflow commands.
+            marker="$(cat /proc/sys/kernel/random/uuid)"
+            printf '::stop-commands::%s\n' "${marker}"
+            cat "${log}"
+            printf '\n::%s::\n' "${marker}"
+            if [[ "${code}" != 75 || "${attempt}" == 2 ]]; then
+              break
+            fi
+          done
           case "${code}" in
             0) conclusion=success ;;
             1) conclusion=failure ;;
+            3) conclusion=action_required ;;
+            75) conclusion=no_verdict ;;
             *) exit "${code}" ;;
           esac
-          printf 'conclusion=%s\ndate=%s\n' "${conclusion}" "${judged_on}" >> "${GITHUB_OUTPUT}"
+          # The last line names the state; it reaches the check run, so it stays one printable line.
+          summary="$(tail -n 1 "${log}" | tr -cd '[:print:]' | cut -c 1-1000)"
+          printf 'conclusion=%s\ndate=%s\nsummary=%s\n' "${conclusion}" "${judged_on}" "${summary}" >> "${GITHUB_OUTPUT}"
 
   publish:
     if: >-
@@ -92,4 +103,5 @@ jobs:
           JUDGE_RESULT: ${{ needs.judge.result }}
           JUDGE_CONCLUSION: ${{ needs.judge.outputs.conclusion }}
           JUDGE_DATE: ${{ needs.judge.outputs.date }}
+          JUDGE_SUMMARY: ${{ needs.judge.outputs.summary }}
         run: python3 -I "${RUNNER_TEMP}/judge_app.py"

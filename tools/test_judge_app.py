@@ -15,12 +15,15 @@ import judge_app
 
 BASE = "a" * 40
 HEAD = "b" * 40
+DETAILS = "https://github.com/gaspardip/blackhole/actions/runs/5"
+WAITING = ("blackhole ci: waiting (protected): "
+           "a person with write access who wrote none of the change approves the head")
 
 
 def check_body(conclusion: str, title: str, summary: str) -> dict:
     return {
         "name": "blackhole judge", "head_sha": HEAD, "status": "completed",
-        "conclusion": conclusion, "external_id": "pr/7",
+        "conclusion": conclusion, "external_id": "pr/7", "details_url": DETAILS,
         "output": {"title": title, "summary": summary},
     }
 
@@ -77,13 +80,15 @@ class JudgeApp(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(server.shutdown)
 
-    def publish(self, result: str, conclusion: str, *, judged_on: str | None = "2026-11-19") -> int:
-        verdict = judge_app.Verdict(result, conclusion, judged_on)
+    def publish(self, result: str, conclusion: str, *, judged_on: str | None = "2026-11-19",
+                summary: str = "") -> int:
+        verdict = judge_app.Verdict(result, conclusion, judged_on, summary)
         with patch.object(judge_app, "datetime", wraps=datetime) as clock:
             clock.now.return_value = datetime(2026, 11, 19, tzinfo=timezone.utc)
             return judge_app.publish(
                 judge_app.Snapshot(7, HEAD, BASE), verdict,
-                app_id="19", private_key=self.private_key, read_token="read-token", api_url=self.api_url,
+                app_id="19", private_key=self.private_key, read_token="read-token",
+                details_url=DETAILS, api_url=self.api_url,
             )
 
     def assert_failure_check(self, summary_fragment: str) -> None:
@@ -141,6 +146,31 @@ class JudgeApp(unittest.TestCase):
         self.publish("success", "failure")
         self.assert_failure_check("blackhole ci reported a policy violation. See the judge job log.")
 
+    def test_publishes_waiting_as_action_required_with_the_waiting_line(self) -> None:
+        self.publish("success", "action_required", summary=WAITING)
+        self.assertEqual(self.requests[-1][3], check_body(
+            "action_required", "blackhole ci: waiting on a person", WAITING,
+        ))
+
+    def test_publishes_no_verdict_as_failure_with_the_cause(self) -> None:
+        cause = "blackhole ci: no verdict: fatal: [link](https://example.org) is not a commit"
+        self.publish("success", "no_verdict", summary=cause)
+        # An indented line is a code block, so text from the judged commit cannot render as markdown.
+        self.assertEqual(self.requests[-1][3], check_body(
+            "failure", "blackhole ci: no verdict", f"    {cause}",
+        ))
+
+    def test_publishes_failure_when_the_summary_does_not_match_the_verdict(self) -> None:
+        for conclusion, summary in (
+            ("action_required", ""),
+            ("action_required", "blackhole ci: no verdict: git failed"),
+            ("no_verdict", WAITING),
+            ("no_verdict", ""),
+        ):
+            with self.subTest(conclusion=conclusion, summary=summary):
+                self.publish("success", conclusion, summary=summary)
+                self.assert_failure_check("The judge job returned an invalid verdict.")
+
     def test_posts_nothing_if_the_pr_head_or_target_changed(self) -> None:
         original = self.pull
         for change in ({"head": {"sha": "c" * 40}}, {"base": {"ref": "other", "sha": BASE}}):
@@ -158,7 +188,7 @@ class JudgeApp(unittest.TestCase):
                 self.assert_failure_check(f"The judge job ended with {result}.")
 
     def test_publishes_failure_for_an_invalid_judge_conclusion(self) -> None:
-        for conclusion in ("neutral", ""):
+        for conclusion in ("neutral", "skipped", ""):
             with self.subTest(conclusion=conclusion):
                 self.publish("success", conclusion)
                 self.assert_failure_check("The judge job returned an invalid verdict.")
