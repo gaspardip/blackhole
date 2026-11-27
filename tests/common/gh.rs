@@ -24,13 +24,16 @@ done
 key() { printf '%s %s' "$method" "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'; }
 file="$dir/responses/$(key "$last")"
 # A commit SHA or a canary branch name in the endpoint can be answered by one response for all of them.
-[ -f "$file" ] || file="$dir/responses/$(key "$(printf '%s' "$last" | sed -E 's/[0-9a-f]{40}/SHA/g; s/blackhole-canary-[0-9]+/blackhole-canary-N/g')")"
+[ -f "$file" ] || file="$dir/responses/$(key "$(printf '%s' "$last" | sed -E 's/[0-9a-f]{40}/SHA/g; s/blackhole-canary-[0-9]+(-[0-9]+)?/blackhole-canary-N/g')")"
 if [ ! -f "$file" ]; then
   echo "fake gh: no response for $method $last" >&2
   exit 1
 fi
 [ ! -f "$file.err" ] || cat "$file.err" >&2
-cat "$file"
+case " $* " in
+  *" -i "*) cat "$file" ;;
+  *) sed '1,/^\r$/d' "$file" ;;
+esac
 exit "$(cat "$file.exit")"
 "#;
 

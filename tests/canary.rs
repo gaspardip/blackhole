@@ -12,6 +12,8 @@ use std::{
 use tempfile::{TempDir, tempdir};
 
 const CHECKS: &str = "repos/owner/repo/commits/SHA/check-runs?check_name=blackhole&per_page=100";
+const OPEN_PRS: &str = "repos/owner/repo/pulls?head=owner:blackhole-canary-N&state=open";
+const REF: &str = "repos/owner/repo/git/refs/heads/blackhole-canary-N";
 const LOGS: &str = "repos/owner/repo/actions/jobs/99/logs";
 const LINES: [&str; 6] = [
     "ledger: raise a ledger allowance",
@@ -72,13 +74,8 @@ fn adopted() -> Adopter {
         br#"{"number":12}"#,
     );
     fake.respond("PATCH", "repos/owner/repo/pulls/12", 200, &[], b"{}");
-    fake.respond(
-        "DELETE",
-        "repos/owner/repo/git/refs/heads/blackhole-canary-N",
-        204,
-        &[],
-        b"",
-    );
+    fake.respond("GET", OPEN_PRS, 200, &[], b"12\n");
+    fake.respond("DELETE", REF, 204, &[], b"");
     Adopter {
         _dir: dir,
         remote,
@@ -130,7 +127,7 @@ fn assert_cleaned(fake: &gh::FakeGh) -> String {
         call.ends_with("--method PATCH -f state=closed repos/owner/repo/pulls/12")
     });
     let delete = calls.iter().position(|call| {
-        call.contains("--method DELETE repos/owner/repo/git/refs/heads/blackhole-canary-")
+        call.contains("--method DELETE -i repos/owner/repo/git/refs/heads/blackhole-canary-")
     });
     assert!(close.is_some() && close < delete, "{calls:#?}");
     let call = &calls[delete.unwrap()];
@@ -317,7 +314,7 @@ fn an_interrupted_canary_still_cleans_up() {
 }
 
 #[test]
-fn a_failure_after_the_push_still_deletes_the_branch() {
+fn a_lost_create_response_still_closes_the_pull_request() {
     let adopter = adopted();
     adopter.fake.fail(
         "POST",
@@ -332,13 +329,25 @@ fn a_failure_after_the_push_still_deletes_the_branch() {
         String::from_utf8(out.stderr).unwrap(),
         "blackhole: cannot read GitHub (error connecting to api.github.com)\n"
     );
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
+fn a_rejected_first_push_still_cleans_up_an_absent_branch() {
+    let adopter = adopted();
+    let hook = adopter.remote.join("hooks/pre-receive");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"");
+    adopter.fake.respond("DELETE", REF, 422, &[], b"{}");
+    let out = run(&adopter.root, &adopter.fake, &["canary"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.stdout, b"");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("cleanup failed"), "{stderr}");
     let calls = adopter.fake.calls();
-    assert!(!calls.iter().any(|call| call.contains("--method PATCH")));
-    let deleted = calls
-        .iter()
-        .filter(|call| {
-            call.contains("--method DELETE repos/owner/repo/git/refs/heads/blackhole-canary-")
-        })
-        .count();
-    assert_eq!(deleted, 1, "{calls:#?}");
+    assert!(
+        calls.iter().any(|call| call.contains("--method DELETE")),
+        "{calls:#?}"
+    );
 }

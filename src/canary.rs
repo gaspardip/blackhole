@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::{
     env,
     io::{self, Write},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -20,16 +20,21 @@ const POLL: Duration = Duration::from_secs(10);
 const MARK: &str = "# blackhole canary forgery\n";
 const FINDING: &str = "blackhole-canary-finding.py";
 // Runs in its own process group with the canary's end of the pipe as input, so it cleans up after an interrupt too.
-const CLEANUP: &str = r#"branch= pr=
-while read -r kind value; do
-  case $kind in branch) branch=1 ;; pr) pr=$value ;; esac
+const CLEANUP: &str = r#"branch=
+while read -r kind; do
+  [ "$kind" != branch ] || branch=1
 done
+[ -n "$branch" ] || exit 0
 status=0
-if [ -n "$pr" ]; then
+prs=$(gh api --hostname "$1" --method GET --paginate --jq '.[].number' "repos/$2/pulls?head=${2%%/*}:$3&state=open") || status=1
+for pr in $prs; do
   gh api --hostname "$1" --method PATCH -f state=closed "repos/$2/pulls/$pr" >/dev/null || status=1
-fi
-if [ -n "$branch" ]; then
-  gh api --hostname "$1" --method DELETE "repos/$2/git/refs/heads/$3" >/dev/null || status=1
+done
+if ! response=$(gh api --hostname "$1" --method DELETE -i "repos/$2/git/refs/heads/$3"); then
+  case "$(printf '%s\n' "$response" | head -n 1) " in
+    HTTP/*" 404 "*|HTTP/*" 422 "*) ;;
+    *) status=1 ;;
+  esac
 fi
 exit "$status""#;
 
@@ -267,7 +272,6 @@ struct Run<'a> {
     branch: &'a str,
     base: &'a str,
     timeout: Duration,
-    cleanup: &'a mut ChildStdin,
 }
 
 enum Outcome {
@@ -276,11 +280,7 @@ enum Outcome {
 }
 
 impl Run<'_> {
-    fn note(&mut self, line: &str) -> io::Result<()> {
-        writeln!(self.cleanup, "{line}")
-    }
-
-    fn judge(&mut self, head: &str, count: usize) -> io::Result<Outcome> {
+    fn judge(&self, head: &str, count: usize) -> io::Result<Outcome> {
         let slug = &self.repo.slug;
         let title = format!("title=blackhole canary: {count} forgeries");
         let created = call(
@@ -304,7 +304,6 @@ impl Run<'_> {
         let number = json(&created)?["number"]
             .as_u64()
             .ok_or_else(|| io::Error::other("GitHub returned no pull request number"))?;
-        self.note(&format!("pr {number}"))?;
         let endpoint =
             format!("repos/{slug}/commits/{head}/check-runs?check_name={CHECK}&per_page=100");
         let deadline = Instant::now() + self.timeout;
@@ -409,11 +408,11 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
     let (Some(workflow_head), Some(mut head)) = (chain.pop(), chain.pop()) else {
         return Err(io::Error::other("no forgeries"));
     };
-    let seconds = SystemTime::now()
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
-        .as_secs();
-    let branch = format!("blackhole-canary-{seconds}");
+        .as_nanos();
+    let branch = format!("blackhole-canary-{nanos}-{}", std::process::id());
 
     let mut cleaner = cleanup_process(&repo, &branch)?;
     let mut pipe = cleaner
@@ -421,15 +420,14 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
         .take()
         .ok_or_else(|| io::Error::other("cleanup stdin"))?;
     let result = (|| {
+        writeln!(pipe, "branch")?;
         push(&url, &head, &branch)?;
-        let mut run = Run {
+        let run = Run {
             repo: &repo,
             branch: &branch,
             base,
             timeout,
-            cleanup: &mut pipe,
         };
-        run.note("branch")?;
         let refused = matches!(push(&url, &workflow_head, &branch)?, Push::Refused);
         if !refused {
             head = workflow_head;
