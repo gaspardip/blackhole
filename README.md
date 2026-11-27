@@ -21,8 +21,7 @@ Before an edit, `blackhole hook pre-edit` protects the ledger. After an edit,
 a turn, `blackhole hook stop` checks the whole repository. The launchers use the
 checkout's executable `node_modules/.bin/blackhole` when available and the root
 git reports holds the nearest `.git`, and use `blackhole` from PATH otherwise.
-With neither, the hook blocks. If the selected executable exits 126 or 127,
-the launcher reports a launch failure and blocks (exit 2).
+With neither, the hook blocks. Rerun `blackhole init` to upgrade an installed launcher.
 
 Shell edits bypass edit hooks. Set up `blackhole ci` separately to judge commits.
 Pre-edit compares the ledger path case-insensitively, but it does not catch
@@ -50,6 +49,7 @@ has one next move.
 | 3 | waiting | A person with write access who wrote none of the change approves the head. Only `ci` waits, on its `protected` and `tests` gates. |
 | 75 | no verdict | The tool could not judge for a reason outside the checkout: git is missing, cannot start or was stopped from outside (hangup, interrupt, kill or terminate), its own output failed, the system ran out of memory, disk, threads or time, or a fetched commit could not be read. Run it again or repair the environment. |
 | 2 | usage | Fix the flags, arguments, paths or other input you typed, or run it inside a git checkout. |
+| 2 (launcher) | blocked | Replace an empty executable or fix the failure reported by the launcher. It passes through only 0, 2 and 75. |
 
 Anything the checkout's own content can cause is red, and the message names the
 path and the fix: an unreadable or non-regular file, a looping link, a checkout
@@ -77,9 +77,9 @@ with `blackhole: no verdict: <cause>`, post-edit included. The stop hook lets
 the agent stop when Claude Code or Codex sets `stop_hook_active`, so an outage
 cannot loop forever. Only no verdict releases it: a red stop still blocks.
 Without git, both launchers need `blackhole` on PATH and block without it.
-A payload the post-edit hook cannot read exits 1, since the
-edit has already happened, and a failing hook exits 1 without blocking only
-where no `.git` exists in any parent directory.
+Invoked directly, the post-edit hook exits 1 on an unreadable payload, and a
+failing hook also exits 1 where no `.git` exists in any parent directory. The
+launcher turns both into a block.
 
 ## Working on this repo
 

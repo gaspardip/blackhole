@@ -43,6 +43,16 @@ fn project_launcher(event: &str) -> String {
     )
 }
 
+fn status_127_launcher(event: &str) -> String {
+    let checked = checked_launcher(event);
+    let (local, on_path) = checked.split_once("; fi; command -v blackhole").unwrap();
+    let condition = local.split_once("; then exec").unwrap().0;
+    let (on_path, _) = on_path.rsplit_once("; exec").unwrap();
+    format!(
+        r#"{condition}; then hook_bin="$local_bin"; else command -v blackhole{on_path}; hook_bin=blackhole; fi; hook_status=0; (exec "$hook_bin" hook {event}) || hook_status=$?; case "$hook_status" in 126|127) echo "blackhole: hook {event} could not run blackhole (exit $hook_status)" >&2; exit 2;; esac; exit "$hook_status""#
+    )
+}
+
 fn init(root: &Path, success: bool) -> String {
     let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
     // A run that fails reports no file as written.
@@ -64,6 +74,7 @@ fn installs_and_merges_once() {
                     {"type":"command","command":old_launcher(ISOLATED_ROOT, "stop")},
                     {"type":"command","command":checked_launcher("stop")},
                     {"type":"command","command":project_launcher("stop")},
+                    {"type":"command","command":status_127_launcher("stop")},
                     {"type":"command","command":"second"}
                 ]}
             ],
@@ -103,7 +114,7 @@ fn installs_and_merges_once() {
             assert_eq!(stop, &previous);
         }
         let mut upgraded = original.clone();
-        for index in [0, 1, 2, 3, 4] {
+        for index in 0..6 {
             upgraded["hooks"]["Stop"][1]["hooks"][index]["command"] = stop.clone();
         }
         for event in ["PreToolUse", "PostToolUse"] {
@@ -910,6 +921,11 @@ fn generated_stop_blocks_when_the_selected_binary_cannot_start() {
             ("#!/no/such/blackhole-interpreter\n", 2, true),
             ("#!/bin/sh\nexit 126\n", 2, true),
             ("#!/bin/sh\nexit 127\n", 2, true),
+            ("", 2, true),
+            ("#!/bin/sh\nexit 1\n", 2, true),
+            ("#!/bin/sh\nulimit -c 0; kill -ABRT $$\n", 2, true),
+            ("#!/bin/sh\nexit 0\n", 0, false),
+            ("#!/bin/sh\nexit 2\n", 2, false),
             ("#!/bin/sh\nexit 75\n", 75, false),
         ] {
             fs::write(&bin, script).unwrap();

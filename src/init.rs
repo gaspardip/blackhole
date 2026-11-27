@@ -277,8 +277,11 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
         let project = format!(
             r#"if ! command -v git >/dev/null 2>&1 && [ -n "${{CLAUDE_PROJECT_DIR:-}}" ] && local_bin="$CLAUDE_PROJECT_DIR/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ]; then exec "$local_bin" hook {cmd}; fi; "#
         );
-        let command = format!(
+        let previous_status = format!(
             r#"if {local}; then hook_bin="$local_bin"; else {on_path}; hook_bin=blackhole; fi; hook_status=0; (exec "$hook_bin" hook {cmd}) || hook_status=$?; case "$hook_status" in 126|127) echo "blackhole: hook {cmd} could not run blackhole (exit $hook_status)" >&2; exit 2;; esac; exit "$hook_status""#
+        );
+        let command = format!(
+            r#"if {local}; then hook_bin="$local_bin"; else hook_bin=$(unset -f blackhole; command -v blackhole) || {{ echo "blackhole: hook {cmd} needs blackhole on PATH or installed in this checkout" >&2; exit 2; }}; fi; [ -s "$hook_bin" ] || {{ echo "blackhole: hook {cmd} could not run blackhole (empty executable)" >&2; exit 2; }}; hook_status=0; {{ (exec "$hook_bin" hook {cmd} 2>&3) || hook_status=$?; }} 3>&2 2>/dev/null; case "$hook_status" in 0|2|75) exit "$hook_status";; *) echo "blackhole: hook {cmd} could not run blackhole (exit $hook_status)" >&2; exit 2;; esac"#
         );
         let known = [
             format!("blackhole hook {cmd}"),
@@ -286,6 +289,7 @@ fn merge(bytes: Option<&[u8]>, matcher: &str, codex: bool) -> io::Result<Option<
             launcher(ISOLATED_ROOT),
             format!("{checked}{global}"),
             format!("{checked}{project}{global}"),
+            previous_status,
             format!(
                 r#"if {nearest} && local_bin="$dir/node_modules/.bin/blackhole" && [ -f "$local_bin" ] && [ -x "$local_bin" ] && {{ ! command -v git >/dev/null 2>&1 || {{ {top} && [ "$dir" = "$top" ]; }}; }}; then exec "$local_bin" hook {cmd}; fi; {global}"#
             ),
