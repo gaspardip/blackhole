@@ -1194,11 +1194,16 @@ fn git_killed_on(dir: &Path, subcommand: &str, signal: &str, once: bool) {
     } else {
         format!("kill -{signal} $$")
     };
+    let request = if subcommand == "cat-file" {
+        "IFS= read -r request; "
+    } else {
+        ""
+    };
     let shim = dir.join("git");
     fs::write(
         &shim,
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" {subcommand} \"*) {guard};; esac\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\ncase \" $* \" in *\" {subcommand} \"*) {request}{guard};; esac\nexec '{}' \"$@\"\n",
             real.trim_end()
         ),
     )
@@ -1233,6 +1238,39 @@ fn check_keeps_no_verdict_for_a_stopped_machine() {
         .unwrap();
     assert_eq!(out.status.code(), Some(75), "{out:?}");
     assert_eq!(out.stdout, b"", "{out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_keeps_the_signal_when_git_stops_during_a_head_blob_read() {
+    let dir = repo();
+    let root = dir.path();
+    common::git(root, &["commit", "--allow-empty", "-qm", "base"]).unwrap();
+    fs::write(root.join("a.py"), "pass\n").unwrap();
+    common::git(root, &["add", "a.py"]).unwrap();
+    common::git(root, &["commit", "-qm", "head"]).unwrap();
+    let shims = tempdir().unwrap();
+    for (signal, status, expected) in [
+        ("USR1", 1, "git crashed: "),
+        ("KILL", 75, "blackhole ci: no verdict: git did not finish: "),
+    ] {
+        git_killed_on(shims.path(), "cat-file", signal, false);
+        let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .env("PATH", shims.path())
+            .args(["ci", "--base", "HEAD~", "--head", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(status), "{signal}: {out:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.starts_with(expected), "{signal}: {stdout}");
+        if status == 1 {
+            assert_eq!(
+                stdout.lines().last(),
+                Some("blackhole ci: red (unreadable)")
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

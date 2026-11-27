@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     env,
     io::{self, BufRead, BufReader, Read, Write},
-    process::{Child, ChildStdout, Command, Output, Stdio},
+    process::{Child, ChildStdout, Command, ExitStatus, Stdio},
 };
 
 // The caller's git variables must not point at another repository or index, and a replace ref must not swap an object.
@@ -23,22 +23,21 @@ pub(crate) fn command() -> Command {
     ]);
     command
 }
-fn failure(out: &Output) -> io::Error {
+fn failure(status: ExitStatus, stderr: &[u8]) -> io::Error {
     // Only a signal sent from outside (HUP, INT, KILL, TERM) means git never judged; a crash could come from what it read.
     #[cfg(unix)]
-    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&out.status) {
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
         return if matches!(signal, 1 | 2 | 9 | 15) {
-            crate::no_verdict(format!("git did not finish: {}", out.status))
+            crate::no_verdict(format!("git did not finish: {status}"))
         } else {
-            crate::red(format!("git crashed: {}", out.status))
+            crate::red(format!("git crashed: {status}"))
         };
     }
     io::Error::other(
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(stderr)
             .lines()
             .next()
-            .unwrap_or("git failed")
-            .to_owned(),
+            .map_or_else(|| format!("git failed: {status}"), str::to_owned),
     )
 }
 // Git missing or unable to start is the machine's problem, never the checkout's.
@@ -50,7 +49,7 @@ pub(crate) fn output(command: &mut Command) -> io::Result<Vec<u8>> {
     if out.status.success() {
         Ok(out.stdout)
     } else {
-        Err(failure(&out))
+        Err(failure(out.status, &out.stderr))
     }
 }
 fn run(args: &[&str]) -> io::Result<String> {
@@ -82,7 +81,7 @@ pub(crate) fn ancestor(base: &str, head: &str) -> io::Result<bool> {
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(failure(&out)),
+        _ => Err(failure(out.status, &out.stderr)),
     }
 }
 
@@ -319,6 +318,25 @@ impl Batch {
         Ok(Self { child, reader })
     }
     pub(crate) fn read(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        match self.read_blob(id) {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                let status = self.child.wait()?;
+                if status.success() {
+                    Err(e)
+                } else {
+                    Err(failure(status, b"git cat-file failed"))
+                }
+            }
+            result => result,
+        }
+    }
+
+    fn read_blob(&mut self, id: &str) -> io::Result<Vec<u8>> {
         let input = self
             .child
             .stdin
@@ -327,6 +345,12 @@ impl Batch {
         writeln!(input, "{id}")?;
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
+        if !line.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete git blob header",
+            ));
+        }
         let header: Vec<_> = line.split_ascii_whitespace().collect();
         let &[oid, "blob", size] = header.as_slice() else {
             return Err(io::Error::other("missing or invalid git blob"));
@@ -344,10 +368,11 @@ impl Batch {
         Ok(bytes)
     }
     pub(crate) fn finish(mut self) -> io::Result<()> {
-        if self.child.wait()?.success() {
+        let status = self.child.wait()?;
+        if status.success() {
             Ok(())
         } else {
-            Err(io::Error::other("git cat-file failed"))
+            Err(failure(status, b"git cat-file failed"))
         }
     }
 }
