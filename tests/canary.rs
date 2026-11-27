@@ -351,3 +351,30 @@ fn a_rejected_first_push_still_cleans_up_an_absent_branch() {
         "{calls:#?}"
     );
 }
+
+#[test]
+fn a_push_and_cleanup_failure_emits_one_escaped_line() {
+    let adopter = adopted();
+    let hook = adopter.remote.join("hooks/pre-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'first\\033line\\nsecond line\\n' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"");
+    adopter
+        .fake
+        .fail("DELETE", REF, 1, "raw cleanup error\nmore details\n");
+    let out = run(&adopter.root, &adopter.fake, &["canary"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.stdout, b"");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("remote: first"), "{stderr:?}");
+    assert!(
+        !stderr.trim_end().chars().any(char::is_control),
+        "{stderr:?}"
+    );
+    assert!(stderr.contains("by hand"), "{stderr}");
+}

@@ -263,7 +263,7 @@ fn push(url: &str, sha: &str, branch: &str) -> io::Result<Push> {
     }
     Err(io::Error::other(format!(
         "git push failed: {}",
-        stderr.trim_end()
+        crate::diagnostic_text(&git::failure(&out).to_string())
     )))
 }
 
@@ -367,7 +367,8 @@ fn cleanup_process(repo: &Repo, branch: &str) -> io::Result<Child> {
             branch,
         ])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command.spawn()
