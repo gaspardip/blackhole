@@ -1,0 +1,1 @@
+{"imports":{"#db":"@workspace/db","#detail":"@workspace/db/query","#safe":"./shared.mjs"}}

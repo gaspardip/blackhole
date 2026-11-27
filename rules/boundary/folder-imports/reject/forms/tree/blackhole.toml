@@ -1,0 +1,3 @@
+[[boundaries.folders]]
+from = "ui/**"
+deny = ["db/**", "@app/db", "@app/db/**"]

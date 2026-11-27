@@ -1,0 +1,3 @@
+ui/app.cts:1:23 boundary/folder-imports [advisory] node_modules/pkg/db/denied.d.mts
+ui/app.mts:1:28 boundary/folder-imports [advisory] node_modules/pkg/db/denied.d.cts
+boundary/folder-imports Move the code or depend on the allowed layer. A re-export through another folder is the same violation. List workspace package names in deny to cover imports by name.

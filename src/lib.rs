@@ -228,7 +228,7 @@ fn scan_files<'a, S: Send>(
     engine::scan(
         engine::registry(),
         config.engine_settings(),
-        config.banned_imports(),
+        config.import_policy(),
         |enabled| {
             let paths = enabled.then(|| inventory(&mut source).map_err(|error| error.to_string()));
             let reader = packs::boundary::Reader::new(move |name| read(&mut source, name));

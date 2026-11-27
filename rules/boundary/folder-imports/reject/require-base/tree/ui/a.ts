@@ -1,0 +1,11 @@
+import {createRequire} from "module";
+createRequire(new URL("../db/anchor.cjs", import.meta.url))("./x.cjs");
+createRequire(__dirname)("allowed");
+createRequire(import.meta.filename)("allowed");
+createRequire(import.meta.dirname)("allowed");
+const base = import.meta.url;
+const load = createRequire(base);
+load("allowed");
+createRequire("/anchor.cjs")("allowed");
+createRequire((import.meta.url as string))("allowed");
+createRequire((__filename) )("allowed");

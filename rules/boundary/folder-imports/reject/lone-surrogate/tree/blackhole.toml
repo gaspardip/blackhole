@@ -1,0 +1,3 @@
+[[boundaries.folders]]
+from='a.ts'
+deny=['db/**']

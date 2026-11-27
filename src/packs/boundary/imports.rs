@@ -5,7 +5,7 @@ use oxc::{
     ast::{
         AstKind,
         ast::{
-            CallExpression, Expression, ImportDeclarationSpecifier, ModuleExportName,
+            CallExpression, Declaration, Expression, ImportDeclarationSpecifier, ModuleExportName,
             ObjectExpression, ObjectPropertyKind, Statement, StringLiteral, WithClause,
         },
     },
@@ -13,7 +13,7 @@ use oxc::{
     syntax::node::NodeId,
 };
 use oxc_resolver::PackageType;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -44,8 +44,8 @@ impl Kind {
             .and_then(|a| a.value.value.as_str());
         Self::type_mode(mode)
     }
-    fn for_importer(self, in_declaration: bool) -> Self {
-        match (in_declaration, self) {
+    pub(super) fn in_type_context(self, type_only: bool) -> Self {
+        match (type_only, self) {
             (true, Self::Static) => Self::TypeDeclaration,
             (true, Self::StaticRequire) => Self::TypeRequire,
             (_, kind) => kind,
@@ -67,15 +67,20 @@ impl Kind {
     }
 }
 
-pub(super) struct Import {
-    pub offset: u32,
-    pub name: Option<String>,
-    pub kind: Kind,
-    pub filename_base: Option<PackageType>,
-    pub verbatim_only: bool,
+pub(crate) struct Import {
+    pub(super) offset: u32,
+    pub(super) name: Option<String>,
+    pub(super) kind: Kind,
+    pub(super) filename_base: Option<PackageType>,
+    pub(super) verbatim_only: bool,
+    reexport: bool,
 }
 
 impl Import {
+    pub(super) fn is_reexport(&self) -> bool {
+        self.reexport
+    }
+
     pub(super) fn needs_format(&self, typescript: bool) -> bool {
         self.filename_base.is_some()
             || (typescript
@@ -89,6 +94,7 @@ impl Import {
             kind,
             filename_base: None,
             verbatim_only: false,
+            reexport: false,
         }
     }
     fn argument<'a>(kinds: &Kinds<'_, 'a>, expr: &'a Expression<'a>, kind: Kind) -> Self {
@@ -109,23 +115,72 @@ fn type_import(specifier: &ImportDeclarationSpecifier<'_>) -> bool {
     matches!(specifier,ImportDeclarationSpecifier::ImportSpecifier(i) if i.import_kind.is_type())
 }
 
-fn type_exports(ctx: &TsCtx<'_>) -> HashSet<NodeId> {
+#[derive(Default)]
+struct ExportReadings {
+    value: bool,
+    types: bool,
+}
+
+fn exported_bindings(ctx: &TsCtx<'_>) -> HashMap<NodeId, ExportReadings> {
+    let from_expression = |expr: &Expression<'_>| match inner(ctx, expr) {
+        Expression::Identifier(id) => symbol(ctx, id),
+        _ => None,
+    };
     let scoping = ctx.semantic.scoping();
-    let mut exports = HashSet::new();
-    for stmt in ctx.counted(ctx.program.body.iter()) {
-        let Statement::ExportNamedDeclaration(d) = stmt else {
-            continue;
-        };
-        for specifier in ctx.counted(d.specifiers.iter()) {
-            if (d.export_kind.is_type() || specifier.export_kind.is_type())
-                && let ModuleExportName::IdentifierReference(id) = &specifier.local
-                && let Some(binding) = symbol(ctx, id)
-            {
-                exports.insert(scoping.symbol_declaration(binding));
+    let mut locals = HashMap::<_, ExportReadings>::new();
+    let mut record = |binding, types| {
+        if let Some(binding) = binding {
+            let readings = locals
+                .entry(scoping.symbol_declaration(binding))
+                .or_default();
+            if types {
+                readings.types = true;
+            } else {
+                readings.value = true;
             }
         }
+    };
+    for stmt in ctx.counted(ctx.program.body.iter()) {
+        match stmt {
+            Statement::ExportNamedDeclaration(d) => {
+                for specifier in ctx.counted(d.specifiers.iter()) {
+                    if let ModuleExportName::IdentifierReference(id) = &specifier.local {
+                        record(
+                            symbol(ctx, id),
+                            d.export_kind.is_type() || specifier.export_kind.is_type(),
+                        );
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(d) => {
+                record(
+                    d.declaration.as_expression().and_then(from_expression),
+                    false,
+                );
+            }
+            Statement::ExportDeclaration(d) => {
+                if let Declaration::TSImportEqualsDeclaration(import) = &d.declaration {
+                    record(import.id.symbol_id.get(), false);
+                }
+            }
+            Statement::TSExportAssignment(d) => record(from_expression(&d.expression), false),
+            _ => {}
+        }
     }
-    exports
+    locals
+}
+
+fn binding_readings(
+    exported: &HashMap<NodeId, ExportReadings>,
+    id: NodeId,
+    type_only: bool,
+) -> impl Iterator<Item = (bool, bool)> {
+    let export = exported.get(&id);
+    let reexport = export.is_some_and(|r| r.value || (type_only && r.types));
+    let extra_type = !type_only && export.is_some_and(|r| r.types);
+    [(type_only, reexport)]
+        .into_iter()
+        .chain(extra_type.then_some((true, true)))
 }
 
 fn declaration_readings(
@@ -133,23 +188,29 @@ fn declaration_readings(
     kind: impl Fn(bool) -> Kind,
     type_only: bool,
     can_emit_verbatim: bool,
-    bindings: impl Iterator<Item = bool>,
+    reexport: bool,
+    bindings: impl Iterator<Item = (bool, bool)>,
 ) -> impl Iterator<Item = Import> {
-    let mut present = [false; 2];
-    for types in bindings {
-        present[usize::from(type_only || types)] = true;
+    let mut present = [None, None];
+    for (types, exported) in bindings {
+        *present[usize::from(type_only || types)].get_or_insert(false) |= exported;
     }
-    if present == [false, false] {
-        present[usize::from(type_only)] = true;
+    if present == [None, None] {
+        present[usize::from(type_only)] = Some(reexport);
     }
     [false, true]
         .into_iter()
         .zip(present)
-        .filter(|&(_, present)| present)
-        .map(move |(types, _)| Import::literal(source, kind(types)))
+        .filter_map(move |(types, exported)| {
+            Some(Import {
+                reexport: exported?,
+                ..Import::literal(source, kind(types))
+            })
+        })
         .chain(
-            (can_emit_verbatim && !type_only && !present[0]).then(|| Import {
+            (can_emit_verbatim && !type_only && present[0].is_none()).then(|| Import {
                 verbatim_only: true,
+                reexport,
                 ..Import::literal(source, Kind::Static)
             }),
         )
@@ -270,10 +331,11 @@ fn unread_binding<'a>(kinds: &Kinds<'_, 'a>, node: AstKind<'a>) -> Option<u32> {
     }
 }
 
-pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
+pub(super) fn collect(ctx: &TsCtx<'_>) -> Vec<Import> {
+    let in_declaration = ctx.program.source_type.is_typescript_definition();
     let mut imports = Vec::new();
     let kinds = Kinds::new(ctx);
-    let exported = type_exports(ctx);
+    let exported = exported_bindings(ctx);
     let can_emit_verbatim = ctx.program.source_type.is_typescript() && !in_declaration;
     for (id, node) in ctx.nodes_with_ids() {
         let kind = node.kind();
@@ -293,19 +355,15 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
         let import = match kind {
             AstKind::ImportDeclaration(d) => {
                 let bindings = ctx.counted(d.specifiers.iter().flatten()).flat_map(|s| {
-                    let type_only = type_import(s);
-                    [
-                        Some(type_only),
-                        exported.contains(&s.node_id()).then_some(true),
-                    ]
-                    .into_iter()
-                    .flatten()
+                    let type_only = d.import_kind.is_type() || type_import(s);
+                    binding_readings(&exported, s.node_id(), type_only)
                 });
                 imports.extend(declaration_readings(
                     &d.source,
                     |types| Kind::declaration(ctx, types, d.with_clause.as_deref()),
                     d.import_kind.is_type(),
                     can_emit_verbatim,
+                    false,
                     bindings,
                 ));
                 continue;
@@ -316,15 +374,19 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
                     |types| Kind::declaration(ctx, types, d.with_clause.as_deref()),
                     d.export_kind.is_type(),
                     can_emit_verbatim,
+                    true,
                     ctx.counted(d.specifiers.iter())
-                        .map(|s| s.export_kind.is_type()),
+                        .map(|s| (s.export_kind.is_type(), true)),
                 ));
                 continue;
             }
-            AstKind::ExportAllDeclaration(d) => Import::literal(
-                &d.source,
-                Kind::declaration(ctx, d.export_kind.is_type(), d.with_clause.as_deref()),
-            ),
+            AstKind::ExportAllDeclaration(d) => Import {
+                reexport: true,
+                ..Import::literal(
+                    &d.source,
+                    Kind::declaration(ctx, d.export_kind.is_type(), d.with_clause.as_deref()),
+                )
+            },
             AstKind::TSImportType(d) => {
                 Import::literal(&d.source, type_options(ctx, d.options.as_deref()))
             }
@@ -340,9 +402,8 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
                     Kind::require_declaration,
                     type_only,
                     false,
-                    [Some(type_only), exported.contains(&id).then_some(true)]
-                        .into_iter()
-                        .flatten(),
+                    false,
+                    binding_readings(&exported, id, type_only),
                 ));
                 continue;
             }
@@ -356,7 +417,7 @@ pub(super) fn collect(ctx: &TsCtx<'_>, in_declaration: bool) -> Vec<Import> {
         imports.push(import);
     }
     for import in &mut imports {
-        import.kind = import.kind.for_importer(in_declaration);
+        import.kind = import.kind.in_type_context(in_declaration);
     }
     imports.sort_by_key(|i| i.offset);
     imports

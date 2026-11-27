@@ -2361,7 +2361,10 @@ mod tests {
 
     #[test]
     fn repeated_guards_reuse_an_unjudged_origin() {
-        use crate::engine::{Settings, run, run_with_work};
+        use crate::{
+            config::Config,
+            engine::{run, run_with_work},
+        };
         use std::fmt::Write as _;
 
         const READS: usize = 4_000;
@@ -2381,8 +2384,7 @@ mod tests {
             source.push_str(&"guard(v4000);\n".repeat(READS));
             let (hits, work) = run_with_work(
                 &[guard::<0, 0>()],
-                Settings::default(),
-                &[],
+                &Config::default(),
                 [("guard.ts", source.as_bytes())],
             );
             // Each call visits one parameter and compares its one-byte name.

@@ -9,7 +9,7 @@ fn put(root: &Path, name: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
+fn repository(files: &[(&str, &str)], links: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = cli::repo();
     let root = dir.path();
     for &(name, text) in files {
@@ -20,6 +20,12 @@ fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
     }
     common::git(root, &["add", "-f", "."]).unwrap();
     common::git(root, &["commit", "-qm", "case"]).unwrap();
+    dir
+}
+
+fn judge(files: &[(&str, &str)], links: &[(&str, &str)], code: i32) -> String {
+    let dir = repository(files, links);
+    let root = dir.path();
     let outputs = [
         cli::check(root, &[], code),
         cli::run(root, &["ci", "--base", "HEAD", "--head", "HEAD"], code),
@@ -42,6 +48,14 @@ fn lines_for<'a>(out: &'a str, prefix: &str) -> Vec<&'a str> {
     out.lines()
         .filter(|line| line.starts_with(prefix))
         .collect()
+}
+
+#[test]
+fn config_exposes_the_configured_banned_imports() {
+    let config =
+        blackhole_check::config::parse(b"[boundaries]\nbanned-imports=['restricted', 'node:path']")
+            .unwrap();
+    assert_eq!(config.banned_imports(), ["restricted", "node:path"]);
 }
 
 const UNKNOWN: &str = "specifier is not a literal";
@@ -1227,3 +1241,6 @@ fn unreadable_resolver_configuration_is_advisory_across_commands() {
         }
     }
 }
+
+#[path = "boundary/folders.rs"]
+mod folders;

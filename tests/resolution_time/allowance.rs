@@ -1,6 +1,7 @@
 use super::Resolution;
 use crate::{
-    engine::{Findings, Rule, Run, Settings, TsCtx, run_with_work},
+    config::Config,
+    engine::{Findings, Rule, Run, TsCtx, run_with_work},
     packs::ts::{no_unsafe_dictionary_type, no_widen_then_assert},
 };
 use std::fmt::Write;
@@ -45,8 +46,7 @@ fn twenty_thousand_annotations_and_assertions_receive_their_own_allowance() {
                 ..no_widen_then_assert::RULE
             },
         ],
-        Settings::default(),
-        &[],
+        &Config::default(),
         [("allowance.ts", source.as_bytes())],
     );
     let cap = source.len() as u64;

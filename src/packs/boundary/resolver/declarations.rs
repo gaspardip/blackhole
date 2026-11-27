@@ -6,7 +6,7 @@ use oxc_resolver::PathUtil;
 use serde_json::Value;
 use std::path::Path;
 
-type Lookup = Result<bool, String>;
+type Lookup = Result<Option<String>, String>;
 type TargetLookup<T> = Result<Option<T>, TargetError>;
 
 enum Target<T> {
@@ -59,20 +59,21 @@ pub(super) fn import_target(
                 )));
             }
             let path = root.join(path);
-            let found = declarations
+            let mut file = declarations
                 .file(&path, false)
-                .map_err(TargetError::Resolution)?
-                || (!is_typescript(&path)
-                    && javascript
-                        .file(&path, false)
-                        .map_err(TargetError::Resolution)?);
-            return Ok(found.then_some(super::TypeImportTarget::Local));
+                .map_err(TargetError::Resolution)?;
+            if file.is_none() && !is_typescript(&path) {
+                file = javascript
+                    .file(&path, false)
+                    .map_err(TargetError::Resolution)?;
+            }
+            return Ok(file.map(super::TypeImportTarget::Local));
         }
         if target.is_empty() || !is_package(&target) {
             return Ok(None);
         }
         lookup(tree, &root.join("package.json"), &target, mode, charge)
-            .map(|found| found.then_some(super::TypeImportTarget::Package(target)))
+            .map(|file| file.map(|file| super::TypeImportTarget::Package { name: target, file }))
     };
     match walk_import(tree, importer, name, mode, charge, resolve) {
         Ok(Target::Matched(target)) => Ok(Some(target)),
@@ -138,13 +139,13 @@ fn walk_import<T>(
     })
 }
 
-fn lookup(
+pub(super) fn lookup(
     tree: &Tree<'_, '_>,
     importer: &Path,
     name: &str,
     mode: Conditions,
     charge: &Charge<'_>,
-) -> Result<bool, TargetError> {
+) -> Result<Option<String>, TargetError> {
     let package_end = name
         .match_indices('/')
         .nth(usize::from(name.starts_with('@')))
@@ -164,8 +165,10 @@ fn lookup(
         && manifest.get("name").and_then(Value::as_str) == Some(package)
         && let Some(exports) = exports_field(&manifest)
     {
-        if remember_invalid(package_lookup.exports(dir, exports, subpath), &mut invalid)? {
-            return Ok(true);
+        if let Some(file) =
+            remember_invalid(package_lookup.exports(dir, exports, subpath), &mut invalid)?
+        {
+            return Ok(Some(file));
         }
         candidates.push((dir.to_owned(), Some(manifest)));
     }
@@ -182,11 +185,11 @@ fn lookup(
         let manifest = tree
             .manifest(&root.join("package.json"))
             .map_err(TargetError::Resolution)?;
-        if remember_invalid(
+        if let Some(file) = remember_invalid(
             package_lookup.target(&root, manifest.as_deref().unwrap_or(&empty), subpath),
             &mut invalid,
         )? {
-            return Ok(true);
+            return Ok(Some(file));
         }
         candidates.push((root, manifest));
     }
@@ -196,14 +199,14 @@ fn lookup(
         ..package_lookup
     };
     for (root, manifest) in candidates {
-        if remember_invalid(
+        if let Some(file) = remember_invalid(
             javascript.target(&root, manifest.as_deref().unwrap_or(&empty), subpath),
             &mut invalid,
         )? {
-            return Ok(true);
+            return Ok(Some(file));
         }
     }
-    invalid.map_or(Ok(false), Err)
+    invalid.map_or(Ok(None), Err)
 }
 
 fn exports_field(manifest: &Manifest) -> Option<&Value> {
@@ -218,7 +221,12 @@ struct PackageLookup<'a, 'tree, 'source> {
 }
 
 impl PackageLookup<'_, '_, '_> {
-    fn target(&self, root: &Path, manifest: &Manifest, subpath: &str) -> Result<bool, TargetError> {
+    fn target(
+        &self,
+        root: &Path,
+        manifest: &Manifest,
+        subpath: &str,
+    ) -> Result<Option<String>, TargetError> {
         if let Some(exports) = exports_field(manifest) {
             self.exports(root, exports, subpath)
         } else {
@@ -227,7 +235,12 @@ impl PackageLookup<'_, '_, '_> {
         }
     }
 
-    fn exports(&self, root: &Path, exports: &Value, subpath: &str) -> Result<bool, TargetError> {
+    fn exports(
+        &self,
+        root: &Path,
+        exports: &Value,
+        subpath: &str,
+    ) -> Result<Option<String>, TargetError> {
         let mut paths = None;
         if let Some(map) = exports.as_object() {
             for key in map.keys() {
@@ -249,7 +262,7 @@ impl PackageLookup<'_, '_, '_> {
             subpath.is_empty().then_some((exports, Capture::Exact))
         };
         let Some((target, capture)) = selected else {
-            return Ok(false);
+            return Ok(None);
         };
         walk_target(target, self.mode, self.charge, &mut |target| {
             let invalid = |target: &str| {
@@ -266,10 +279,12 @@ impl PackageLookup<'_, '_, '_> {
                 return Err(invalid(&target));
             }
             self.file(&root.join(target), false)
-                .map(|found| found.then_some(()))
                 .map_err(TargetError::Resolution)
         })
-        .map(|target| matches!(target, Target::Matched(())))
+        .map(|target| match target {
+            Target::Matched(file) => Some(file),
+            Target::Blocked | Target::Unmatched => None,
+        })
     }
 
     fn legacy(&self, root: &Path, manifest: &Manifest, subpath: &str) -> Lookup {
@@ -314,24 +329,26 @@ impl PackageLookup<'_, '_, '_> {
                     Capture::Star(text) => target.replacen('*', text, 1),
                     _ => target.to_owned(),
                 };
-                if self.entry(&rooted(&target), implicit)? {
-                    return Ok(true);
+                if let Some(file) = self.entry(&rooted(&target), implicit)? {
+                    return Ok(Some(file));
                 }
             }
             if !matches!(self.mode, Conditions::TypeImport) || !subpath.is_empty() {
-                return Ok(false);
+                return Ok(None);
             }
         } else if !subpath.is_empty() {
             return self.entry(&candidate, implicit);
-        } else if entry.is_some() && self.entry(&candidate, implicit)? {
-            return Ok(true);
+        } else if entry.is_some()
+            && let Some(file) = self.entry(&candidate, implicit)?
+        {
+            return Ok(Some(file));
         }
         self.file(&root.join("index.js"), false)
     }
 
     fn entry(&self, path: &Path, implicit: bool) -> Lookup {
         match self.file(path, implicit)? {
-            false if implicit => self.file(&path.join("index"), true),
+            None if implicit => self.file(&path.join("index"), true),
             found => Ok(found),
         }
     }
@@ -354,10 +371,13 @@ impl PackageLookup<'_, '_, '_> {
     fn file(&self, path: &Path, implicit: bool) -> Lookup {
         let name = repository_name(path)?;
         if name.ends_with('/') {
-            return Ok(false);
+            return Ok(None);
         }
-        if !self.javascript && is_typescript(path) && self.existing(path)? {
-            return Ok(true);
+        if !self.javascript
+            && is_typescript(path)
+            && let Some(file) = self.existing(path)?
+        {
+            return Ok(Some(file));
         }
         let filename = path
             .file_name()
@@ -370,28 +390,31 @@ impl PackageLookup<'_, '_, '_> {
             };
             let suffixes = self.suffixes(extension);
             for suffix in suffixes {
-                if self.existing(&path.with_file_name(format!("{stem}{suffix}")))? {
-                    return Ok(true);
+                if let Some(file) =
+                    self.existing(&path.with_file_name(format!("{stem}{suffix}")))?
+                {
+                    return Ok(Some(file));
                 }
             }
             if !self.javascript
                 && !is_typescript(path)
                 && suffixes.is_empty()
-                && self.existing(&path.with_file_name(format!("{stem}.d.{extension}.ts")))?
+                && let Some(file) =
+                    self.existing(&path.with_file_name(format!("{stem}.d.{extension}.ts")))?
             {
-                return Ok(true);
+                return Ok(Some(file));
             }
         }
         if implicit {
             for suffix in self.suffixes("js") {
                 let mut candidate = path.as_os_str().to_os_string();
                 candidate.push(suffix);
-                if self.existing(Path::new(&candidate))? {
-                    return Ok(true);
+                if let Some(file) = self.existing(Path::new(&candidate))? {
+                    return Ok(Some(file));
                 }
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     fn existing(&self, path: &Path) -> Lookup {
@@ -402,10 +425,9 @@ impl PackageLookup<'_, '_, '_> {
             is_typescript(&real)
         };
         if self.tree.files.contains(real.as_ref()) && supported {
-            repository_name(&real)?;
-            return Ok(true);
+            return repository_name(&real).map(|path| Some(path.to_owned()));
         }
-        Ok(false)
+        Ok(None)
     }
 }
 
@@ -418,12 +440,12 @@ impl TargetError {
 }
 
 fn remember_invalid(
-    result: Result<bool, TargetError>,
+    result: Result<Option<String>, TargetError>,
     invalid: &mut Option<TargetError>,
-) -> Result<bool, TargetError> {
+) -> Result<Option<String>, TargetError> {
     if let Err(error @ TargetError::InvalidTarget(_)) = result {
         invalid.get_or_insert(error);
-        Ok(false)
+        Ok(None)
     } else {
         result
     }

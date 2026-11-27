@@ -771,8 +771,7 @@ fn check_loader_inputs() {
     let scan = |path, source: &str| {
         blackhole_check::engine::run_with_work(
             std::slice::from_ref(rule),
-            config.engine_settings(),
-            config.banned_imports(),
+            &config,
             [(path, source.as_bytes())],
         )
     };
@@ -882,8 +881,7 @@ fn repeated_package_manifest_lookups_respect_the_work_budget() {
             let source = "import '#entry/tool';\n".repeat(n);
             let (hits, work) = blackhole_check::engine::run_with_work(
                 std::slice::from_ref(rule),
-                config.engine_settings(),
-                config.banned_imports(),
+                &config,
                 [
                     ("app.mjs", source.as_bytes()),
                     ("package.json", manifest.as_bytes()),

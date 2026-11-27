@@ -1,0 +1,3 @@
+[[boundaries.folders]]
+from='ui/**'
+deny=['db/model.d.ts']
