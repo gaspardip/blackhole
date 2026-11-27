@@ -11,6 +11,13 @@ from test_name_guard import git
 from release_tag import github_candidate_succeeded, verify_tag
 
 
+GITHUB_ENV = {
+    "GITHUB_API_URL": "https://api.github.test",
+    "GITHUB_REPOSITORY": "owner/project",
+    "GH_TOKEN": "test-token",
+}
+
+
 class ReleaseTag(unittest.TestCase):
     def setUp(self) -> None:
         temp = tempfile.TemporaryDirectory()
@@ -83,21 +90,22 @@ class ReleaseTag(unittest.TestCase):
             "head_branch": rc, "head_sha": sha, "event": "push", "conclusion": "success", "run_attempt": 1,
         }
 
-        with patch.dict("os.environ", {
-            "GITHUB_API_URL": "https://api.github.test",
-            "GITHUB_REPOSITORY": "owner/project",
-            "GH_TOKEN": "test-token",
-        }), patch("release_tag.urlopen") as lookup:
+        release = {"tag_name": rc, "draft": False, "prerelease": True}
+        with patch.dict("os.environ", GITHUB_ENV), patch("release_tag.urlopen") as lookup:
             response = lookup.return_value.__enter__
-            response.return_value = io.BytesIO(json.dumps({"workflow_runs": [run]}).encode())
+            response.side_effect = [
+                io.BytesIO(json.dumps({"workflow_runs": [run]}).encode()),
+                io.BytesIO(json.dumps(release).encode()),
+            ]
             self.assertEqual(verify_tag(self.repo, "v1.2.3", github_candidate_succeeded), "latest")
-            request = urlsplit(lookup.call_args.args[0].full_url)
+            request = urlsplit(lookup.call_args_list[0].args[0].full_url)
             self.assertEqual(request.path, "/repos/owner/project/actions/workflows/release.yml/runs")
             query = parse_qs(request.query)
             self.assertEqual(query["event"], ["push"])
             self.assertEqual(query["head_sha"], [sha])
             self.assertEqual(query["status"], ["success"])
 
+            response.side_effect = None
             for runs in (
                 [], [run | {"head_branch": "main"}], [run | {"head_sha": "0" * 40}],
                 [run | {"run_attempt": 2}],
@@ -106,12 +114,15 @@ class ReleaseTag(unittest.TestCase):
                     response.return_value = io.BytesIO(json.dumps({"workflow_runs": runs}).encode())
                     verify_tag(self.repo, "v1.2.3", github_candidate_succeeded)
 
+            offset = lookup.call_count
             lookup.side_effect = [
                 io.BytesIO(json.dumps({"workflow_runs": [run | {"head_branch": "main"}] * 100}).encode()),
                 io.BytesIO(json.dumps({"workflow_runs": [run]}).encode()),
+                io.BytesIO(json.dumps(release).encode()),
             ]
             self.assertEqual(verify_tag(self.repo, "v1.2.3", github_candidate_succeeded), "latest")
-            self.assertEqual(parse_qs(urlsplit(lookup.call_args.args[0].full_url).query)["page"], ["2"])
+            second_page = urlsplit(lookup.call_args_list[offset + 1].args[0].full_url)
+            self.assertEqual(parse_qs(second_page.query)["page"], ["2"])
 
             for status in (404, 503):
                 with self.subTest(status=status), self.assertRaisesRegex(ValueError, f"HTTP {status}"):
@@ -119,6 +130,44 @@ class ReleaseTag(unittest.TestCase):
                     self.addCleanup(error.close)
                     lookup.side_effect = error
                     verify_tag(self.repo, "v1.2.3", github_candidate_succeeded)
+
+    def test_final_requires_a_published_prerelease_for_the_exact_tag(self) -> None:
+        rc = "v1.2.3-rc.1"
+        sha = git(self.repo, "rev-parse", "HEAD").strip()
+        self.version("1.2.3")
+        self.final()
+        run = {
+            "head_branch": rc, "head_sha": sha, "event": "push", "conclusion": "success", "run_attempt": 1,
+        }
+        release = {"tag_name": rc, "draft": False, "prerelease": True}
+        missing = HTTPError("", 404, "", {}, None)
+        unavailable = HTTPError("", 500, "", {}, None)
+        self.addCleanup(missing.close)
+        self.addCleanup(unavailable.close)
+
+        for result, outcome in (
+            (release, "latest"),
+            (missing, "version-only"),
+            (release | {"draft": True}, "version-only"),
+            (release | {"prerelease": False}, "version-only"),
+            (release | {"tag_name": "v1.2.3-rc.2"}, "version-only"),
+            (unavailable, "GitHub release lookup failed .*HTTP 500"),
+        ):
+            with self.subTest(result=result), patch.dict("os.environ", GITHUB_ENV), patch("release_tag.urlopen") as lookup:
+                lookup.side_effect = [
+                    io.BytesIO(json.dumps({"workflow_runs": [run]}).encode()),
+                    result if isinstance(result, HTTPError) else io.BytesIO(json.dumps(result).encode()),
+                ]
+                if outcome == "latest":
+                    self.assertEqual(verify_tag(self.repo, "v1.2.3", github_candidate_succeeded), "latest")
+                else:
+                    with self.assertRaisesRegex(ValueError, outcome):
+                        verify_tag(self.repo, "v1.2.3", github_candidate_succeeded)
+                self.assertEqual(
+                    lookup.call_args.args[0].full_url,
+                    f"https://api.github.test/repos/owner/project/releases/tags/{rc}",
+                )
+                self.assertEqual(lookup.call_args.args[0].get_header("Authorization"), "Bearer test-token")
 
     def test_matching_rc_tag_selects_next(self) -> None:
         git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")

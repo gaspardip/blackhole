@@ -76,11 +76,14 @@ def github_candidate_succeeded(tag: str, sha: str) -> bool:
     api = os.environ["GITHUB_API_URL"]
     repo = os.environ["GITHUB_REPOSITORY"]
     url = f"{api}/repos/{repo}/actions/workflows/release.yml/runs"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+    }
     for page in count(1):
-        request = Request(f"{url}?event=push&head_sha={sha}&status=success&per_page=100&page={page}", headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-        })
+        request = Request(
+            f"{url}?event=push&head_sha={sha}&status=success&per_page=100&page={page}", headers=headers,
+        )
         try:
             with urlopen(request, timeout=30) as response:
                 runs = json.load(response)["workflow_runs"]
@@ -89,9 +92,19 @@ def github_candidate_succeeded(tag: str, sha: str) -> bool:
         if any(run["head_branch"] == tag and run["head_sha"] == sha
                and run["event"] == "push" and run["conclusion"] == "success"
                and run["run_attempt"] == 1 for run in runs):
-            return True
+            break
         if len(runs) < 100:
             return False
+
+    request = Request(f"{api}/repos/{repo}/releases/tags/{tag}", headers=headers)
+    try:
+        with urlopen(request, timeout=30) as response:
+            release = json.load(response)
+    except HTTPError as error:
+        if error.code == 404:
+            return False
+        raise ValueError(f"GitHub release lookup failed (HTTP {error.code})") from error
+    return release["tag_name"] == tag and release["prerelease"] is True and release["draft"] is False
 
 
 if __name__ == "__main__":
