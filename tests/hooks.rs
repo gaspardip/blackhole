@@ -39,7 +39,7 @@ fn edits_and_stop_share_check_output() {
     let dir = repo();
     let root = dir.path();
     fs::write(root.join("a.py"), "# noqa").unwrap();
-    let _ = run(root, &["init"], "", 0, false);
+    let _ = run(root, &["init"], "", 1, false);
     assert_eq!(check(root, &[], 0), b"");
     assert_eq!(hook(root, "post-edit", &edit("Write", "a.py"), 0), b"");
     assert_eq!(hook(root, "stop", &json!({}), 0), b"");
@@ -164,7 +164,7 @@ fn post_edit_agrees_with_check_for_a_listed_external_link() {
         assert_eq!(hook(&root, "pre-edit", &payload, 0), b"");
         assert_eq!(hook(&root, "post-edit", &payload, 2), expected);
     }
-    let _ = run(&root, &["init"], "", 0, false);
+    let _ = run(&root, &["init"], "", 1, false);
     fs::write(root.join("clean.py"), "pass").unwrap();
     fs::write(dir.path().join("outside.py"), "pass").unwrap();
     assert_eq!(
@@ -310,7 +310,7 @@ fn post_edit_reports_stale_selected_allowance() {
     for name in ["a.py", "b.py"] {
         fs::write(root.join(name), "# noqa").unwrap();
     }
-    let _ = run(root, &["init"], "", 0, false);
+    let _ = run(root, &["init"], "", 1, false);
     for name in ["a.py", "b.py"] {
         fs::write(root.join(name), "pass").unwrap();
     }
@@ -529,7 +529,7 @@ fn delete_and_move_report_departed_ledger_rows() {
         let dir = repo();
         let root = dir.path();
         fs::write(root.join("a.py"), "# noqa").unwrap();
-        let _ = run(root, &["init"], "", 0, false);
+        let _ = run(root, &["init"], "", 1, false);
         let mut args = vec!["check", "a.py"];
         let hunk = if moved {
             fs::rename(root.join("a.py"), root.join("b.py")).unwrap();
@@ -788,7 +788,7 @@ fn checkout_alias_preserves_the_departed_ledger_name() {
     fs::create_dir(root.join("d")).unwrap();
     fs::write(root.join("d/gone.py"), "# noqa").unwrap();
     fs::write(root.join("unrelated.py"), "# noqa").unwrap();
-    let _ = run(root, &["init"], "", 0, false);
+    let _ = run(root, &["init"], "", 1, false);
     fs::rename(root.join("d"), root.join("real")).unwrap();
     symlink("real", root.join("d")).unwrap();
     fs::rename(root.join("real/gone.py"), root.join("moved.py")).unwrap();
@@ -831,7 +831,7 @@ fn departed_rows_survive_nested_and_external_directory_aliases() {
     symlink(root, &view).unwrap();
     fs::create_dir_all(root.join("sub/d")).unwrap();
     fs::write(root.join("sub/d/gone.py"), "# noqa").unwrap();
-    let _ = run(root, &["init"], "", 0, false);
+    let _ = run(root, &["init"], "", 1, false);
     fs::rename(root.join("sub/d/gone.py"), root.join("moved.py")).unwrap();
     symlink("sub", root.join("alias")).unwrap();
     symlink("sub/d", root.join("chain")).unwrap();

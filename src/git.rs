@@ -23,7 +23,7 @@ pub(crate) fn command() -> Command {
     ]);
     command
 }
-fn failure(out: &Output) -> io::Error {
+pub(crate) fn failure(out: &Output) -> io::Error {
     io::Error::other(
         String::from_utf8_lossy(&out.stderr)
             .lines()

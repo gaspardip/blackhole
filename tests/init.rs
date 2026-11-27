@@ -3,6 +3,8 @@ mod agent;
 #[path = "common/cli.rs"]
 mod cli;
 pub mod common;
+#[path = "common/gh.rs"]
+mod gh;
 use agent::run;
 use cli::{check, repo};
 use serde_json::{Value, json};
@@ -10,6 +12,9 @@ use std::{fs, path::Path};
 use tempfile::tempdir;
 
 const HOOK_FILES: [&str; 2] = [".claude/settings.json", ".codex/hooks.json"];
+const WORKFLOW: &str = ".github/workflows/blackhole.yml";
+const REVIEW_WORKFLOW: &str = ".github/workflows/blackhole-review.yml";
+const RERUN_WORKFLOW: &str = ".github/workflows/blackhole-rerun.yml";
 
 const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
 while IFS= read -r name; do
@@ -29,11 +34,33 @@ fn previous_launcher(event: &str) -> String {
     old_launcher("git --no-lazy-fetch rev-parse --show-toplevel", event)
 }
 
+const NO_REMOTE: &str = "not guarded: origin names no GitHub repository (add the GitHub repository as the origin remote)";
+
+// A checkout without a GitHub remote completes the install and reads as not guarded without calling gh.
 fn init(root: &Path, success: bool) -> String {
-    let out = run(root, &["init"], "", if success { 0 } else { 2 }, false);
+    let fake = gh::FakeGh::new();
+    let out = agent::run_input(
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .arg("init")
+            .env("PATH", fake.path()),
+        b"",
+        if success { 1 } else { 2 },
+        false,
+    );
+    assert_eq!(fake.calls(), Vec::<String>::new());
     // A run that fails reports no file as written.
     assert!(success || out.stdout.is_empty(), "{out:?}");
-    String::from_utf8(if success { out.stdout } else { out.stderr }).unwrap()
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !success || stdout.ends_with(&format!("\n{NO_REMOTE}\n")),
+        "{stdout}"
+    );
+    if success {
+        stdout
+    } else {
+        String::from_utf8(out.stderr).unwrap()
+    }
 }
 #[test]
 fn installs_and_merges_once() {
@@ -60,7 +87,7 @@ fn installs_and_merges_once() {
         fs::create_dir(p.parent().unwrap()).unwrap();
         fs::write(p, original.to_string()).unwrap();
     }
-    assert!(init(root, true).contains("CI"));
+    assert!(init(root, true).contains("The judge is the blackhole check"));
     assert_eq!(
         fs::read(root.join("blackhole.toml")).unwrap(),
         b"exclude=[]"
@@ -546,7 +573,7 @@ fn settings_modes_survive_install_and_rollback() {
                 .current_dir(root)
                 .output()
                 .unwrap();
-            assert_eq!(out.status.success(), !failure);
+            assert_eq!(out.status.code(), Some(if failure { 2 } else { 1 }));
             for (file, mode) in files {
                 let p = root.join(file);
                 assert_eq!(
@@ -795,4 +822,1223 @@ fn narrower_guards_get_a_full_one_beside_them() {
         group["hooks"][0]["command"] = json!(previous_launcher(cmd));
         Some(group)
     });
+}
+
+#[test]
+fn writes_the_judge_workflow_pinned_to_this_version() {
+    let dir = repo();
+    let root = dir.path();
+    let report = init(root, true);
+    assert!(
+        report
+            .lines()
+            .any(|line| line == format!("Wrote {WORKFLOW}"))
+    );
+    let text = fs::read_to_string(root.join(WORKFLOW)).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(text.contains(&format!(
+        "npm install --ignore-scripts --save-exact --no-audit --no-fund @gaspardip/blackhole@{version}\n"
+    )));
+    assert!(text.contains("\n          npm audit signatures\n"));
+    assert!(text.contains(&format!("= \"blackhole {version}\"\n")));
+    assert!(text.contains(
+        "\non:\n  pull_request_target:\n    types: [opened, reopened, synchronize, edited]\n\npermissions: {}\n"
+    ));
+    assert!(!text.contains("pull_request:") && !text.contains("pull_request_review"));
+    assert_eq!(text.matches("permissions:").count(), 2);
+    assert!(text.contains(
+        "\n    permissions:\n      contents: read\n      pull-requests: read\n    env:\n"
+    ));
+    assert!(text.contains("\n  blackhole:\n    name: blackhole\n    runs-on:"));
+    // The head is fetched as objects into a bare repository and judged there, never checked out or run.
+    assert!(!text.contains("actions/checkout") && !text.contains("checkout -"));
+    assert!(text.contains("git init -q --bare \"${repo}\""));
+    assert!(text.contains("\"refs/pull/${PR_NUMBER}/head:refs/judge/head\""));
+    assert!(text.contains(
+        "(cd \"${RUNNER_TEMP}/judge.git\" && env -u GH_TOKEN \"${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole\" ci \\\n            --base \"${BASE_SHA}\" --head \"${HEAD_SHA}\" --approvals \"${RUNNER_TEMP}/approvals.json\")"
+    ));
+    assert!(text.contains(r"printf '\nblackhole ci: green\n'"));
+    let uses: Vec<_> = text.lines().filter(|line| line.contains("uses:")).collect();
+    assert_ne!(uses.len(), 0);
+    for line in uses {
+        let (_, pin) = line.split_once('@').unwrap();
+        let (sha, tag) = pin.split_once(' ').unwrap();
+        assert!(
+            sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert!(tag.starts_with("# v"), "{line}");
+    }
+}
+
+#[test]
+fn writes_and_keeps_the_review_workflows() {
+    let dir = repo();
+    let root = dir.path();
+    let report = init(root, true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        assert!(report.lines().any(|line| line == format!("Wrote {path}")));
+    }
+    assert!(report.lines().any(|line| line == "The check refreshes on review events on a best-effort basis, and a branch rule requiring one approval of the latest push makes a dismissed approval block the merge natively."));
+    let relay = fs::read_to_string(root.join(REVIEW_WORKFLOW)).unwrap();
+    assert_eq!(
+        relay,
+        r#"name: blackhole review
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
+"#
+    );
+    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
+    assert!(rerun.starts_with(
+        "name: blackhole rerun\n\non:\n  workflow_run:\n    workflows: [\"blackhole review\"]\n    types: [completed]\n\npermissions: {}\n"
+    ));
+    assert_eq!(rerun.matches("permissions:").count(), 2);
+    assert!(rerun.contains("\n    permissions:\n      actions: write\n    steps:\n"));
+    assert!(rerun.contains("HEAD_SHA: ${{ github.event.workflow_run.head_sha }}"));
+    assert!(rerun.contains("HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}"));
+    assert!(
+        rerun.contains(
+            "HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}"
+        )
+    );
+    assert_eq!(rerun.matches("github.event.").count(), 3);
+    assert!(!rerun.contains("uses:"));
+    let report = init(root, true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        assert!(report.lines().any(|line| line == format!("Kept {path}")));
+    }
+    assert_eq!(
+        fs::read_to_string(root.join(REVIEW_WORKFLOW)).unwrap(),
+        relay
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap(),
+        rerun
+    );
+}
+
+fn install_rerun_tools(root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let gh = root.join("gh");
+    fs::write(
+        &gh,
+        r#"#!/bin/bash
+set -eu
+echo "$*" >> calls
+case "$*" in
+  "api --paginate repos/owner/repo/actions/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA}&per_page=100")
+    printf '%s\n' "$RUNS"
+    ;;
+  "api repos/owner/repo/actions/runs/42 --jq .status")
+    if [ -e polled ]; then echo completed; else touch polled; echo in_progress; fi
+    ;;
+  "api --method POST repos/owner/repo/actions/runs/42/rerun")
+    test -e polled
+    attempt=$(grep -c 'POST ' calls)
+    if [[ "$attempt" -le "$FAIL_POSTS" ]]; then
+      echo "temporary error" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let sleep = root.join("sleep");
+    fs::write(&sleep, "#!/bin/sh\necho sleep \"$1\" >> calls\n").unwrap();
+    fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn the_rerun_waits_for_the_newest_matching_run() {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
+    let (_, script) = rerun.split_once("        run: |\n").unwrap();
+    install_rerun_tools(root);
+    let mut paths = vec![root.to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let branch = "topic/feature+1";
+    let repo = "fork/repo";
+    let candidate = |id, date, sha: &str, branch: &str, repo: &str| {
+        json!({
+            "id": id, "created_at": date, "head_sha": sha, "head_branch": branch,
+            "head_repository": {"full_name": repo}
+        })
+    };
+    let runs = json!({"workflow_runs":[
+        candidate(41, "2026-11-01T12:00:00Z", head, branch, repo),
+        candidate(42, "2026-11-02T12:00:00Z", head, branch, repo),
+        candidate(43, "2026-11-03T12:00:00Z", head, "other", repo),
+        candidate(44, "2026-11-04T12:00:00Z", head, branch, "owner/repo"),
+        candidate(45, "2026-11-05T12:00:00Z", "bbbb", branch, repo),
+    ]});
+    let run = |sha: &str, branch: &str, repo: &str, runs: &Value, fail_posts: &str| {
+        common::command("bash")
+            .current_dir(root)
+            .args(["-eo", "pipefail", "-c", script])
+            .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("GITHUB_REPOSITORY", "owner/repo")
+            .env("HEAD_SHA", sha)
+            .env("HEAD_BRANCH", branch)
+            .env("HEAD_REPOSITORY", repo)
+            .env("RUNS", runs.to_string())
+            .env("FAIL_POSTS", fail_posts)
+            .output()
+            .unwrap()
+    };
+    let invalid = run(&head.to_uppercase(), branch, repo, &runs, "0");
+    assert!(!invalid.status.success());
+    let missing = run(head, branch, repo, &json!({"workflow_runs":[]}), "0");
+    assert!(missing.status.success(), "{missing:?}");
+    assert_eq!(String::from_utf8_lossy(&missing.stdout).lines().count(), 1);
+    let out = run(head, branch, repo, &runs, "2");
+    assert!(out.status.success(), "{out:?}");
+    let calls = fs::read_to_string(root.join("calls")).unwrap();
+    let calls: Vec<_> = calls.lines().collect();
+    for call in &calls[..2] {
+        assert!(call.contains(&format!("?event=pull_request_target&head_sha={head}&")));
+        assert!(!call.contains(branch));
+    }
+    let post = "api --method POST repos/owner/repo/actions/runs/42/rerun";
+    assert_eq!(
+        calls[2..],
+        [
+            "api repos/owner/repo/actions/runs/42 --jq .status",
+            "sleep 5",
+            "api repos/owner/repo/actions/runs/42 --jq .status",
+            post,
+            "sleep 1",
+            post,
+            "sleep 2",
+            post,
+        ]
+    );
+    assert_eq!(out.stderr, b"", "{out:?}");
+
+    fs::write(root.join("calls"), "").unwrap();
+    let out = run(head, "branch\nsecond", repo, &runs, "0");
+    assert!(!out.status.success(), "{out:?}");
+    let out = run(head, branch, "fork/repo\nsecond", &runs, "0");
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(fs::read(root.join("calls")).unwrap(), b"");
+
+    let out = run(head, branch, repo, &runs, "3");
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(
+        out.stderr,
+        b"The blackhole judge was not refreshed and must be rerun by hand.\n"
+    );
+    let calls = fs::read_to_string(root.join("calls")).unwrap();
+    assert_eq!(calls.lines().filter(|line| *line == post).count(), 3);
+}
+
+#[test]
+fn a_different_review_workflow_stops_init_before_writing() {
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        let dir = repo();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(root.join(path), "name: different\n").unwrap();
+        let before = snapshot(root);
+        let message = init(root, false);
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains("first at line 1;"), "{message}");
+        assert_eq!(snapshot(root), before);
+    }
+}
+
+const PR_COMMITS: &str = "repos/owner/repo/pulls/42/commits?per_page=100";
+const PR_REVIEWS: &str = "repos/owner/repo/pulls/42/reviews?per_page=100";
+const RETIRED_PERMISSION: &str = "repos/owner/repo/collaborators/Retired/permission";
+const GONE_PERMISSION: &str = "repos/owner/repo/collaborators/gone/permission";
+
+fn collect_approvals(runner: &Path, fake: &gh::FakeGh, head: &str) -> std::process::Output {
+    let workflow = String::from_utf8(generated_workflow()).unwrap();
+    let (_, approvals) = workflow
+        .split_once("      - name: Collect approvals of the head\n")
+        .unwrap();
+    let (_, script) = approvals.split_once("        run: |\n").unwrap();
+    let (script, _) = script.split_once("      - name: Judge the head\n").unwrap();
+    let script = script
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    common::command("bash")
+        .args(["-eo", "pipefail", "-c", &script])
+        .env("PATH", fake.path())
+        .env("RUNNER_TEMP", runner)
+        .env("GITHUB_REPOSITORY", "owner/repo")
+        .env("PR_NUMBER", "42")
+        .env("PR_AUTHOR", "opener")
+        .env("HEAD_SHA", head)
+        .output()
+        .unwrap()
+}
+
+fn approval_runner() -> (tempfile::TempDir, String) {
+    let runner = tempdir().unwrap();
+    let judge = runner.path().join("judge.git");
+    fs::create_dir(&judge).unwrap();
+    let git = |args: &[&str]| common::git(&judge, args).unwrap();
+    git(&["init", "--bare", "-q", "--template="]);
+    let tree = git(&["mktree"]);
+    let base = git(&["commit-tree", &tree, "-m", "base"]);
+    let head = git(&["commit-tree", &tree, "-p", &base, "-m", "head"]);
+    git(&["update-ref", "refs/judge/base", &base]);
+    git(&["update-ref", "refs/judge/head", &head]);
+    (runner, head)
+}
+
+fn approval_api(head: &str) -> gh::FakeGh {
+    let fake = gh::FakeGh::new();
+    let commits = json!([{"sha":head,"author":{"login":"writer"},"committer":{"login":"writer"}}]);
+    fake.respond("GET", PR_COMMITS, 200, &[], commits.to_string().as_bytes());
+    let review = |login: &str, state: &str, commit: &str| json!({"user":{"login":login},"state":state,"commit_id":commit});
+    let first = json!([
+        review("retired", "APPROVED", head),
+        review("active", "APPROVED", head),
+        review("gone", "APPROVED", head),
+        review("old", "APPROVED", "parent"),
+    ]);
+    let second = json!([
+        review("Retired", "DISMISSED", head),
+        review("active", "COMMENTED", head),
+    ]);
+    fake.respond(
+        "GET",
+        PR_REVIEWS,
+        200,
+        &[],
+        format!("{first}\n{second}").as_bytes(),
+    );
+    for login in ["retired", "Retired", "gone", "old"] {
+        let endpoint = format!("repos/owner/repo/collaborators/{login}/permission");
+        fake.respond("GET", &endpoint, 404, &[], b"{}");
+    }
+    fake.respond(
+        "GET",
+        "repos/owner/repo/collaborators/active/permission",
+        200,
+        &[],
+        br#"{"permission":"write"}"#,
+    );
+    fake
+}
+
+#[test]
+fn approval_collection_checks_only_current_approvers_and_accepts_missing_collaborators() {
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(out.status.success(), "{out:?}\n{:#?}", fake.calls());
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(
+        approvals,
+        json!({
+            "authors":["opener","writer"],
+            "reviews":[
+                {"login":"active","state":"APPROVED","commit":head,"permission":"write"},
+                {"login":"gone","state":"APPROVED","commit":head,"permission":"none"},
+            ]
+        })
+    );
+    let calls = fake.calls();
+    assert!(
+        calls.iter().all(|call| !call.ends_with(RETIRED_PERMISSION)
+            && !call.contains("/collaborators/retired/")
+            && !call.contains("/collaborators/old/")),
+        "{calls:#?}"
+    );
+    assert!(
+        serde_json::from_value::<blackhole_check::verdict::Approvals>(approvals)
+            .unwrap()
+            .approved(&head)
+    );
+
+    fake.respond("GET", GONE_PERMISSION, 502, &[], b"{}");
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(!out.status.success(), "{out:?}");
+}
+
+#[test]
+fn approvals_are_ignored_when_the_api_commits_differ_from_the_fetched_commits() {
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    fake.respond(
+        "GET",
+        PR_COMMITS,
+        200,
+        &[],
+        br#"[{"sha":"stale","author":{"login":"writer"}}]"#,
+    );
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(out.status.success(), "{out:?}");
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(approvals, json!({"authors":[],"reviews":[]}));
+    assert!(
+        !serde_json::from_value::<blackhole_check::verdict::Approvals>(approvals)
+            .unwrap()
+            .approved(&head)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Approvals were ignored because the pull request commit list could not be confirmed.\n"
+    );
+}
+
+#[test]
+fn approvals_are_ignored_when_the_commit_author_has_no_login() {
+    assert_unlinked_commit("author");
+}
+
+#[test]
+fn approvals_are_ignored_when_the_committer_has_no_login() {
+    assert_unlinked_commit("committer");
+}
+
+fn assert_unlinked_commit(role: &str) {
+    let (runner, head) = approval_runner();
+    let fake = approval_api(&head);
+    let mut commit = json!({"sha":head,"author":{"login":"writer"},"committer":{"login":"writer"}});
+    commit[role]["login"] = Value::Null;
+    fake.respond(
+        "GET",
+        PR_COMMITS,
+        200,
+        &[],
+        json!([commit]).to_string().as_bytes(),
+    );
+    let out = collect_approvals(runner.path(), &fake, &head);
+    assert!(out.status.success(), "{out:?}");
+    let approvals: Value =
+        serde_json::from_slice(&fs::read(runner.path().join("approvals.json")).unwrap()).unwrap();
+    assert_eq!(approvals, json!({"authors":[],"reviews":[]}));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "Approvals were ignored because a commit author is not linked to a GitHub account.\n"
+    );
+    assert!(fake.calls().iter().all(|call| !call.ends_with(PR_REVIEWS)));
+}
+
+#[test]
+fn keeps_an_identical_workflow_and_refuses_a_different_one() {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let path = root.join(WORKFLOW);
+    let generated = fs::read(&path).unwrap();
+    assert!(
+        init(root, true)
+            .lines()
+            .any(|line| line == format!("Kept {WORKFLOW}"))
+    );
+    assert_eq!(fs::read(&path).unwrap(), generated);
+
+    let fresh = repo();
+    let root = fresh.path();
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    let edited = String::from_utf8(generated.clone()).unwrap().replacen(
+        "pull_request_target",
+        "pull_request",
+        1,
+    );
+    fs::write(root.join(WORKFLOW), &edited).unwrap();
+    let message = init(root, false);
+    assert_eq!(message.lines().count(), 1);
+    assert!(message.contains(WORKFLOW), "{message}");
+    assert!(message.contains("first at line 5"), "{message}");
+    assert!(message.contains("remove it and rerun init"), "{message}");
+    assert_eq!(fs::read_to_string(root.join(WORKFLOW)).unwrap(), edited);
+    for name in HOOK_FILES
+        .into_iter()
+        .chain(["blackhole.toml", ".blackhole/ledger"])
+    {
+        assert!(!root.join(name).exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_truncated_workflow_reports_the_first_missing_line() {
+    let generated = generated_workflow();
+    let prefix: Vec<_> = generated
+        .split_inclusive(|&byte| byte == b'\n')
+        .take(2)
+        .flatten()
+        .copied()
+        .collect();
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    fs::write(root.join(WORKFLOW), prefix).unwrap();
+    let message = init(root, false);
+    assert!(message.contains("first at line 3;"), "{message}");
+}
+
+const SCOPES: (&str, &str) = ("X-Oauth-Scopes", "repo, read:org");
+const RULES: &str = "repos/owner/repo/rules/branches/main?per_page=100&page=1";
+const CLASSIC: &str = "repos/owner/repo/branches/main/protection";
+const CONTENTS: &str = "repos/owner/repo/contents/.github/workflows/blackhole.yml?ref=main";
+
+fn generated_workflow() -> Vec<u8> {
+    let dir = repo();
+    init(dir.path(), true);
+    fs::read(dir.path().join(WORKFLOW)).unwrap()
+}
+
+fn rules(checks: &Value) -> Vec<u8> {
+    json!([
+        {"type":"pull_request","ruleset_source_type":"Repository","ruleset_id":7,"parameters":{}},
+        {"type":"required_status_checks","ruleset_id":7,"parameters":{"strict_required_status_checks_policy":true,"required_status_checks":checks}}
+    ])
+    .to_string()
+    .into_bytes()
+}
+
+// Canned answers of a repository whose only ruleset requires pull requests and the blackhole check from GitHub Actions.
+fn guarded_github(workflow: &[u8]) -> gh::FakeGh {
+    let fake = gh::FakeGh::new();
+    fake.respond("GET", "user", 200, &[SCOPES], br#"{"login":"agent"}"#);
+    fake.respond(
+        "GET",
+        "repos/owner/repo",
+        200,
+        &[],
+        br#"{"default_branch":"main","permissions":{"admin":false,"push":true}}"#,
+    );
+    fake.respond("GET", CONTENTS, 200, &[], workflow);
+    let dir = repo();
+    init(dir.path(), true);
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        fake.respond(
+            "GET",
+            &format!("repos/owner/repo/contents/{path}?ref=main"),
+            200,
+            &[],
+            &fs::read(dir.path().join(path)).unwrap(),
+        );
+    }
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    fake.respond("GET", RULES, 200, &[], &rules(&checks));
+    fake.respond(
+        "GET",
+        "repos/owner/repo/rulesets/7",
+        200,
+        &[],
+        br#"{"id":7,"name":"main rules","current_user_can_bypass":"never"}"#,
+    );
+    fake.respond("GET", CLASSIC, 404, &[], br#"{"message":"Not Found"}"#);
+    fake
+}
+
+fn guarded_verdict(fake: &gh::FakeGh, path: Option<std::ffi::OsString>) -> (String, i32) {
+    let dir = repo();
+    let root = dir.path();
+    common::git(
+        root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
+    )
+    .unwrap();
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .arg("init")
+        .env("PATH", path.unwrap_or_else(|| fake.path()))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.starts_with("Wrote blackhole.toml\n"), "{stdout}");
+    assert!(stdout.contains(&format!("Wrote {WORKFLOW}\n")), "{stdout}");
+    for call in fake.calls() {
+        assert!(
+            call.starts_with("api --hostname github.com --method GET -i "),
+            "{call}"
+        );
+        assert!(!call.contains(" -f ") && !call.contains(" -F "), "{call}");
+    }
+    (
+        stdout.lines().next_back().unwrap().to_owned(),
+        out.status.code().unwrap(),
+    )
+}
+
+#[test]
+fn the_guard_requires_both_review_workflows_on_the_default_branch() {
+    for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
+        let fake = guarded_github(&generated_workflow());
+        let endpoint = format!("repos/owner/repo/contents/{path}?ref=main");
+        fake.respond("GET", &endpoint, 404, &[], b"");
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!("not guarded: {path} is not on main (commit it and merge it into main)"),
+                1,
+            )
+        );
+        fake.respond("GET", &endpoint, 200, &[], b"name: different");
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: {path} on main differs from the one init writes (merge the generated file into main)"
+                ),
+                1,
+            )
+        );
+    }
+}
+
+#[test]
+fn guarded_repository_reads_as_guarded_and_suggests_the_canary() {
+    let fake = guarded_github(&generated_workflow());
+    let dir = repo();
+    let root = dir.path();
+    common::git(
+        root,
+        &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+    )
+    .unwrap();
+    let out = agent::run_input(
+        common::command(env!("CARGO_BIN_EXE_blackhole"))
+            .current_dir(root)
+            .arg("init")
+            .env("PATH", fake.path()),
+        b"",
+        0,
+        false,
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines[lines.len() - 1], "guarded");
+    assert!(
+        lines[lines.len() - 2].contains("blackhole canary"),
+        "{stdout}"
+    );
+    // Rulesets answered every condition, so the admin-only classic protection was never asked for.
+    assert!(!fake.calls().iter().any(|call| call.ends_with(CLASSIC)));
+    assert_eq!(fake.calls().len(), 7);
+}
+
+enum Canned {
+    Respond(
+        &'static str,
+        u16,
+        Vec<(&'static str, &'static str)>,
+        Vec<u8>,
+    ),
+    Fail(&'static str, i32, &'static str),
+}
+use Canned::{Fail, Respond};
+
+fn assert_verdicts(cases: Vec<(&str, i32, Vec<Canned>)>) {
+    let workflow = generated_workflow();
+    for (line, code, canned) in cases {
+        let fake = guarded_github(&workflow);
+        for answer in canned {
+            match answer {
+                Respond(endpoint, status, headers, body) => {
+                    fake.respond("GET", endpoint, status, &headers, &body);
+                }
+                Fail(endpoint, exit, stderr) => fake.fail("GET", endpoint, exit, stderr),
+            }
+        }
+        assert_eq!(guarded_verdict(&fake, None), (line.to_owned(), code));
+    }
+}
+
+fn body(text: &str) -> Vec<u8> {
+    text.as_bytes().to_vec()
+}
+
+#[test]
+fn unreadable_github_is_not_guarded() {
+    assert_verdicts(vec![
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)",
+            1,
+            vec![Fail(
+                "user",
+                4,
+                "To get started with GitHub CLI, please run:  gh auth login\n",
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)",
+            1,
+            vec![Respond(
+                "user",
+                401,
+                vec![],
+                body(r#"{"message":"Bad credentials"}"#),
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (error connecting to api.github.com; rerun init once GitHub answers)",
+            75,
+            vec![Fail(
+                "user",
+                1,
+                "error connecting to api.github.com\ncheck your internet connection\n",
+            )],
+        ),
+        (
+            "not guarded: cannot read GitHub (repos/owner/repo/rules/branches/main?per_page=100&page=1 answered HTTP 502; rerun init once GitHub answers)",
+            75,
+            vec![Respond(RULES, 502, vec![], vec![])],
+        ),
+        (
+            "not guarded: cannot read owner/repo on GitHub (sign gh in as an account that can read it)",
+            1,
+            vec![Respond(
+                "repos/owner/repo",
+                404,
+                vec![],
+                body(r#"{"message":"Not Found"}"#),
+            )],
+        ),
+    ]);
+    let missing = git_only_path();
+    let fake = guarded_github(&generated_workflow());
+    assert_eq!(
+        guarded_verdict(&fake, Some(missing.path().into())),
+        (
+            "not guarded: cannot read GitHub (install and sign in to gh)".to_owned(),
+            1
+        )
+    );
+    assert_eq!(fake.calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_malformed_rules_list_cannot_establish_a_guard() {
+    let workflow = generated_workflow();
+    for answer in [b"{}".as_slice(), b"invalid JSON"] {
+        let fake = guarded_github(&workflow);
+        fake.respond("GET", RULES, 200, &[], answer);
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: cannot read GitHub ({RULES} returned a malformed rules list; rerun init once GitHub answers)"
+                ),
+                75,
+            )
+        );
+    }
+}
+
+#[test]
+fn a_later_page_can_require_the_blackhole_check() {
+    let fake = guarded_github(&generated_workflow());
+    let second = RULES.replace("&page=1", "&page=2");
+    let first = json!(vec![json!({"type":"non_fast_forward","ruleset_id":7}); 100]);
+    fake.respond("GET", RULES, 200, &[], first.to_string().as_bytes());
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    fake.respond("GET", &second, 200, &[], &rules(&checks));
+    assert_eq!(guarded_verdict(&fake, None), ("guarded".to_owned(), 0));
+    assert!(fake.calls().iter().any(|call| call.ends_with(&second)));
+}
+
+#[test]
+fn a_malformed_rule_on_a_later_page_cannot_establish_a_guard() {
+    let fake = guarded_github(&generated_workflow());
+    let second = RULES.replace("&page=1", "&page=2");
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    let mut first: Vec<Value> = serde_json::from_slice(&rules(&checks)).unwrap();
+    first.resize(100, json!({"type":"non_fast_forward","ruleset_id":7}));
+    fake.respond("GET", RULES, 200, &[], json!(first).to_string().as_bytes());
+    fake.respond("GET", &second, 200, &[], b"[null]");
+    assert_eq!(
+        guarded_verdict(&fake, None),
+        (
+            format!(
+                "not guarded: cannot read GitHub ({second} returned a malformed rules list; rerun init once GitHub answers)"
+            ),
+            75
+        )
+    );
+}
+
+#[test]
+fn a_rule_missing_a_required_field_cannot_establish_a_guard() {
+    let fake = guarded_github(&generated_workflow());
+    let checks = json!([{"context":"blackhole","integration_id":15368}]);
+    let first: Vec<Value> = serde_json::from_slice(&rules(&checks)).unwrap();
+    for invalid in [
+        json!({"type":"non_fast_forward"}),
+        json!({"type":"non_fast_forward","ruleset_id":-1}),
+        json!({"ruleset_id":7}),
+        json!({"type":"required_status_checks","ruleset_id":7}),
+        json!({"type":"required_status_checks","ruleset_id":7,"parameters":{"required_status_checks":[null]}}),
+    ] {
+        let mut entries = first.clone();
+        entries.push(invalid.clone());
+        fake.respond(
+            "GET",
+            RULES,
+            200,
+            &[],
+            json!(entries).to_string().as_bytes(),
+        );
+        assert_eq!(
+            guarded_verdict(&fake, None),
+            (
+                format!(
+                    "not guarded: cannot read GitHub ({RULES} returned a malformed rules list; rerun init once GitHub answers)"
+                ),
+                75
+            ),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn each_missing_branch_rule_is_the_one_final_line() {
+    let only = |kind: &str| {
+        json!([{"type":kind,"ruleset_id":7,"parameters":{"required_status_checks":[{"context":"blackhole","integration_id":15368}]}}])
+            .to_string()
+            .into_bytes()
+    };
+    let unprotected = || {
+        Respond(
+            CLASSIC,
+            404,
+            vec![],
+            body(r#"{"message":"Branch not protected"}"#),
+        )
+    };
+    assert_verdicts(vec![
+        (
+            "not guarded: .github/workflows/blackhole.yml is not on main (commit it and merge it into main)",
+            1,
+            vec![Respond(
+                CONTENTS,
+                404,
+                vec![],
+                body(r#"{"message":"Not Found"}"#),
+            )],
+        ),
+        (
+            "not guarded: .github/workflows/blackhole.yml on main differs from the one init writes (merge the generated file into main)",
+            1,
+            vec![Respond(CONTENTS, 200, vec![], body("name: blackhole\n"))],
+        ),
+        (
+            "not guarded: main does not require pull requests (add a ruleset for main that requires a pull request before merging)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], only("required_status_checks")),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: cannot read the branch protection of main without admin rights (require pull requests and the blackhole check in a ruleset for main, which gh can read)",
+            1,
+            vec![Respond(RULES, 200, vec![], body("[]"))],
+        ),
+        (
+            "not guarded: main does not require the blackhole check (require the blackhole check from GitHub Actions in a ruleset for main)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], only("pull_request")),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: main does not require branches to be up to date before merging (require it for the blackhole check on main, so a green judged on an older main cannot merge)",
+            1,
+            vec![
+                Respond(
+                    RULES,
+                    200,
+                    vec![],
+                    body(
+                        r#"[{"type":"pull_request","ruleset_id":7,"parameters":{}},{"type":"required_status_checks","ruleset_id":7,"parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"blackhole","integration_id":15368}]}}]"#,
+                    ),
+                ),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: main does not require branches to be up to date before merging (require it for the blackhole check on main, so a green judged on an older main cannot merge)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], body("[]")),
+                Respond(
+                    CLASSIC,
+                    200,
+                    vec![],
+                    body(
+                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"strict":false,"checks":[{"context":"blackhole","app_id":15368}]}}"#,
+                    ),
+                ),
+            ],
+        ),
+        (
+            "not guarded: main accepts the blackhole check from a source other than GitHub Actions (set the check's source to GitHub Actions)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], rules(&json!([{"context":"blackhole"}]))),
+                unprotected(),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn each_credential_that_can_get_past_the_judge_is_not_guarded() {
+    assert_verdicts(vec![
+        (
+            "not guarded: gh is signed in as agent, an admin of owner/repo who can bypass or change the rules (sign gh in as an account without admin rights)",
+            1,
+            // Classic protection alone, which GitHub shows to an admin.
+            vec![
+                Respond(RULES, 200, vec![], body("[]")),
+                Respond(
+                    CLASSIC,
+                    200,
+                    vec![],
+                    body(
+                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"strict":true,"checks":[{"context":"blackhole","app_id":15368}]}}"#,
+                    ),
+                ),
+                Respond(
+                    "repos/owner/repo",
+                    200,
+                    vec![],
+                    body(r#"{"default_branch":"main","permissions":{"admin":true}}"#),
+                ),
+            ],
+        ),
+        (
+            "not guarded: gh is signed in as agent, who can bypass ruleset main rules (take agent and its teams and roles off the ruleset's bypass list)",
+            1,
+            vec![Respond(
+                "repos/owner/repo/rulesets/7",
+                200,
+                vec![],
+                body(r#"{"name":"main rules","current_user_can_bypass":"pull_requests_only"}"#),
+            )],
+        ),
+        (
+            "not guarded: gh's token holds the workflow scope, so it can rewrite the judge (run gh auth refresh --remove-scopes workflow)",
+            1,
+            vec![Respond(
+                "user",
+                200,
+                vec![("X-Oauth-Scopes", "repo, workflow")],
+                body(r#"{"login":"agent"}"#),
+            )],
+        ),
+        (
+            "not guarded: GitHub does not reveal the rights of gh's token, so it may rewrite workflows (sign gh in with gh auth login, whose token lists its scopes)",
+            1,
+            vec![Respond("user", 200, vec![], body(r#"{"login":"agent"}"#))],
+        ),
+    ]);
+}
+
+// Every entry under the root except `.git`, with directories, so an empty directory left behind shows up.
+fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    let mut entries = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path == root.join(".git") {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                pending.push(path);
+                entries.push((relative, None));
+            } else {
+                entries.push((relative, Some(fs::read(&path).unwrap())));
+            }
+        }
+    }
+    entries.sort();
+    entries
+}
+
+#[test]
+fn committing_and_reverting_the_adoption_restores_every_byte() {
+    let dir = repo();
+    let root = dir.path();
+    let numbers = "[1E2, -0.0, 1.50, 12345678901234567890123]";
+    for (name, doc) in HOOK_FILES.into_iter().zip([
+        format!("{{\n\t\"n\": {numbers},\"s\":\"\\u00e9\"\r\n}}"),
+        format!("{{\"description\":\"\\u00e9\",\r\n\t\"hooks\": {{\"Later\": {numbers}}}}}"),
+    ]) {
+        let path = root.join(name);
+        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::write(path, doc).unwrap();
+    }
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("app.py"), "print(1)\n").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "before"]).unwrap();
+    let before = snapshot(root);
+    let config = fs::read(root.join(".git/config")).unwrap();
+    init(root, true);
+    let written = common::git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        written,
+        "M .claude/settings.json\n M .codex/hooks.json\n?? .blackhole/ledger\n?? .github/workflows/blackhole-rerun.yml\n?? .github/workflows/blackhole-review.yml\n?? .github/workflows/blackhole.yml\n?? blackhole.toml"
+    );
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "adopt blackhole"]).unwrap();
+    common::git(root, &["revert", "--no-edit", "HEAD"]).unwrap();
+    assert_eq!(snapshot(root), before);
+    assert_eq!(
+        common::git(
+            root,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all"
+            ]
+        )
+        .unwrap(),
+        ""
+    );
+    assert_eq!(fs::read(root.join(".git/config")).unwrap(), config);
+}
+
+#[test]
+fn a_path_git_ignores_stops_init_before_any_write() {
+    for (rule, path) in [
+        ("blackhole.toml", "blackhole.toml"),
+        (".claude/", ".claude/settings.json"),
+        ("*.json", ".claude/settings.json"),
+        (".github", WORKFLOW),
+        (REVIEW_WORKFLOW, REVIEW_WORKFLOW),
+        (RERUN_WORKFLOW, RERUN_WORKFLOW),
+        ("/.blackhole/*", ".blackhole/ledger"),
+    ] {
+        let dir = repo();
+        let root = dir.path();
+        fs::write(root.join(".gitignore"), format!("{rule}\n")).unwrap();
+        let message = init(root, false);
+        assert_eq!(
+            message,
+            format!(
+                "blackhole: git ignores {path}, so a commit would leave it out (remove the rule that ignores it, then rerun init)\n"
+            ),
+            "{rule}"
+        );
+        assert_eq!(
+            snapshot(root),
+            [(".gitignore".into(), Some(format!("{rule}\n").into_bytes()))],
+            "{rule}"
+        );
+    }
+    // Info/exclude is one of git's ignore sources too.
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".git/info")).unwrap();
+    fs::write(root.join(".git/info/exclude"), ".codex\n").unwrap();
+    assert!(init(root, false).contains("git ignores .codex/hooks.json"));
+}
+
+#[test]
+fn an_ignore_rule_does_not_hide_tracked_settings() {
+    let dir = repo();
+    let root = dir.path();
+    fs::create_dir(root.join(".claude")).unwrap();
+    fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    fs::write(root.join(".gitignore"), ".claude/\n").unwrap();
+    init(root, true);
+}
+
+// The shell of one step of the generated judge workflow, as GitHub runs it.
+#[cfg(target_os = "linux")]
+fn workflow_step(name: &str) -> String {
+    let workflow = String::from_utf8(generated_workflow()).unwrap();
+    let start = workflow.find(&format!("      - name: {name}\n")).unwrap();
+    let mut lines = workflow[start..]
+        .lines()
+        .skip_while(|line| *line != "        run: |");
+    lines.next().unwrap();
+    let mut script = lines
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| line.get(10..).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    script.push('\n');
+    script
+}
+
+// A GitHub stand-in served over file://, with a default branch, a release branch and pull request 5 into the release branch.
+#[cfg(target_os = "linux")]
+struct Judged {
+    server: tempfile::TempDir,
+    runner: tempfile::TempDir,
+    release: String,
+    head: String,
+}
+
+#[cfg(target_os = "linux")]
+fn judged_repository() -> Judged {
+    let server = tempdir().unwrap();
+    let source = server.path().join("work");
+    fs::create_dir(&source).unwrap();
+    common::git(&source, &["init", "-q", "-b", "main"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "main"]).unwrap();
+    common::git(&source, &["checkout", "-qb", "release"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "release"]).unwrap();
+    let release = common::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    common::git(&source, &["commit", "--allow-empty", "-qm", "change"]).unwrap();
+    let head = common::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    common::git(&source, &["update-ref", "refs/pull/5/head", &head]).unwrap();
+    common::git(&source, &["update-ref", "refs/heads/release", &release]).unwrap();
+    common::git(
+        server.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            "--mirror",
+            "work",
+            "owner/repo.git",
+        ],
+    )
+    .unwrap();
+    Judged {
+        server,
+        runner: tempdir().unwrap(),
+        release,
+        head,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_step(judged: &Judged, name: &str, env: &[(&str, &str)]) -> std::process::Output {
+    common::command("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail", "-c"])
+        .arg(workflow_step(name))
+        .env("RUNNER_TEMP", judged.runner.path())
+        .env("GITHUB_ENV", judged.runner.path().join("github_env"))
+        .env(
+            "GITHUB_SERVER_URL",
+            format!("file://{}", judged.server.path().display()),
+        )
+        .env("GITHUB_REPOSITORY", "owner/repo")
+        .env("GH_TOKEN", "token")
+        .env("PR_NUMBER", "5")
+        .env("HEAD_SHA", &judged.head)
+        .env("BASE_REF", "release")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_judge_compares_against_the_tip_of_the_pull_requests_own_base_branch() {
+    let judged = judged_repository();
+    let fetched = run_step(
+        &judged,
+        "Fetch the base and head commits without checking them out",
+        &[],
+    );
+    assert!(fetched.status.success(), "{fetched:?}");
+    let exported = fs::read_to_string(judged.runner.path().join("github_env")).unwrap();
+    assert_eq!(exported, format!("BASE_SHA={}\n", judged.release));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_judge_reports_green_only_while_the_base_tip_is_the_judged_one() {
+    let judged = judged_repository();
+    let bin = judged.runner.path().join("blackhole/node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir(judged.runner.path().join("judge.git")).unwrap();
+    let fake = bin.join("blackhole");
+    fs::write(&fake, "#!/bin/sh\nexit \"$FAKE_CODE\"\n").unwrap();
+    fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // gh answers with the pull request's state, base branch and head as the run sees them at the end.
+    let shims = tempdir().unwrap();
+    let gh = shims.path().join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\ncase \" $* \" in *\" repos/owner/repo/pulls/5 \"*) printf '%s\\n' \"$FAKE_PULL\";; *) exit 1;; esac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        shims.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let moved = "0".repeat(40);
+    let current = format!("open\trelease\t{}", judged.head);
+    let retargeted = format!("open\tmain\t{}", judged.head);
+    let pushed = format!("open\trelease\t{moved}");
+    let closed = format!("closed\trelease\t{}", judged.head);
+    for (code, base, pull, status, green) in [
+        ("0", judged.release.as_str(), current.as_str(), 0, true),
+        ("0", moved.as_str(), current.as_str(), 1, false),
+        ("1", judged.release.as_str(), current.as_str(), 1, false),
+        ("0", judged.release.as_str(), retargeted.as_str(), 1, false),
+        ("0", judged.release.as_str(), pushed.as_str(), 1, false),
+        ("0", judged.release.as_str(), closed.as_str(), 1, false),
+    ] {
+        let out = run_step(
+            &judged,
+            "Judge the head",
+            &[
+                ("FAKE_CODE", code),
+                ("BASE_SHA", base),
+                ("FAKE_PULL", pull),
+                ("PATH", &path),
+            ],
+        );
+        let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+        assert_eq!(out.status.code(), Some(status), "{base} {pull}: {out:?}");
+        assert_eq!(
+            stdout.contains("blackhole ci: green"),
+            green,
+            "{base} {pull}: {stdout}"
+        );
+        if code == "0" && !green {
+            assert!(stdout.contains("changed while the judge ran"), "{stdout}");
+        }
+    }
 }

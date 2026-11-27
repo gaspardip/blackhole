@@ -1,4 +1,6 @@
+mod guard;
 mod settings_json;
+pub(crate) mod workflow;
 
 use settings_json::{Json, Object};
 use std::{
@@ -9,6 +11,16 @@ use std::{
 const INVALID_HOOKS: &str = "unexpected hooks configuration";
 const CLAUDE: &str = ".claude/settings.json";
 const CODEX: &str = ".codex/hooks.json";
+// Every file init can write, so a revert of the adoption commit restores each one.
+const ADOPTED: [&str; 7] = [
+    "blackhole.toml",
+    CLAUDE,
+    CODEX,
+    workflow::PATH,
+    workflow::REVIEW_PATH,
+    workflow::RERUN_PATH,
+    crate::files::LEDGER_PATH,
+];
 const PREVIOUS_ROOT: &str = "git --no-lazy-fetch rev-parse --show-toplevel";
 // Match the CLI's Git environment without changing the environment of the hook itself.
 const ISOLATED_ROOT: &str = r#"names=$(command -p env | LC_ALL=C command -p sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p') || exit
@@ -19,15 +31,28 @@ $names
 BLACKHOLE_GIT_ENV
 exec git --no-replace-objects --no-lazy-fetch rev-parse --show-toplevel"#;
 
-/// Installs project hooks and creates the initial ledger.
+/// Installs project hooks, the judge workflows and the initial ledger, then reports whether GitHub guards the repository.
+///
+/// Returns 0 when guarded, 1 when a repository setting is missing and 75 when GitHub cannot be read.
 ///
 /// # Errors
 /// Reports invalid settings, repository discovery and filesystem failures.
-pub fn run(output: &mut impl Write) -> io::Result<()> {
+pub fn run(output: &mut impl Write) -> io::Result<u8> {
     let root = crate::files::root()?;
     let _lock = crate::files::lock(&root)?;
-    let claude = settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?;
-    let codex = settings(&root, CODEX, "^apply_patch$")?;
+    let judge = workflow::content();
+    let workflows = [
+        (workflow::PATH, judge.as_bytes()),
+        (workflow::REVIEW_PATH, workflow::REVIEW.as_bytes()),
+        (workflow::RERUN_PATH, workflow::RERUN.as_bytes()),
+    ];
+    let settings = [
+        settings(&root, CLAUDE, "^(Edit|Write|MultiEdit|NotebookEdit)$")?,
+        settings(&root, CODEX, "^apply_patch$")?,
+        judge_workflow(&root, workflows[0])?,
+        judge_workflow(&root, workflows[1])?,
+        judge_workflow(&root, workflows[2])?,
+    ];
     let config = root.join("blackhole.toml");
     let existing = crate::files::policy(&config)?;
     // A malformed ledger or objections file would turn every hook red, so it stops init before anything is written.
@@ -36,15 +61,17 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
         &crate::policy(policy.entered, "objections")?.unwrap_or_default(),
         crate::objections::Date::today()?,
     )?;
+    unignored(&root)?;
     install(&root, "blackhole.toml", existing.is_none().then_some(&[]))?;
-    let created =
-        claude.install_then(&root, || codex.install_then(&root, || first_ledger(&root)))?;
+    let created = install_settings(&root, &settings)?;
     let mut report = Vec::new();
-    for (path, wrote) in [
-        ("blackhole.toml", existing.is_none()),
-        (CLAUDE, claude.merged.is_some()),
-        (CODEX, codex.merged.is_some()),
-    ] {
+    let written = settings
+        .iter()
+        .map(|file| (file.path, file.merged.is_some()));
+    for (path, wrote) in [("blackhole.toml", existing.is_none())]
+        .into_iter()
+        .chain(written)
+    {
         writeln!(report, "{} {path}", if wrote { "Wrote" } else { "Kept" })?;
     }
     writeln!(
@@ -61,13 +88,32 @@ pub fn run(output: &mut impl Write) -> io::Result<()> {
     }
     writeln!(
         report,
-        "CI is not set up yet. Hooks give early warning. Shell edits bypass edit hooks. blackhole ci is the judge."
+        "Hooks give early warning. Shell edits bypass edit hooks.\nThe judge is the blackhole check that {} runs once it is on the default branch.",
+        workflow::PATH
     )?;
     writeln!(
         report,
         "The judge holds only when the agent has weaker credentials than a person.\nKeep admin, bypass, workflow permissions and the approving account out of the agent's reach."
     )?;
-    output.write_all(&report)
+    writeln!(
+        report,
+        "The check refreshes on review events on a best-effort basis, and a branch rule requiring one approval of the latest push makes a dismissed approval block the merge natively."
+    )?;
+    output.write_all(&report)?;
+    match guard::verdict(&root, &workflows) {
+        Ok(()) => {
+            writeln!(
+                output,
+                "Run blackhole canary to watch the judge stop scripted forgeries in a draft pull request."
+            )?;
+            writeln!(output, "guarded")?;
+            Ok(0)
+        }
+        Err(stop) => {
+            writeln!(output, "not guarded: {}", stop.reason)?;
+            Ok(stop.code)
+        }
+    }
 }
 
 fn parts(path: &str) -> (&str, &str) {
@@ -116,6 +162,41 @@ fn settings<'a>(root: &Path, path: &'a str, matcher: &str) -> io::Result<Setting
         })
     };
     read().map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
+}
+
+fn install_settings(root: &Path, files: &[Settings<'_>]) -> io::Result<Option<usize>> {
+    match files.split_first() {
+        Some((file, rest)) => file.install_then(root, || install_settings(root, rest)),
+        None => first_ledger(root),
+    }
+}
+
+fn judge_workflow(
+    root: &Path,
+    (path, wanted): (&'static str, &[u8]),
+) -> io::Result<Settings<'static>> {
+    let (dir, name) = parts(path);
+    let previous = crate::policy(crate::enter(root, dir, false)?, name)?;
+    let merged = match &previous {
+        None => Some(wanted.to_vec()),
+        Some(existing) if existing == wanted => None,
+        Some(existing) => {
+            let line = 1 + existing
+                .split_inclusive(|&b| b == b'\n')
+                .zip(wanted.split_inclusive(|&b| b == b'\n'))
+                .take_while(|(a, b)| a == b)
+                .count();
+            return Err(io::Error::other(format!(
+                "{path} differs from the workflow blackhole {} writes, first at line {line}; remove it and rerun init",
+                env!("CARGO_PKG_VERSION")
+            )));
+        }
+    };
+    Ok(Settings {
+        path,
+        previous,
+        merged,
+    })
 }
 
 fn optional(value: Option<&Json>, valid: impl FnOnce(&Json) -> bool) -> bool {
@@ -331,8 +412,31 @@ fn install(root: &Path, path: &str, data: Option<&[u8]>) -> io::Result<()> {
         return Ok(());
     };
     let (dir, name) = parts(path);
-    crate::enter(root, dir, true)?;
+    // Each level of `.github/workflows` can be missing.
+    for (end, _) in dir.match_indices('/').chain([(dir.len(), "")]) {
+        crate::enter(root, &dir[..end], true)?;
+    }
     crate::replace(name, data)
+}
+
+// A file git ignores stays out of the adoption commit, so the judge never reads it and a revert leaves it behind.
+fn unignored(root: &Path) -> io::Result<()> {
+    let out = crate::git::command()
+        .current_dir(root)
+        .args(["check-ignore", "--"])
+        .args(ADOPTED)
+        .output()?;
+    match out.status.code() {
+        Some(1) => Ok(()),
+        Some(0) => {
+            let path = String::from_utf8_lossy(&out.stdout);
+            let path = path.lines().next().unwrap_or_default();
+            Err(io::Error::other(format!(
+                "git ignores {path}, so a commit would leave it out (remove the rule that ignores it, then rerun init)"
+            )))
+        }
+        _ => Err(crate::git::failure(&out)),
+    }
 }
 
 fn first_ledger(root: &Path) -> io::Result<Option<usize>> {

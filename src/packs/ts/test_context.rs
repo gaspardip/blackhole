@@ -19,7 +19,7 @@ pub(super) fn test_file(ctx: &TsCtx<'_>) -> bool {
     test_file_path(ctx.path)
 }
 
-pub(super) fn test_file_path(path: &str) -> bool {
+pub(crate) fn test_file_path(path: &str) -> bool {
     let mut parts = path.rsplit(['/', '\\']);
     let file = parts.next().unwrap_or_default();
     file.split('.').any(|part| {
