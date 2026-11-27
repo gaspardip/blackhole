@@ -1,6 +1,6 @@
 mod guard;
 mod settings_json;
-mod workflow;
+pub(crate) mod workflow;
 
 use settings_json::{Json, Object};
 use std::{

@@ -1,3 +1,4 @@
+pub mod canary;
 pub mod ci;
 pub mod config;
 mod coverage;

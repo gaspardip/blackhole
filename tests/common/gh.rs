@@ -7,6 +7,7 @@ use std::{
 use tempfile::{TempDir, tempdir};
 
 /// A `gh` on PATH that records every call and answers from canned responses keyed by method and endpoint.
+/// An endpoint registered with `SHA` or `blackhole-canary-N` answers for any commit SHA or canary branch.
 pub struct FakeGh {
     dir: TempDir,
 }
@@ -20,8 +21,10 @@ for arg; do
   [ "$prev" = --method ] && method=$arg
   prev=$arg
 done
-key=$(printf '%s %s' "$method" "$last" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_')
-file="$dir/responses/$key"
+key() { printf '%s %s' "$method" "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_'; }
+file="$dir/responses/$(key "$last")"
+# A commit SHA or a canary branch name in the endpoint can be answered by one response for all of them.
+[ -f "$file" ] || file="$dir/responses/$(key "$(printf '%s' "$last" | sed -E 's/[0-9a-f]{40}/SHA/g; s/blackhole-canary-[0-9]+/blackhole-canary-N/g')")"
 if [ ! -f "$file" ]; then
   echo "fake gh: no response for $method $last" >&2
   exit 1
