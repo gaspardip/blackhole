@@ -1146,3 +1146,62 @@ fn post_edit_validates_targets_before_listing() {
     let broken = hook(root, "post-edit", &outside, 2);
     assert!(broken.starts_with(b"blackhole: blackhole.toml:"));
 }
+
+// A git that the machine stops with a signal never answered, whatever the checkout holds.
+#[cfg(unix)]
+fn git_killed_on(dir: &Path, subcommand: &str, once: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        common::command("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let state = dir.join("killed");
+    let guard = if once {
+        format!(
+            "[ -e '{0}' ] || {{ : > '{0}'; kill -9 $$; }}",
+            state.display()
+        )
+    } else {
+        "kill -9 $$".to_owned()
+    };
+    let shim = dir.join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" {subcommand} \"*) {guard};; esac\nexec '{}' \"$@\"\n",
+            real.trim_end()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn check_keeps_no_verdict_for_a_stopped_machine() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("a.ts"), "export const a = 1;\n").unwrap();
+    let shims = tempdir().unwrap();
+    git_killed_on(shims.path(), "ls-files", false);
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("PATH", shims.path())
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    // A parser thread the system cannot start is not a finding in the file.
+    let out = common::command("sh")
+        .current_dir(root)
+        .args(["-c", "ulimit -v 700000 && exec \"$0\" check"])
+        .arg(env!("CARGO_BIN_EXE_blackhole"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{out:?}");
+    assert_eq!(out.stdout, b"", "{out:?}");
+}

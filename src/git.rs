@@ -24,6 +24,10 @@ pub(crate) fn command() -> Command {
     command
 }
 fn failure(out: &Output) -> io::Error {
+    // A git the system stopped never judged the checkout.
+    if out.status.code().is_none() {
+        return crate::no_verdict(format!("git did not finish: {}", out.status));
+    }
     io::Error::other(
         String::from_utf8_lossy(&out.stderr)
             .lines()

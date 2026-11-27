@@ -393,7 +393,8 @@ pub(crate) fn parser_thread<T: Send>(
     std::thread::scope(|scope| {
         Ok(std::thread::Builder::new()
             .stack_size(STACK_BYTES)
-            .spawn_scoped(scope, f)?
+            .spawn_scoped(scope, f)
+            .map_err(|e| crate::no_verdict(format!("cannot start parser thread: {e}")))?
             .join())
     })
 }
@@ -495,6 +496,9 @@ pub(crate) fn test_counts(
     }
 }
 
+// The outer error is the machine's; this one is the file's and becomes a finding.
+type Parsed<'r> = Result<(Vec<Hit<'r>>, u64), (usize, String)>;
+
 fn parsed_hits<'r>(
     rules: &'r [Rule],
     path: &str,
@@ -502,16 +506,17 @@ fn parsed_hits<'r>(
     kind: SourceType,
     settings: Settings,
     repository: Option<&RepoCtx<'_, '_>>,
-) -> Result<(Vec<Hit<'r>>, u64), (usize, String)> {
-    source.encoding()?;
-    parser_thread(|| {
+) -> std::io::Result<Parsed<'r>> {
+    if let Err(error) = source.encoding() {
+        return Ok(Err(error));
+    }
+    let parsed = parser_thread(|| {
         let arena = Allocator::default();
         let mut ts = parse(&arena, path, source.text(), kind)?;
         let hits = collect(rules, path, source, settings, repository, Ok(Some(&mut ts)));
         Ok((hits, ts.work.get()))
-    })
-    .map_err(|e| (0, format!("Cannot start parser thread: {e}")))?
-    .map_err(|_| (0, "Parser panicked".to_owned()))?
+    })?;
+    Ok(parsed.unwrap_or_else(|_| Err((0, "Parser panicked".to_owned()))))
 }
 
 pub(crate) fn sort_findings(result: &mut [Finding]) {
@@ -525,7 +530,12 @@ pub(crate) struct Scanner<'a, 'source> {
 }
 
 impl Scanner<'_, '_> {
-    pub(crate) fn file(&self, path: &str, bytes: &[u8], result: &mut Vec<Finding>) -> u64 {
+    pub(crate) fn file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        result: &mut Vec<Finding>,
+    ) -> std::io::Result<u64> {
         run_file(
             self.rules,
             path,
@@ -559,7 +569,7 @@ pub(crate) fn scan<'source, S, T>(
 }
 
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input.
+/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
 pub fn run<'a>(
     rules: &[Rule],
     files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -570,7 +580,7 @@ pub fn run<'a>(
 /// Applies configured rules to files already selected by the caller.
 ///
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input.
+/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
 pub fn run_configured<'a>(
     rules: &[Rule],
     settings: Settings,
@@ -583,7 +593,7 @@ pub fn run_configured<'a>(
 /// Runs configured rules and returns findings and counted work across the supplied files.
 ///
 /// # Panics
-/// Panics if a rule reports an offset past the end of its input.
+/// Panics if a rule reports an offset past the end of its input, or if a parser thread cannot start.
 #[doc(hidden)]
 #[must_use]
 pub fn run_with_work<'a>(
@@ -623,7 +633,10 @@ pub fn run_with_work<'a>(
         |scanner, _, files| {
             let mut work = 0u64;
             for (path, bytes) in files {
-                work = work.saturating_add(scanner.file(path, bytes, &mut findings));
+                let counted = scanner
+                    .file(path, bytes, &mut findings)
+                    .expect("a parser thread starts");
+                work = work.saturating_add(counted);
             }
             sort_findings(&mut findings);
             (findings, work)
@@ -638,24 +651,23 @@ fn run_file(
     settings: Settings,
     repository: Option<&RepoCtx<'_, '_>>,
     result: &mut Vec<Finding>,
-) -> u64 {
+) -> std::io::Result<u64> {
     let source = Source::new(bytes);
     let (hits, work) = match source_type(path) {
-        Some(kind) => {
-            parsed_hits(rules, path, &source, kind, settings, repository).unwrap_or_else(|error| {
+        Some(kind) => parsed_hits(rules, path, &source, kind, settings, repository)?
+            .unwrap_or_else(|error| {
                 (
                     collect(rules, path, &source, settings, repository, Err(&error)),
                     0,
                 )
-            })
-        }
+            }),
         None => (
             collect(rules, path, &source, settings, repository, Ok(None)),
             0,
         ),
     };
     source.locate(path, hits, result);
-    work
+    Ok(work)
 }
 
 #[cfg(test)]

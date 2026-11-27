@@ -413,7 +413,7 @@ fn scan_files<'a, S: Send>(
         |scanner, reader, ()| -> io::Result<()> {
             for name in names.filter(|name| !config.exclude.is_match(name)) {
                 if let Some(bytes) = reader.read(name)? {
-                    scanner.file(name, &bytes, &mut findings);
+                    scanner.file(name, &bytes, &mut findings)?;
                 }
             }
             Ok(())
