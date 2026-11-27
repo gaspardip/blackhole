@@ -27,7 +27,9 @@ repository without checking it out, and reads only `contents` and
 `blackhole`. It collects reviews and reviewer permissions for `--approvals`.
 `blackhole-review.yml` relays review submissions and dismissals with no token
 permissions. `blackhole-rerun.yml` runs from the default branch and reruns the
-matching judge so its required check reflects the latest reviews.
+matching judge. The check refreshes on review events on a best-effort basis,
+and a branch rule requiring one approval of the latest push makes a dismissed
+approval block the merge natively.
 
 The last line init prints is `guarded` or `not guarded: <reason and fix>`. It
 reads GitHub through `gh` with GET calls only and checks, in this order:

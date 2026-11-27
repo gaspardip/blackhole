@@ -879,6 +879,7 @@ fn writes_and_keeps_the_review_workflows() {
     for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
         assert!(report.lines().any(|line| line == format!("Wrote {path}")));
     }
+    assert!(report.lines().any(|line| line == "The check refreshes on review events on a best-effort basis, and a branch rule requiring one approval of the latest push makes a dismissed approval block the merge natively."));
     let relay = fs::read_to_string(root.join(REVIEW_WORKFLOW)).unwrap();
     assert_eq!(
         relay,
@@ -904,7 +905,13 @@ jobs:
     assert_eq!(rerun.matches("permissions:").count(), 2);
     assert!(rerun.contains("\n    permissions:\n      actions: write\n    steps:\n"));
     assert!(rerun.contains("HEAD_SHA: ${{ github.event.workflow_run.head_sha }}"));
-    assert_eq!(rerun.matches("github.event.").count(), 1);
+    assert!(rerun.contains("HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}"));
+    assert!(
+        rerun.contains(
+            "HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}"
+        )
+    );
+    assert_eq!(rerun.matches("github.event.").count(), 3);
     assert!(!rerun.contains("uses:"));
     let report = init(root, true);
     for path in [REVIEW_WORKFLOW, RERUN_WORKFLOW] {
@@ -920,15 +927,9 @@ jobs:
     );
 }
 
-#[test]
-fn the_rerun_waits_for_the_newest_matching_run() {
+fn install_rerun_tools(root: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = repo();
-    let root = dir.path();
-    init(root, true);
-    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
-    let (_, script) = rerun.split_once("        run: |\n").unwrap();
     let gh = root.join("gh");
     fs::write(
         &gh,
@@ -936,14 +937,19 @@ fn the_rerun_waits_for_the_newest_matching_run() {
 set -eu
 echo "$*" >> calls
 case "$*" in
-  "api repos/owner/repo/actions/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA} --jq "*)
-    printf '%s\n' "$RUNS" | jq -r "${4}"
+  "api --paginate repos/owner/repo/actions/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA}&per_page=100")
+    printf '%s\n' "$RUNS"
     ;;
   "api repos/owner/repo/actions/runs/42 --jq .status")
     if [ -e polled ]; then echo completed; else touch polled; echo in_progress; fi
     ;;
   "api --method POST repos/owner/repo/actions/runs/42/rerun")
     test -e polled
+    attempt=$(grep -c 'POST ' calls)
+    if [[ "$attempt" -le "$FAIL_POSTS" ]]; then
+      echo "temporary error" >&2
+      exit 1
+    fi
     ;;
   *)
     exit 1
@@ -954,48 +960,94 @@ esac
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
     let sleep = root.join("sleep");
-    fs::write(&sleep, "#!/bin/sh\necho sleep >> calls\n").unwrap();
+    fs::write(&sleep, "#!/bin/sh\necho sleep \"$1\" >> calls\n").unwrap();
     fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn the_rerun_waits_for_the_newest_matching_run() {
+    let dir = repo();
+    let root = dir.path();
+    init(root, true);
+    let rerun = fs::read_to_string(root.join(RERUN_WORKFLOW)).unwrap();
+    let (_, script) = rerun.split_once("        run: |\n").unwrap();
+    install_rerun_tools(root);
     let mut paths = vec![root.to_path_buf()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let runs = json!({"workflow_runs":[
-        {"id":41,"created_at":"2026-11-01T12:00:00Z"},
-        {"id":42,"created_at":"2026-11-02T12:00:00Z"},
-    ]});
     let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let run = |sha: &str, runs: &Value| {
+    let branch = "topic/feature+1";
+    let repo = "fork/repo";
+    let candidate = |id, date, sha: &str, branch: &str, repo: &str| {
+        json!({
+            "id": id, "created_at": date, "head_sha": sha, "head_branch": branch,
+            "head_repository": {"full_name": repo}
+        })
+    };
+    let runs = json!({"workflow_runs":[
+        candidate(41, "2026-11-01T12:00:00Z", head, branch, repo),
+        candidate(42, "2026-11-02T12:00:00Z", head, branch, repo),
+        candidate(43, "2026-11-03T12:00:00Z", head, "other", repo),
+        candidate(44, "2026-11-04T12:00:00Z", head, branch, "owner/repo"),
+        candidate(45, "2026-11-05T12:00:00Z", "bbbb", branch, repo),
+    ]});
+    let run = |sha: &str, branch: &str, repo: &str, runs: &Value, fail_posts: &str| {
         common::command("bash")
             .current_dir(root)
             .args(["-eo", "pipefail", "-c", script])
             .env("PATH", std::env::join_paths(&paths).unwrap())
             .env("GITHUB_REPOSITORY", "owner/repo")
             .env("HEAD_SHA", sha)
+            .env("HEAD_BRANCH", branch)
+            .env("HEAD_REPOSITORY", repo)
             .env("RUNS", runs.to_string())
+            .env("FAIL_POSTS", fail_posts)
             .output()
             .unwrap()
     };
-    let invalid = run(&head.to_uppercase(), &runs);
+    let invalid = run(&head.to_uppercase(), branch, repo, &runs, "0");
     assert!(!invalid.status.success());
-    assert!(!root.join("calls").exists());
-    let missing = run(head, &json!({"workflow_runs":[]}));
+    let missing = run(head, branch, repo, &json!({"workflow_runs":[]}), "0");
     assert!(missing.status.success(), "{missing:?}");
     assert_eq!(String::from_utf8_lossy(&missing.stdout).lines().count(), 1);
-    let out = run(head, &runs);
+    let out = run(head, branch, repo, &runs, "2");
     assert!(out.status.success(), "{out:?}");
     let calls = fs::read_to_string(root.join("calls")).unwrap();
     let calls: Vec<_> = calls.lines().collect();
     for call in &calls[..2] {
-        assert!(call.contains(&format!("?event=pull_request_target&head_sha={head} ")));
+        assert!(call.contains(&format!("?event=pull_request_target&head_sha={head}&")));
+        assert!(!call.contains(branch));
     }
+    let post = "api --method POST repos/owner/repo/actions/runs/42/rerun";
     assert_eq!(
         calls[2..],
         [
             "api repos/owner/repo/actions/runs/42 --jq .status",
-            "sleep",
+            "sleep 5",
             "api repos/owner/repo/actions/runs/42 --jq .status",
-            "api --method POST repos/owner/repo/actions/runs/42/rerun",
+            post,
+            "sleep 1",
+            post,
+            "sleep 2",
+            post,
         ]
     );
+    assert_eq!(out.stderr, b"", "{out:?}");
+
+    fs::write(root.join("calls"), "").unwrap();
+    let out = run(head, "branch\nsecond", repo, &runs, "0");
+    assert!(!out.status.success(), "{out:?}");
+    let out = run(head, branch, "fork/repo\nsecond", &runs, "0");
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(fs::read(root.join("calls")).unwrap(), b"");
+
+    let out = run(head, branch, repo, &runs, "3");
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(
+        out.stderr,
+        b"The blackhole judge was not refreshed and must be rerun by hand.\n"
+    );
+    let calls = fs::read_to_string(root.join("calls")).unwrap();
+    assert_eq!(calls.lines().filter(|line| *line == post).count(), 3);
 }
 
 #[test]

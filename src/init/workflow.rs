@@ -164,15 +164,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           LC_ALL: C
         run: |
           if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Invalid review head SHA." >&2
             exit 1
           fi
+          if [[ -z "${HEAD_BRANCH}" || "${HEAD_BRANCH}" == *[$'\r\n']* ||
+                ! "${HEAD_REPOSITORY}" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+            echo "Invalid review head branch or repository." >&2
+            exit 1
+          fi
           actions="repos/${GITHUB_REPOSITORY}/actions"
-          id=$(gh api "${actions}/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA}" \
-            --jq '.workflow_runs | max_by([.created_at, .id]) | .id // empty')
+          id=$(
+            gh api --paginate "${actions}/workflows/blackhole.yml/runs?event=pull_request_target&head_sha=${HEAD_SHA}&per_page=100" |
+              jq -rs --arg sha "${HEAD_SHA}" --arg branch "${HEAD_BRANCH}" --arg repo "${HEAD_REPOSITORY}" '
+                [.[].workflow_runs[] | select(
+                  .head_sha == $sha and .head_branch == $branch and .head_repository.full_name == $repo
+                )] | max_by([.created_at, .id]) | .id // empty
+              '
+          )
           if [[ -z "${id}" ]]; then
             echo "No blackhole judge run found for this head."
             exit 0
@@ -183,5 +196,14 @@ jobs:
             [[ "${status}" == completed ]] && break
             sleep 5
           done
-          gh api --method POST "${run}/rerun"
+          for attempt in 1 2 3; do
+            if gh api --method POST "${run}/rerun" >/dev/null 2>&1; then
+              exit 0
+            fi
+            if [[ "${attempt}" -lt 3 ]]; then
+              sleep "${attempt}"
+            fi
+          done
+          echo "The blackhole judge was not refreshed and must be rerun by hand." >&2
+          exit 1
 "#;

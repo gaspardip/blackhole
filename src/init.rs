@@ -95,6 +95,10 @@ pub fn run(output: &mut impl Write) -> io::Result<u8> {
         report,
         "The judge holds only when the agent has weaker credentials than a person.\nKeep admin, bypass, workflow permissions and the approving account out of the agent's reach."
     )?;
+    writeln!(
+        report,
+        "The check refreshes on review events on a best-effort basis, and a branch rule requiring one approval of the latest push makes a dismissed approval block the merge natively."
+    )?;
     output.write_all(&report)?;
     match guard::verdict(&root, &workflows) {
         Ok(()) => {
