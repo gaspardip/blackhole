@@ -1666,6 +1666,54 @@ fn check_and_stop_distinguish_a_replaced_tracked_file_from_a_gitlink() {
 }
 
 #[test]
+fn coverage_reads_an_added_oversized_source_without_a_text_diff() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(
+        root.join("blackhole.toml"),
+        "[coverage]\nlcov = \"reports/lcov.info\"\n",
+    )
+    .unwrap();
+    common::git(root, &["add", "-A"]).unwrap();
+    common::git(root, &["commit", "-qm", "base"]).unwrap();
+    fs::write(root.join("a.py"), "x = 1\n").unwrap();
+    common::git(root, &["add", "a.py"]).unwrap();
+    common::git(root, &["commit", "-qm", "head"]).unwrap();
+    let blob = common::git(root, &["rev-parse", "HEAD:a.py"]).unwrap();
+    let head = common::git(root, &["rev-parse", "HEAD"]).unwrap();
+    let reports = tempdir().unwrap();
+    let report = reports.path().join(&head).join("reports");
+    fs::create_dir_all(&report).unwrap();
+    fs::write(report.join("lcov.info"), "SF:a.py\nDA:1,1\nend_of_record\n").unwrap();
+    let shims = tempdir().unwrap();
+    git_shim(
+        shims.path(),
+        r#"case " $* " in *" cat-file "*)
+            while IFS= read -r request; do
+                case "$request" in
+                    "info $BLOB") printf '%s blob 1072693249\n' "$BLOB"; continue;;
+                esac
+                printf '%s\n' "$request" | "$real" "$@" || exit $?
+            done
+            exit 0;;
+        esac"#,
+    );
+    let out = common::command(env!("CARGO_BIN_EXE_blackhole"))
+        .current_dir(root)
+        .env("PATH", shims.path())
+        .env("BLOB", &blob)
+        .args(["ci", "--base", "HEAD~", "--head", "HEAD", "--coverage-dir"])
+        .arg(reports.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().lines().last(),
+        Some("blackhole ci: green")
+    );
+}
+
+#[test]
 fn coverage_skips_the_size_limit_for_an_unchanged_oversized_blob() {
     for change in ["mode", "rename"] {
         let dir = repo();

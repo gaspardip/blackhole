@@ -156,7 +156,8 @@ pub(crate) fn changed<'a>(ctx: &mut DiffCtx<'a>, delta: &mut Delta<'a>) -> io::R
         if old.is_some_and(|(id, _)| id == new) {
             continue;
         }
-        if !fits_text_diff(old.map_or(0, |(_, size)| size), new_size) {
+        // An added file needs no text diff, so git's limit applies only to a comparison of two blobs.
+        if old.is_some_and(|(_, old_size)| !fits_text_diff(old_size, new_size)) {
             delta.oversized.push(path);
             if !fits_text_diff(0, new_size) {
                 delta.skipped_blobs.insert(new);
