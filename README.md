@@ -38,6 +38,40 @@ The hooks also do not catch these cases:
 - A Codex hook that rewrites a patch after blackhole has checked it can change
   which files the edit touches.
 
+## Exit codes
+
+`check`, `ledger`, `ci` and `object` end in one of five states, and each state
+has one next move.
+
+| Exit | State | Next move |
+| --- | --- | --- |
+| 0 | green | None. |
+| 1 | red | The author fixes what the output names. |
+| 3 | waiting | A person with write access who wrote none of the change approves the head. Only `ci` waits, on its `protected` and `tests` gates. |
+| 75 | no verdict | The tool could not judge: git failed or is missing, a file it needed was unreadable or vanished, or I/O failed. Run it again or repair the environment. |
+| 2 | usage | Fix the flags, arguments or other input you typed. |
+
+A malformed `blackhole.toml`, ledger or objections file in the checkout is red.
+In `ci`, the same file broken on the base commit is no verdict, because the pull
+request cannot fix `main`. Broken on the head, it stays a red gate. When red
+and waiting gates are both set, `ci` is red and still lists the waiting gates.
+Its last line names the state:
+
+```text
+blackhole ci: green
+blackhole ci: red (findings)
+blackhole ci: red (findings); waiting (protected)
+blackhole ci: waiting (protected): a person with write access who wrote none of the change approves the head
+blackhole ci: no verdict: <cause>
+```
+
+The agent hooks block on red. On no verdict they judge once more, then block
+with `blackhole: no verdict: <cause>`, post-edit included. The stop hook lets
+the agent stop when Claude Code or Codex sets `stop_hook_active`, so an outage
+cannot loop forever. A red stop still blocks. A payload the post-edit hook
+cannot read exits 1, since the edit has already happened, and outside a
+checkout a failing hook exits 1 without blocking.
+
 ## Working on this repo
 
 ```sh
@@ -204,7 +238,16 @@ On open, reopen, head update or retarget, `judge.yml` builds `blackhole` from th
 tip of `main` when the event fired, in a job without secrets or token permissions. It fetches
 the PR head into a fresh bare Git repository and judges it as commit data.
 The verdict excludes review data. The workflow omits `--approvals`, so a
-protected change or test removal stays red and requires a maintainer merge.
+protected change or test removal waits for a person and requires a maintainer merge.
+
+The check run follows the exit code of `ci`. Exit 0 publishes success and exit
+1 failure. Exit 3 publishes `action_required`, titled `blackhole ci: waiting on a
+person`, with the waiting line as the summary and the workflow run as the
+details link. GitHub does not count `action_required` as passing, so a required
+check still blocks the merge. On exit 75 the job runs `ci` once more, and a
+second 75 publishes failure titled `blackhole ci: no verdict` with the cause.
+Any other exit publishes failure. The judge never publishes `neutral` or
+`skipped`, since both pass a required check.
 
 If a head branch name that looks like a commit SHA prevents `pull_request_target`
 from running, push the commits to a branch with another name and open a new PR
