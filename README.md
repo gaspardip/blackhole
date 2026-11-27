@@ -248,6 +248,15 @@ and `main` stay the same, even after an objection it relied on expires, so the
 PR can still merge days later. Once that objection is on `main` and expired,
 later PRs are red under `findings` while the underlying violation remains.
 
+## Proofs
+
+Run `python3 -I tools/backtest.py --binary /path/to/blackhole --repo /path/to/clone --limit 20 --out /path/to/reports`
+to judge recent first-parent merges from the clone's default branch. Add
+`--mode squash` for a history of squash merges. The backtest writes
+`results.jsonl` and `summary.json` under the clone's name in the output
+directory. The summary counts the share of judged changes flagged by each
+rule. Findings have a null label for later false-positive analysis.
+
 ## License
 
 MIT
