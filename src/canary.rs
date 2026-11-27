@@ -32,7 +32,13 @@ for pr in $prs; do
 done
 if ! response=$(gh api --hostname "$1" --method DELETE -i "repos/$2/git/refs/heads/$3"); then
   case "$(printf '%s\n' "$response" | head -n 1) " in
-    HTTP/*" 404 "*|HTTP/*" 422 "*) ;;
+    HTTP/*" 404 "*|HTTP/*" 422 "*)
+      response=$(gh api --hostname "$1" --method GET -i "repos/$2/git/ref/heads/$3")
+      case "$(printf '%s\n' "$response" | head -n 1) " in
+        HTTP/*" 404 "*) ;;
+        *) status=1 ;;
+      esac
+      ;;
     *) status=1 ;;
   esac
 fi
@@ -464,10 +470,12 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
             io::Error::other(format!("{e}; cleanup failed, {manual}"))
         }
     })?;
-    let code = report(out, &list, &workflow, refused, &outcome)?;
     if !status.success() {
-        return Err(io::Error::other(format!("cleanup failed; {manual}")));
+        let _ = writeln!(io::stderr().lock(), "blackhole: cleanup failed; {manual}");
+        let _ = report(out, &list, &workflow, refused, &outcome);
+        return Ok(2);
     }
+    let code = report(out, &list, &workflow, refused, &outcome)?;
     writeln!(
         out,
         "Closed the canary pull request and deleted branch {branch}."

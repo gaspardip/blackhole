@@ -14,6 +14,7 @@ use tempfile::{TempDir, tempdir};
 const CHECKS: &str = "repos/owner/repo/commits/SHA/check-runs?check_name=blackhole&per_page=100";
 const OPEN_PRS: &str = "repos/owner/repo/pulls?head=owner:blackhole-canary-N&state=open";
 const REF: &str = "repos/owner/repo/git/refs/heads/blackhole-canary-N";
+const REF_LOOKUP: &str = "repos/owner/repo/git/ref/heads/blackhole-canary-N";
 const LOGS: &str = "repos/owner/repo/actions/jobs/99/logs";
 const LINES: [&str; 6] = [
     "ledger: raise a ledger allowance",
@@ -345,6 +346,7 @@ fn a_rejected_first_push_still_cleans_up_an_absent_branch() {
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     adopter.fake.respond("GET", OPEN_PRS, 200, &[], b"[]");
     adopter.fake.respond("DELETE", REF, 422, &[], b"{}");
+    adopter.fake.respond("GET", REF_LOOKUP, 404, &[], b"{}");
     let out = run(&adopter.root, &adopter.fake, &["canary"]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(out.stdout, b"");
@@ -352,8 +354,46 @@ fn a_rejected_first_push_still_cleans_up_an_absent_branch() {
     assert!(!stderr.contains("cleanup failed"), "{stderr}");
     let calls = adopter.fake.calls();
     assert!(
-        calls.iter().any(|call| call.contains("--method DELETE")),
+        calls
+            .iter()
+            .any(|call| call.contains("--method GET -i repos/owner/repo/git/ref/heads/")),
         "{calls:#?}"
+    );
+}
+
+#[test]
+fn a_422_delete_requires_confirming_the_ref_is_absent() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    adopter.fake.respond("DELETE", REF, 422, &[], b"{}");
+    adopter.fake.respond("GET", REF_LOOKUP, 200, &[], b"{}");
+
+    let out = run(&adopter.root, &adopter.fake, &["canary"]);
+    let branch = assert_cleaned(&adopter.fake);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("delete branch {branch} by hand")),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_closed_stdout_cannot_hide_the_cleanup_failure() {
+    let adopter = adopted();
+    finished(&adopter, "failure", RED);
+    adopter.fake.respond("DELETE", REF, 403, &[], b"{}");
+    let mut child = command(&adopter.root, &adopter.fake, &["canary"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    let branch = assert_cleaned(&adopter.fake);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&format!("delete branch {branch} by hand")),
+        "{out:?}"
     );
 }
 
