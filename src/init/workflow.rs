@@ -111,17 +111,32 @@ jobs:
             jq -s --slurpfile authors "${RUNNER_TEMP}/authors.json" '{authors: $authors[0], reviews: .}' \
               > "${RUNNER_TEMP}/approvals.json"
       - name: Judge the head
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           code=0
-          (cd "${RUNNER_TEMP}/judge.git" && "${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole" ci \
+          (cd "${RUNNER_TEMP}/judge.git" && env -u GH_TOKEN "${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole" ci \
             --base "${BASE_SHA}" --head "${HEAD_SHA}" --approvals "${RUNNER_TEMP}/approvals.json") \
             > "${RUNNER_TEMP}/judge.log" 2>&1 || code=$?
+          moved=
+          if [ "${code}" -eq 0 ]; then
+            auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+            # A green judged on a base that is no longer the branch tip would not cover the merge.
+            tip="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: basic ${auth}" \
+              git ls-remote "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "refs/heads/${BASE_REF}")" || tip=
+            if [ "${tip}" != "$(printf '%s\trefs/heads/%s' "${BASE_SHA}" "${BASE_REF}")" ]; then
+              moved=1
+              code=1
+            fi
+          fi
           # Paths in diagnostics can resemble workflow commands.
           marker="$(cat /proc/sys/kernel/random/uuid)"
           printf '::stop-commands::%s\n' "${marker}"
           cat "${RUNNER_TEMP}/judge.log"
           if [ "${code}" -eq 0 ]; then
             printf '\nblackhole ci: green\n'
+          elif [ -n "${moved}" ]; then
+            printf '\nThe base branch moved while the judge ran, or its tip could not be read; rerun the judge.\n'
           fi
           printf '\n::%s::\n' "${marker}"
           exit "${code}"

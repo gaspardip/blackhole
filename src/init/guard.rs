@@ -158,15 +158,21 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
         page += 1;
     }
     let mut pull_requests = rules.iter().any(|rule| rule["type"] == "pull_request");
-    let mut sources: Vec<Option<u64>> = rules
+    // Each source that may report the check, and whether its rule makes a pull request merge only on the current tip.
+    let mut sources: Vec<(Option<u64>, bool)> = rules
         .iter()
         .filter(|rule| rule["type"] == "required_status_checks")
-        .filter_map(|rule| rule["parameters"]["required_status_checks"].as_array())
-        .flatten()
-        .filter(|check| check["context"] == CHECK)
-        .map(|check| check["integration_id"].as_u64())
+        .flat_map(|rule| {
+            let strict = rule["parameters"]["strict_required_status_checks_policy"] == true;
+            rule["parameters"]["required_status_checks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|check| check["context"] == CHECK)
+                .map(move |check| (check["integration_id"].as_u64(), strict))
+        })
         .collect();
-    let classic = if pull_requests && sources.contains(&Some(ACTIONS_APP)) {
+    let classic = if pull_requests && sources.contains(&(Some(ACTIONS_APP), true)) {
         Classic::Absent
     } else {
         let endpoint = format!("repos/{slug}/branches/{encoded}/protection");
@@ -181,13 +187,15 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
     };
     if let Classic::Rules(protection) = &classic {
         pull_requests |= protection["required_pull_request_reviews"].is_object();
+        let checks = &protection["required_status_checks"];
+        let strict = checks["strict"] == true;
         sources.extend(
-            protection["required_status_checks"]["checks"]
+            checks["checks"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter(|check| check["context"] == CHECK)
-                .map(|check| check["app_id"].as_u64()),
+                .map(|check| (check["app_id"].as_u64(), strict)),
         );
     }
     let hidden = matches!(classic, Classic::Hidden);
@@ -205,7 +213,12 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
             ))
         });
     }
-    if !sources.contains(&Some(ACTIONS_APP)) {
+    let actions: Vec<bool> = sources
+        .iter()
+        .filter(|(source, _)| *source == Some(ACTIONS_APP))
+        .map(|&(_, strict)| strict)
+        .collect();
+    if actions.is_empty() {
         return Err(if !sources.is_empty() {
             not(format!(
                 "{branch} accepts the blackhole check from a source other than GitHub Actions (set the check's source to GitHub Actions)"
@@ -215,6 +228,15 @@ fn required(repo: &Repo, branch: &str, encoded: &str) -> Result<BTreeSet<u64>, S
         } else {
             not(format!(
                 "{branch} does not require the blackhole check (require the blackhole check from GitHub Actions in a ruleset for {branch})"
+            ))
+        });
+    }
+    if !actions.contains(&true) {
+        return Err(if hidden {
+            unreadable()
+        } else {
+            not(format!(
+                "{branch} does not require branches to be up to date before merging (require it for the blackhole check on {branch}, so a green judged on an older {branch} cannot merge)"
             ))
         });
     }

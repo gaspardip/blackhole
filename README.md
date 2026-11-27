@@ -24,7 +24,8 @@ of the pull request's own base branch. It installs the
 exact `@gaspardip/blackhole` version that wrote it with `--ignore-scripts`,
 checks the registry signatures and the version, fetches the head into a bare
 repository without checking it out, and reads only `contents` and
-`pull-requests`. Its job posts the check
+`pull-requests`. It reports green only while that base tip is still the
+branch's tip after judging. Its job posts the check
 `blackhole`. It collects reviews and reviewer permissions for `--approvals`.
 `blackhole-review.yml` relays review submissions and dismissals with no token
 permissions. `blackhole-rerun.yml` runs from the default branch and reruns the
@@ -40,9 +41,10 @@ reads GitHub through `gh` with GET calls only and checks, in this order:
 3. The default branch holds all three generated workflows
    (`GET repos/{owner}/{repo}/contents/.github/workflows/{file}?ref={branch}`).
 4. The default branch requires pull requests and the `blackhole` check from
-   GitHub Actions (`GET repos/{owner}/{repo}/rules/branches/{branch}`, and
+   GitHub Actions, with branches up to date before merging
+   (`GET repos/{owner}/{repo}/rules/branches/{branch}`, and
    `GET repos/{owner}/{repo}/branches/{branch}/protection` when the rulesets do
-   not already require both).
+   not already require all three).
 5. gh's account is not an admin (`permissions.admin` from step 2), cannot
    bypass any ruleset on the branch (`current_user_can_bypass` from
    `GET repos/{owner}/{repo}/rulesets/{id}`), and its token lists its scopes
@@ -71,8 +73,6 @@ Adoption does not catch these cases:
 - Classic branch protection is visible only to admins, so a branch protected
   only that way never reads as guarded. Use a ruleset.
 - init reads only `origin` and the first 100 rules on the default branch.
-- Requiring branches to be up to date is left to you. Without it, two pull
-  requests that are green alone can merge into a red default branch.
 - The workflow trusts the npm registry's signature for the pinned version; it
   embeds no hash of the package.
 - The canary does not forge coverage, and its finding sits at the root, so a

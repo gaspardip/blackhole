@@ -855,7 +855,7 @@ fn writes_the_judge_workflow_pinned_to_this_version() {
     assert!(text.contains("git init -q --bare \"${repo}\""));
     assert!(text.contains("\"refs/pull/${PR_NUMBER}/head:refs/judge/head\""));
     assert!(text.contains(
-        "(cd \"${RUNNER_TEMP}/judge.git\" && \"${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole\" ci \\\n            --base \"${BASE_SHA}\" --head \"${HEAD_SHA}\" --approvals \"${RUNNER_TEMP}/approvals.json\")"
+        "(cd \"${RUNNER_TEMP}/judge.git\" && env -u GH_TOKEN \"${RUNNER_TEMP}/blackhole/node_modules/.bin/blackhole\" ci \\\n            --base \"${BASE_SHA}\" --head \"${HEAD_SHA}\" --approvals \"${RUNNER_TEMP}/approvals.json\")"
     ));
     assert!(text.contains(r"printf '\nblackhole ci: green\n'"));
     let uses: Vec<_> = text.lines().filter(|line| line.contains("uses:")).collect();
@@ -1309,7 +1309,7 @@ fn generated_workflow() -> Vec<u8> {
 fn rules(checks: &Value) -> Vec<u8> {
     json!([
         {"type":"pull_request","ruleset_source_type":"Repository","ruleset_id":7,"parameters":{}},
-        {"type":"required_status_checks","ruleset_id":7,"parameters":{"required_status_checks":checks}}
+        {"type":"required_status_checks","ruleset_id":7,"parameters":{"strict_required_status_checks_policy":true,"required_status_checks":checks}}
     ])
     .to_string()
     .into_bytes()
@@ -1670,6 +1670,36 @@ fn each_missing_branch_rule_is_the_one_final_line() {
             ],
         ),
         (
+            "not guarded: main does not require branches to be up to date before merging (require it for the blackhole check on main, so a green judged on an older main cannot merge)",
+            1,
+            vec![
+                Respond(
+                    RULES,
+                    200,
+                    vec![],
+                    body(
+                        r#"[{"type":"pull_request","ruleset_id":7,"parameters":{}},{"type":"required_status_checks","ruleset_id":7,"parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"blackhole","integration_id":15368}]}}]"#,
+                    ),
+                ),
+                unprotected(),
+            ],
+        ),
+        (
+            "not guarded: main does not require branches to be up to date before merging (require it for the blackhole check on main, so a green judged on an older main cannot merge)",
+            1,
+            vec![
+                Respond(RULES, 200, vec![], body("[]")),
+                Respond(
+                    CLASSIC,
+                    200,
+                    vec![],
+                    body(
+                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"strict":false,"checks":[{"context":"blackhole","app_id":15368}]}}"#,
+                    ),
+                ),
+            ],
+        ),
+        (
             "not guarded: main accepts the blackhole check from a source other than GitHub Actions (set the check's source to GitHub Actions)",
             1,
             vec![
@@ -1694,7 +1724,7 @@ fn each_credential_that_can_get_past_the_judge_is_not_guarded() {
                     200,
                     vec![],
                     body(
-                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"checks":[{"context":"blackhole","app_id":15368}]}}"#,
+                        r#"{"required_pull_request_reviews":{},"required_status_checks":{"strict":true,"checks":[{"context":"blackhole","app_id":15368}]}}"#,
                     ),
                 ),
                 Respond(
@@ -1948,4 +1978,38 @@ fn the_judge_compares_against_the_tip_of_the_pull_requests_own_base_branch() {
     assert!(fetched.status.success(), "{fetched:?}");
     let exported = fs::read_to_string(judged.runner.path().join("github_env")).unwrap();
     assert_eq!(exported, format!("BASE_SHA={}\n", judged.release));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_judge_reports_green_only_while_the_base_tip_is_the_judged_one() {
+    let judged = judged_repository();
+    let bin = judged.runner.path().join("blackhole/node_modules/.bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir(judged.runner.path().join("judge.git")).unwrap();
+    let fake = bin.join("blackhole");
+    fs::write(&fake, "#!/bin/sh\nexit \"$FAKE_CODE\"\n").unwrap();
+    fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let moved = "0".repeat(40);
+    for (code, base, status, green) in [
+        ("0", judged.release.as_str(), 0, true),
+        ("0", moved.as_str(), 1, false),
+        ("1", judged.release.as_str(), 1, false),
+    ] {
+        let out = run_step(
+            &judged,
+            "Judge the head",
+            &[("FAKE_CODE", code), ("BASE_SHA", base)],
+        );
+        let stdout = String::from_utf8(out.stdout.clone()).unwrap();
+        assert_eq!(out.status.code(), Some(status), "{base}: {out:?}");
+        assert_eq!(
+            stdout.contains("blackhole ci: green"),
+            green,
+            "{base}: {stdout}"
+        );
+        if code == "0" && !green {
+            assert!(stdout.contains("The base branch moved"), "{stdout}");
+        }
+    }
 }
