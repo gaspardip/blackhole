@@ -1479,6 +1479,26 @@ fn ci_inputs_keep_usage_and_outages_apart() {
 
 #[cfg(unix)]
 #[test]
+fn ci_keeps_test_removals_found_before_a_red_failure() {
+    let dir = repo();
+    let root = dir.path();
+    let test = "test('x', () => { expect(1).toBe(1); });\n";
+    fs::write(root.join("a.test.ts"), test).unwrap();
+    fs::write(root.join("b.test.ts"), test).unwrap();
+    commit(root);
+    let base = rev(root);
+    fs::remove_file(root.join("a.test.ts")).unwrap();
+    fs::remove_file(root.join("b.test.ts")).unwrap();
+    std::os::unix::fs::symlink("b.test.ts", root.join("b.test.ts")).unwrap();
+    commit(root);
+    assert_eq!(
+        ci_line(root, &base, 1),
+        "blackhole ci: red (unreadable); waiting (tests)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ci_refuses_a_source_link_to_a_directory() {
     let dir = repo();
     let root = dir.path();

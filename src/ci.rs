@@ -25,15 +25,17 @@ fn red_or<T>(result: io::Result<T>) -> io::Result<io::Result<T>> {
     }
 }
 
-fn diff_rules(ctx: &mut DiffCtx<'_>) -> io::Result<DiffFindings> {
+// Removals found before a failure stay, so an unreadable file cannot hide a deleted test.
+fn diff_rules(ctx: &mut DiffCtx<'_>) -> (DiffFindings, io::Result<()>) {
     let mut findings = DiffFindings::default();
-    for rule in engine::registry() {
-        if let Run::Diff(check) = rule.run {
-            check(ctx, &mut findings)?;
-        }
-    }
+    let result = engine::registry()
+        .iter()
+        .try_for_each(|rule| match rule.run {
+            Run::Diff(check) => check(ctx, &mut findings),
+            _ => Ok(()),
+        });
     engine::sort_findings(&mut findings.removals);
-    Ok(findings)
+    (findings, result)
 }
 
 fn evaluate(
@@ -83,20 +85,19 @@ fn evaluate(
         approved,
         batch: &mut batch,
     };
-    let (removals, findings) = match red_or(diff_rules(&mut ctx))? {
-        Ok(diff) => {
-            let findings = crate::scan_files(
-                scan_config,
-                diff.diagnostics,
-                head_tree.paths(),
-                &mut *ctx.batch,
-                |batch| head_tree.repository_paths(batch),
-                |batch, path| head_tree.read(path, batch),
-            );
-            (diff.removals, red_or(findings)?)
-        }
-        Err(e) => (Vec::new(), Err(e)),
+    let (diff, result) = diff_rules(&mut ctx);
+    let findings = match red_or(result)? {
+        Ok(()) => red_or(crate::scan_files(
+            scan_config,
+            diff.diagnostics,
+            head_tree.paths(),
+            &mut *ctx.batch,
+            |batch| head_tree.repository_paths(batch),
+            |batch, path| head_tree.read(path, batch),
+        ))?,
+        Err(e) => Err(e),
     };
+    let removals = diff.removals;
     let mut verdict = verdict::judge_with_guard(
         &Inputs {
             approved,
