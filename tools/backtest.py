@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 POLICY = ("blackhole.toml", ".blackhole/ledger")
+OBJECTIONS = ".blackhole/objections"
 STATES = {0: "green", 1: "red", 3: "waiting", 75: "no_verdict"}
 FINDING = re.compile(r"^(.+?):([0-9]+):[0-9]+ ([a-z0-9-]+/[a-z0-9-]+)(?: |$)")
 RED_GATES = re.compile(r"blackhole ci: red \(([a-z]+(?:, [a-z]+)*)\)")
@@ -44,6 +45,15 @@ class Verdict:
     findings: list[Finding] = field(default_factory=list)
     reason: str | None = None
     gates: list[str] = field(default_factory=list)
+    raw_output: str | None = None
+
+
+class CommandError(RuntimeError):
+    def __init__(self, cwd: Path, result: subprocess.CompletedProcess[str]) -> None:
+        self.result = result
+        super().__init__(
+            f"{result.args[0]} in {cwd} exited {result.returncode}: {result.stdout.strip()}",
+        )
 
 
 def environment(home: Path) -> dict[str, str]:
@@ -73,7 +83,7 @@ def run(
         args, process.returncode, process.stdout.decode("utf-8", errors="surrogateescape"),
     )
     if check and result.returncode:
-        raise RuntimeError(f"{args[0]} in {cwd} exited {result.returncode}: {result.stdout.strip()}")
+        raise CommandError(cwd, result)
     return result
 
 
@@ -98,8 +108,24 @@ def history(repo: Path, env: dict[str, str], mode: str, limit: int) -> list[Chan
     return [Change(*row.split()) for row in rows]
 
 
-def baseline(tree: Path, env: dict[str, str], binary: Path) -> str:
+def dated_ci(
+    tree: Path, env: dict[str, str], binary: Path, base: str, head: str, today: str,
+) -> subprocess.CompletedProcess[str]:
+    return run(tree, env, binary, "ci", "--base", base, "--head", head, "--today", today, check=False)
+
+
+def baseline(tree: Path, env: dict[str, str], binary: Path, base: str, today: str) -> str:
+    paths = git(tree, env, "ls-files", "-z", "--", OBJECTIONS).stdout.split("\0")
+    has_objections = OBJECTIONS in paths
+    if has_objections:
+        # Init uses the wall clock, so validate objections with dated CI before setting them aside.
+        validation = dated_ci(tree, env, binary, base, base, today)
+        if validation.returncode not in (0, 1):
+            raise CommandError(tree, validation)
+        (tree / OBJECTIONS).unlink()
     output = run(tree, env, binary, "init").stdout
+    if has_objections:
+        git(tree, env, "restore", "--", OBJECTIONS)
     for line in output.splitlines():
         action, _, path = line.partition(" ")
         if action not in {"Wrote", "Created"} or path in POLICY:
@@ -119,7 +145,14 @@ def baseline(tree: Path, env: dict[str, str], binary: Path) -> str:
 def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verdict:
     timestamp = git(tree, env, "show", "-s", "--format=%ct", change.commit).stdout.strip()
     today = datetime.fromtimestamp(int(timestamp), UTC).date().isoformat()
-    base = baseline(tree, env, binary)
+    try:
+        base = baseline(tree, env, binary, change.base, today)
+    except CommandError as error:
+        return Verdict(
+            "baseline_failure", today, error.result.returncode, raw_output=error.result.stdout,
+        )
+    except (RuntimeError, OSError) as error:
+        return Verdict("baseline_failure", today, reason=str(error))
     mainline = ("-m", "1") if change.proposed else ()
     replay = git(tree, env, "cherry-pick", "--no-commit", *mainline, change.commit, check=False)
     if replay.returncode:
@@ -131,7 +164,7 @@ def judge(tree: Path, env: dict[str, str], binary: Path, change: Change) -> Verd
 
     git(tree, env, "commit", "--allow-empty", "-m", f"Replay {change.commit}")
     head = git(tree, env, "rev-parse", "HEAD").stdout.strip()
-    result = run(tree, env, binary, "ci", "--base", base, "--head", head, "--today", today, check=False)
+    result = dated_ci(tree, env, binary, base, head, today)
     lines = result.stdout.splitlines()
     state = STATES.get(result.returncode, "error")
     last_line = lines[-1] if lines else None
@@ -164,7 +197,7 @@ def backtest(repo: Path, binary: Path, out: Path, mode: str, limit: int) -> None
         if any(directory.is_relative_to(source) for source in source_paths):
             raise RuntimeError(f"output or report directory is inside the source clone: {directory}")
     out.mkdir(parents=True, exist_ok=True)
-    states = Counter(dict.fromkeys((*STATES.values(), "error", "skipped"), 0))
+    states = Counter(dict.fromkeys((*STATES.values(), "error", "skipped", "baseline_failure"), 0))
     rules: Counter[str] = Counter()
     with tempfile.TemporaryDirectory(dir=out) as scratch:
         temp = Path(scratch)

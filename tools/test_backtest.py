@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,6 +234,35 @@ class Backtest(unittest.TestCase):
         self.assertEqual(records[1]["state"], "green")
         self.assertEqual(summary["judged"], 1)
         self.assertEqual(summary["skipped"], 1)
+
+    def test_baseline_uses_the_date_of_a_future_dated_commit(self) -> None:
+        tomorrow = (datetime.now(UTC).date() + timedelta(days=1)).isoformat()
+        self.env.update(
+            GIT_AUTHOR_DATE=f"{tomorrow}T12:00:00Z",
+            GIT_COMMITTER_DATE=f"{tomorrow}T12:00:00Z",
+        )
+        (self.repo / ".blackhole").mkdir()
+        self.commit(".blackhole/objections", f"core/no-suppression\ta.py\t1\t{tomorrow}\t-\treason\n")
+        self.merge("a.py", (ROOT / "evasion/expired/head/a.py").read_text())
+
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual((rows[0]["state"], rows[0]["today"]), ("green", tomorrow))
+        self.assertEqual(summary["judged"], 1)
+
+    def test_failed_baseline_is_reported_and_the_next_change_is_judged(self) -> None:
+        clean, _, _ = self.merge("clean.ts", "export const value = 1;\n")
+        (self.repo / ".blackhole").mkdir()
+        self.commit(".blackhole/objections", "invalid\n")
+        broken, _, _ = self.merge("later.ts", "export const value = 2;\n")
+
+        rows, summary = self.run_backtest(self.binary)
+        self.assertEqual(
+            [(row["commit"], row["state"], row["exit_code"]) for row in rows],
+            [(broken, "baseline_failure", 2), (clean, "green", 0)],
+        )
+        self.assertIn("objection", rows[0]["raw_output"])
+        self.assertEqual(summary["states"]["baseline_failure"], 1)
+        self.assertEqual(summary["judged"], 1)
 
     def test_nonverdicts_use_isolated_home_and_do_not_count_findings(self) -> None:
         (self.repo / ".claude").mkdir()
