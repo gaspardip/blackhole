@@ -16,25 +16,84 @@ pub enum Event {
     Stop,
 }
 
+const LIMIT: u64 = 64 * 1024 * 1024;
+
 #[must_use]
 pub fn run(event: Event) -> ExitCode {
     let mut out = HookOutput(io::stderr().lock());
-    match handle(event, &mut out) {
-        Ok(false) => ExitCode::SUCCESS,
-        Ok(true) => ExitCode::from(2),
-        Err(error) => {
-            let _ = writeln!(
-                out,
-                "blackhole: {}",
-                crate::diagnostic_text(&error.to_string())
-            );
-            match event {
-                // A guard that cannot decide inside a checkout must block, since Codex ignores exit 1.
-                Event::PreEdit | Event::Stop if crate::files::in_checkout() => ExitCode::from(2),
-                _ => ExitCode::FAILURE,
+    // Stop judges the checkout and needs its payload only for the loop guard.
+    let payload = match event {
+        Event::Stop => Ok(Vec::new()),
+        Event::PreEdit | Event::PostEdit => payload(),
+    };
+    let (text, result) = match payload {
+        Ok(bytes) => {
+            let first = attempt(event, &bytes);
+            // A failure that is no verdict can be transient, so it gets a second judgment.
+            if first.1.as_ref().is_err_and(|e| crate::fault(e).is_none()) {
+                attempt(event, &bytes)
+            } else {
+                first
             }
         }
+        Err(error) => (Vec::new(), Err(error)),
+    };
+    let _ = out.write_all(&text);
+    let error = match result {
+        Ok(false) => return ExitCode::SUCCESS,
+        Ok(true) => return ExitCode::from(2),
+        Err(error) => error,
+    };
+    let cause = crate::diagnostic_text(&error.to_string()).into_owned();
+    let fault = crate::fault(&error);
+    if fault.is_some() {
+        let _ = writeln!(out, "blackhole: {cause}");
+    } else if matches!(event, Event::Stop) && continued() {
+        let _ = writeln!(
+            out,
+            "blackhole: no verdict: {cause}; the judgment could not run, so the agent may stop"
+        );
+        return ExitCode::SUCCESS;
+    } else {
+        let _ = writeln!(out, "blackhole: no verdict: {cause}");
     }
+    if !crate::files::in_checkout() {
+        return ExitCode::FAILURE;
+    }
+    match (fault, event) {
+        // The edit already happened, and a payload the hook cannot read leaves nothing to report on.
+        (Some(crate::Fault::Usage), Event::PostEdit) => ExitCode::FAILURE,
+        // A guard that cannot decide inside a checkout must block, since Codex ignores exit 1.
+        _ => ExitCode::from(2),
+    }
+}
+
+fn attempt(event: Event, bytes: &[u8]) -> (Vec<u8>, io::Result<bool>) {
+    let mut text = Vec::new();
+    let result = handle(event, bytes, &mut text);
+    (text, result)
+}
+
+fn payload() -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::stdin().lock().take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(crate::usage("hook payload exceeds 64 MiB"));
+    }
+    Ok(bytes)
+}
+
+// Claude Code and Codex set `stop_hook_active` once a stop hook has continued the turn; an unreadable payload keeps the block.
+fn continued() -> bool {
+    #[derive(Deserialize)]
+    struct Stop {
+        #[serde(default)]
+        stop_hook_active: bool,
+    }
+    payload()
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Stop>(&bytes).ok())
+        .is_some_and(|stop| stop.stop_hook_active)
 }
 
 struct HookOutput<'a>(io::StderrLock<'a>);
@@ -50,9 +109,7 @@ impl Write for HookOutput<'_> {
     }
 }
 
-fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
-    const LIMIT: u64 = 64 * 1024 * 1024;
-
+fn handle(event: Event, bytes: &[u8], out: &mut Vec<u8>) -> io::Result<bool> {
     if matches!(event, Event::Stop) {
         let red = crate::check(&[], out)?;
         if red {
@@ -63,23 +120,18 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
         }
         return Ok(red);
     }
-    let mut bytes = Vec::new();
-    io::stdin().lock().take(LIMIT + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > LIMIT {
-        return Err(io::Error::other("hook payload exceeds 64 MiB"));
-    }
-    let envelope: Envelope = serde_json::from_slice(&bytes)?;
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(crate::usage)?;
     let (field, is_patch): (fn(&Input) -> &Option<String>, _) = match envelope.tool_name.as_str() {
         "Edit" | "Write" | "MultiEdit" => (|p| &p.file_path, false),
         "NotebookEdit" => (|p| &p.notebook_path, false),
         "apply_patch" => (|p| &p.command, true),
         _ => return Ok(false),
     };
-    let payload: Payload = serde_json::from_slice(&bytes)?;
+    let payload: Payload = serde_json::from_slice(bytes).map_err(crate::usage)?;
     let value = field(&payload.tool_input)
         .as_deref()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| io::Error::other("cannot read edit target"))?;
+        .ok_or_else(|| crate::usage("cannot read edit target"))?;
     let mut names = if is_patch {
         patch::targets(value)?
     } else {
@@ -98,7 +150,7 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
                 Err(io::Error::from(io::ErrorKind::NotADirectory))
             }
         })
-        .map_err(|e| io::Error::new(e.kind(), format!("invalid hook cwd: {e}")))?;
+        .map_err(|e| crate::usage(format!("invalid hook cwd: {e}")))?;
     names.sort_unstable();
     names.dedup();
     let root = crate::files::root()?;
@@ -137,7 +189,7 @@ fn handle(event: Event, out: &mut HookOutput<'_>) -> io::Result<bool> {
                         .is_ok_and(|real| real.as_deref().is_some_and(matches_protected))
             })
         {
-            return Err(io::Error::other(
+            return Err(crate::red(
                 "The ledger only changes through blackhole ledger. Fix code to shrink it, or file an exception with blackhole object.",
             ));
         }
@@ -165,10 +217,15 @@ fn edit_destination(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Op
             {
                 return Ok(Some(path));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(crate::usage(format!(
+                    "Cannot resolve edit target {}: {e}",
+                    path.display()
+                )));
+            }
         }
     }
-    Err(io::Error::other(
+    Err(crate::usage(
         "cannot resolve edit target: too many symbolic links",
     ))
 }
@@ -177,10 +234,10 @@ fn validate_target(path: &Path) -> io::Result<()> {
     if let Err(e) = fs::metadata(path)
         && e.kind() != io::ErrorKind::NotFound
     {
-        return Err(io::Error::new(
-            e.kind(),
-            format!("Cannot resolve edit target {}: {e}", path.display()),
-        ));
+        return Err(crate::usage(format!(
+            "Cannot resolve edit target {}: {e}",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -234,7 +291,7 @@ impl EditNames<'_> {
         .map(move |base| lexical(&base.join(name)))
     }
 
-    fn check(&self, root: &Path, out: &mut HookOutput<'_>) -> io::Result<bool> {
+    fn check(&self, root: &Path, out: &mut Vec<u8>) -> io::Result<bool> {
         let policy = crate::Policy::load(root)?;
         let (mut selected, written) = self.validate(root, policy.paths())?;
         if !selected.is_empty() && !written.is_empty() {
@@ -321,10 +378,10 @@ fn resolve(path: &Path, seen: &mut crate::files::Seen) -> io::Result<Option<Path
     match crate::files::resolve(path, seen) {
         Ok(p) => Ok(Some(p)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io::Error::new(
-            e.kind(),
-            format!("Cannot resolve edit target {}: {e}", path.display()),
-        )),
+        Err(e) => Err(crate::usage(format!(
+            "Cannot resolve edit target {}: {e}",
+            path.display()
+        ))),
     }
 }
 

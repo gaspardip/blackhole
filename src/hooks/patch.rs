@@ -21,7 +21,7 @@ enum Hunk {
 }
 
 fn invalid() -> io::Error {
-    io::Error::other("cannot read apply_patch hunks")
+    crate::usage("cannot read apply_patch hunks")
 }
 
 impl Hunk {

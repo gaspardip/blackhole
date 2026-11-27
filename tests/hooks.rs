@@ -257,9 +257,17 @@ fn stop_blocks_when_the_checkout_check_cannot_complete() {
     let dir = repo();
     let root = dir.path();
     fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
-    let error = String::from_utf8(hook(root, "stop", &json!({}), 2)).unwrap();
-    assert!(error.starts_with("blackhole: blackhole.toml:"));
-    assert_eq!(error.lines().count(), 1);
+    fs::write(root.join("a.py"), "pass").unwrap();
+    // A broken policy file is the author's to fix, so the loop guard does not release it.
+    for (event, payload) in [
+        ("stop", json!({})),
+        ("stop", json!({"stop_hook_active":true})),
+        ("post-edit", edit("Write", "a.py")),
+    ] {
+        let error = String::from_utf8(hook(root, event, &payload, 2)).unwrap();
+        assert!(error.starts_with("blackhole: blackhole.toml:"), "{event}");
+        assert_eq!(error.lines().count(), 1);
+    }
 }
 
 #[test]
@@ -272,11 +280,27 @@ fn blocking_hooks_block_when_git_reports_the_wrong_checkout_root() {
         &["config", "core.worktree", outside.path().to_str().unwrap()],
     )
     .unwrap();
-    for (event, payload) in [("stop", json!({})), ("pre-edit", edit("Write", "a.py"))] {
+    for (event, payload) in [
+        ("stop", json!({})),
+        ("stop", json!({"stop_hook_active":false})),
+        ("pre-edit", edit("Write", "a.py")),
+        ("post-edit", edit("Write", "a.py")),
+    ] {
         let error = String::from_utf8(hook(root, event, &payload, 2)).unwrap();
-        assert!(error.contains("checkout root mismatch"), "{event}: {error}");
+        assert_eq!(
+            error, "blackhole: no verdict: checkout root mismatch\n",
+            "{event}"
+        );
         assert_ne!(hook(outside.path(), event, &payload, 1), b"");
     }
+    // Claude and Codex set this flag when a stop hook already continued the turn, so an outage cannot loop forever.
+    let released =
+        String::from_utf8(hook(root, "stop", &json!({"stop_hook_active":true}), 0)).unwrap();
+    assert!(
+        released.starts_with("blackhole: no verdict: checkout root mismatch;"),
+        "{released}"
+    );
+    assert_eq!(released.lines().count(), 1);
 }
 
 #[cfg(unix)]
@@ -1053,5 +1077,6 @@ fn post_edit_validates_targets_before_listing() {
     let outside = edit("Write", "../outside.py");
     assert_eq!(hook(root, "post-edit", &outside, 0), b"");
     fs::write(root.join("blackhole.toml"), "broken = [").unwrap();
-    hook(root, "post-edit", &outside, 1);
+    let broken = hook(root, "post-edit", &outside, 2);
+    assert!(broken.starts_with(b"blackhole: blackhole.toml:"));
 }
