@@ -309,34 +309,71 @@ fn no_verdict_in_time_is_a_timeout() {
 #[test]
 fn an_interrupted_canary_still_cleans_up() {
     let adopter = adopted();
+    let out = interrupt(&adopter);
+    assert_eq!(out.stderr, b"", "{out:?}");
+    assert_cleaned(&adopter.fake);
+}
+
+#[test]
+fn cleanup_reports_failure_after_the_parent_is_interrupted() {
+    let adopter = adopted();
+    adopter
+        .fake
+        .fail("DELETE", REF, 1, "raw cleanup error\nmore details\n");
+    let out = interrupt(&adopter);
+    let branch = assert_cleaned(&adopter.fake);
+    assert_cleanup_error(&out, &branch);
+}
+
+fn assert_cleanup_error(out: &Output, branch: &str) {
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "blackhole: cleanup failed; close the canary pull request and delete branch {branch} by hand\n"
+        )
+    );
+}
+
+fn interrupt(adopter: &Adopter) -> Output {
     adopter
         .fake
         .respond("GET", CHECKS, 200, &[], br#"{"check_runs":[]}"#);
-    let mut child = command(
+    let child = command(
         &adopter.root,
         &adopter.fake,
         &["canary", "--timeout", "600"],
     )
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .spawn()
     .unwrap();
-    let waiting = |predicate: &dyn Fn(&[String]) -> bool| {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while !predicate(&adopter.fake.calls()) {
-            assert!(Instant::now() < deadline, "{:#?}", adopter.fake.calls());
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
-    waiting(&|calls| calls.iter().any(|call| call.contains("check-runs")));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !adopter
+        .fake
+        .calls()
+        .iter()
+        .any(|call| call.contains("check-runs"))
+    {
+        assert!(Instant::now() < deadline, "{:#?}", adopter.fake.calls());
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let status = Command::new("kill")
         .args(["-INT", &child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(!child.wait().unwrap().success());
-    waiting(&|calls| calls.iter().any(|call| call.contains("--method DELETE")));
-    assert_cleaned(&adopter.fake);
+    let out = child.wait_with_output().unwrap();
+    assert!(!out.status.success());
+    while !adopter
+        .fake
+        .calls()
+        .iter()
+        .any(|call| call.contains("--method DELETE"))
+    {
+        assert!(Instant::now() < deadline, "{:#?}", adopter.fake.calls());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    out
 }
 
 #[test]
@@ -391,10 +428,7 @@ fn a_422_delete_requires_confirming_the_ref_is_absent() {
     let out = run(&adopter.root, &adopter.fake, &["canary"]);
     let branch = assert_cleaned(&adopter.fake);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains(&format!("delete branch {branch} by hand")),
-        "{out:?}"
-    );
+    assert_cleanup_error(&out, &branch);
 }
 
 #[test]
@@ -411,10 +445,7 @@ fn a_closed_stdout_cannot_hide_the_cleanup_failure() {
     let out = child.wait_with_output().unwrap();
     let branch = assert_cleaned(&adopter.fake);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains(&format!("delete branch {branch} by hand")),
-        "{out:?}"
-    );
+    assert_cleanup_error(&out, &branch);
 }
 
 #[test]

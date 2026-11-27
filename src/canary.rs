@@ -21,19 +21,23 @@ const MARK: &str = "# blackhole canary forgery\n";
 const FINDING: &str = "blackhole-canary-finding.py";
 // Runs in its own process group with the canary's end of the pipe as input, so it cleans up after an interrupt too.
 const CLEANUP: &str = r#"branch=
-while read -r kind; do
-  [ "$kind" != branch ] || branch=1
+error=
+while IFS= read -r note; do
+  case "$note" in
+    branch) branch=1 ;;
+    error\ *) error="${note#error }; " ;;
+  esac
 done
 [ -n "$branch" ] || exit 0
 status=0
-prs=$(gh api --hostname "$1" --method GET --paginate --jq '.[].number' "repos/$2/pulls?head=${2%%/*}:$3&state=open") || status=1
+prs=$(gh api --hostname "$1" --method GET --paginate --jq '.[].number' "repos/$2/pulls?head=${2%%/*}:$3&state=open" 2>/dev/null) || status=1
 for pr in $prs; do
-  gh api --hostname "$1" --method PATCH -f state=closed "repos/$2/pulls/$pr" >/dev/null || status=1
+  gh api --hostname "$1" --method PATCH -f state=closed "repos/$2/pulls/$pr" >/dev/null 2>&1 || status=1
 done
-if ! response=$(gh api --hostname "$1" --method DELETE -i "repos/$2/git/refs/heads/$3"); then
+if ! response=$(gh api --hostname "$1" --method DELETE -i "repos/$2/git/refs/heads/$3" 2>/dev/null); then
   case "$(printf '%s\n' "$response" | head -n 1) " in
     HTTP/*" 404 "*|HTTP/*" 422 "*)
-      response=$(gh api --hostname "$1" --method GET -i "repos/$2/git/ref/heads/$3")
+      response=$(gh api --hostname "$1" --method GET -i "repos/$2/git/ref/heads/$3" 2>/dev/null)
       case "$(printf '%s\n' "$response" | head -n 1) " in
         HTTP/*" 404 "*) ;;
         *) status=1 ;;
@@ -41,6 +45,9 @@ if ! response=$(gh api --hostname "$1" --method DELETE -i "repos/$2/git/refs/hea
       ;;
     *) status=1 ;;
   esac
+fi
+if [ "$status" -ne 0 ]; then
+  printf 'blackhole: %scleanup failed; close the canary pull request and delete branch %s by hand\n' "$error" "$3" >&2
 fi
 exit "$status""#;
 
@@ -435,7 +442,7 @@ fn cleanup_process(repo: &Repo, branch: &str) -> io::Result<Child> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command.spawn()
@@ -503,21 +510,19 @@ pub fn run(timeout: Duration, out: &mut impl Write) -> io::Result<u8> {
         let outcome = run.judge(&head, list.len() + 1)?;
         Ok::<_, io::Error>((refused, outcome))
     })();
+    let notice = result.as_ref().err().map_or(Ok(()), |error| {
+        writeln!(pipe, "error {}", crate::diagnostic_text(&error.to_string()))
+    });
     drop(pipe);
     let status = cleaner.wait()?;
-    let manual = format!("close the canary pull request and delete branch {branch} by hand");
-    let (refused, outcome) = result.map_err(|e| {
-        if status.success() {
-            e
-        } else {
-            io::Error::other(format!("{e}; cleanup failed, {manual}"))
-        }
-    })?;
     if !status.success() {
-        let _ = writeln!(io::stderr().lock(), "blackhole: cleanup failed; {manual}");
-        let _ = report(out, &list, &workflow, refused, &outcome);
+        if let Ok((refused, outcome)) = result {
+            let _ = report(out, &list, &workflow, refused, &outcome);
+        }
         return Ok(2);
     }
+    let (refused, outcome) = result?;
+    notice?;
     let code = report(out, &list, &workflow, refused, &outcome)?;
     writeln!(
         out,
